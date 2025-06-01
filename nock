@@ -7,10 +7,6 @@
 # 多线程配置、启动、停止和日志查看。
 # 移除了命令行一键模式，专注于提供更清晰的交互流程。
 # 对多线程挖矿配置和日志查看进行了优化。
-# 作者: K2 节点教程分享 (基于原脚本优化)
-# Telegram: https://t.me/+EaCiFDOghoM3Yzll
-# Twitter:  https://x.com/BtcK241918
-# ===================================================
 
 # Enable strict mode: Exit on error, exit on unset variable, pipefail
 # 注意: 在交互式脚本中，某些错误可能不希望直接退出，
