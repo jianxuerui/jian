@@ -37,11 +37,6 @@ function show_banner() {
   echo "==============================================="
   echo "         Nockchain 安装助手 / Setup Tool"
   echo "==============================================="
-  echo -e "${RESET}"
-  echo "📌 作者: K2 节点教程分享 (Interactive Version)"
-  echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
-  echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "-----------------------------------------------"
   echo -e "${YELLOW}👋 欢迎使用交互式 Nockchain 管理脚本 👋${RESET}"
   echo ""
 }
