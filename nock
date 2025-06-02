@@ -7,6 +7,7 @@
 # 多线程配置、启动、停止和日志查看。
 # 移除了命令行一键模式，专注于提供更清晰的交互流程。
 # 对多线程挖矿配置、节点自动重启和日志查看进行了优化。
+# 增强了构建失败时的错误提示，指引用户查看详细信息。
 
 # Enable strict mode: Exit on error, exit on unset variable, pipefail
 # 注意: 在交互式脚本中，某些错误可能不希望直接退出，
@@ -120,7 +121,7 @@ function get_env() {
   fi
 }
 
-# 获取系统核心数，失败默认1
+# 获取系统核心数, 失败默认1
 function get_num_cores() {
     nproc 2>/dev/null || { echo 1; echo -e "${YELLOW}警告: nproc 命令未找到，使用默认核心数 1. ${RESET}" >&2; }
 }
@@ -181,8 +182,6 @@ function setup_all() {
     git pull || { echo -e "${RED}[-] 错误: git pull 失败${RESET}"; pause_and_return; return 1; }
   else
     echo -e "${YELLOW}[*] 克隆新仓库到 $NCK_DIR...${RESET}"
-    # Use --depth 1 for faster cloning if bandwidth is limited, but full history is generally safer.
-    # Let's stick to full clone for now.
     git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" || { echo -e "${RED}[-] 错误: git clone 失败${RESET}"; pause_and_return; return 1; }
     cd_nck_dir || { pause_and_return; return 1; }
   fi
@@ -295,14 +294,45 @@ function setup_all() {
   cd_nck_dir || { pause_and_return; return 1; }
   # Clean before installing hoonc just in case
   make clean-hoonc || true # Don't fail if clean fails
-  make install-hoonc || { echo -e "${RED}[-] 错误: make install-hoonc 失败${RESET}"; pause_and_return; return 1; }
+
+  # Execute make install-hoonc and capture status
+  make install-hoonc
+  local status=$? # Capture the exit status
+  if [[ $status -ne 0 ]]; then
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}         ❌ 编译失败: hoonc ❌         ${RESET}"
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}[-] 错误: 'make install-hoonc' 命令执行失败，退出状态码: $status${RESET}"
+      echo ""
+      echo -e "${YELLOW}请向上滚动查看详细的编译错误信息。${RESET}"
+      echo -e "${YELLOW}您也可以尝试手动进入目录 '${CYAN}$NCK_DIR${YELLOW}' 并运行 '${CYAN}make install-hoonc${YELLOW}' 来直接查看错误。${RESET}"
+      pause_and_return
+      return 1
+  fi
+  # If make install-hoonc succeeded, continue...
   echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
 
+
   # --- START OF MODIFIED SECTION ---
-  echo -e "${CYAN}[*] 编译 Nockchain (使用 $(get_num_cores) 核心: make install -j $(get_num_cores))...${RESET}"
+  echo -e "${CYAN}[*] 编译 Nockchain 节点 (使用 $(get_num_cores) 核心: make install -j $(get_num_cores))...${RESET}"
   cd_nck_dir || { pause_and_return; return 1; }
-  # Use make install which invokes cargo build --release
-  make install -j $(get_num_cores) || { echo -e "${RED}[-] 错误: make install 失败${RESET}"; pause_and_return; return 1; }
+
+  # Execute make install and capture status
+  make install -j $(get_num_cores)
+  local status=$? # Capture the exit status
+  if [[ $status -ne 0 ]]; then
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}         ❌ 编译失败: Nockchain 节点 ❌         ${RESET}"
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}[-] 错误: 'make install' 命令执行失败，退出状态码: $status${RESET}"
+      echo ""
+      echo -e "${YELLOW}请向上滚动查看详细的编译错误信息 (通常是红色的文本)。${RESET}"
+      echo -e "${YELLOW}常见的错误原因包括缺少系统依赖 (如 clang, libssl-dev 等)、Rust 版本问题或代码本身的问题。${RESET}"
+      echo -e "${YELLOW}您也可以尝试手动进入目录 '${CYAN}$NCK_DIR${YELLOW}' 并运行 '${CYAN}cargo build --release${YELLOW}' 来直接查看错误。${RESET}"
+      pause_and_return
+      return 1
+  fi
+  # If make install succeeded, continue...
   echo -e "${GREEN}[+] Nockchain (release) 编译完成${RESET}"
   # The node executable is now built at target/release/nockchain
   echo -e "${YELLOW}节点可执行文件位于 $NCK_DIR/target/release/nockchain${RESET}"
@@ -311,12 +341,25 @@ function setup_all() {
 
   echo -e "${CYAN}[*] 安装钱包...${RESET}"
   cd_nck_dir || { pause_and_return; return 1; }
-  # Compile wallet in release mode too
-  make install-nockchain-wallet-release || { echo -e "${RED}[-] 错误: make install-nockchain-wallet-release 失败${RESET}"; pause_and_return; return 1; }
+
+  # Execute make install-nockchain-wallet-release and capture status
+  make install-nockchain-wallet-release
+  local status=$? # Capture the exit status
+  if [[ $status -ne 0 ]]; then
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}         ❌ 编译失败: 钱包 ❌         ${RESET}"
+      echo -e "${RED}===============================================${RESET}"
+      echo -e "${RED}[-] 错误: 'make install-nockchain-wallet-release' 命令执行失败，退出状态码: $status${RESET}"
+      echo ""
+      echo -e "${YELLOW}请向上滚动查看详细的编译错误信息。${RESET}"
+      echo -e "${YELLOW}您也可以尝试手动进入目录 '${CYAN}$NCK_DIR${YELLOW}' 并运行 '${CYAN}cargo build --release --bin nockchain-wallet${YELLOW}' 来直接查看错误。${RESET}"
+      pause_and_return
+      return 1
+  fi
+  # If make install-nockchain-wallet-release succeeded, continue...
   echo -e "${GREEN}[+] 钱包安装完成${RESET}"
   echo -e "${YELLOW}钱包可执行文件位于 $NCK_DIR/target/release/nockchain-wallet${RESET}"
 
-  # Node executable is already built by make install
 
   # Create log directory if it doesn't exist - still useful for potential symlinks or future features
   mkdir -p "$LOG_DIR" || { echo -e "${RED}[-] 错误: 创建日志目录失败 $LOG_DIR${RESET}"; pause_and_return; return 1; }
@@ -431,6 +474,7 @@ function export_keys() {
       echo -e "${YELLOW}请务必备份此文件到安全位置！${RESET}"
   else
       echo -e "${RED}[-] 密钥导出失败${RESET}"
+  end_of_export_keys: # Label for potential jump (not used here, but good practice to remember)
   fi
 
   pause_and_return
@@ -591,6 +635,7 @@ function start_node() {
 
   # Construct the command to run inside screen
   # Source .env, export MINING vars, then run node in a while loop with a delay, piping output to tee for logging.
+  # Changed path to nockchain executable to be relative to $NCK_DIR
   local screen_cmd_with_log="cd \"$NCK_DIR\" && \
 source \"$ENV_FILE\" 2>/dev/null; \
 export MINING_PUBKEY=\"$mining_pubkey\"; \
@@ -598,14 +643,17 @@ export MINING_THREADS=\"$mining_threads\"; \
 echo -e \"${GREEN}>>> Nockchain Miner starting (PID \$\$), logging to $LOG_FILE_FRIENDLY...${RESET}\"; \
 while true; do \
   echo -e \"\n${YELLOW}>>> $(date '+%Y-%m-%d %H:%M:%S') - Starting miner instance...${RESET}\" | tee -a \"$LOG_FILE_FRIENDLY\"; \
-  # Use exec to replace the current shell process with the miner for simpler process management, but tee is still needed
-  # The loop structure requires the shell process to remain to handle the sleep and next iteration. So exec is NOT used here.
-  ./target/release/nockchain --threads \"\$MINING_THREADS\" 2>&1 | tee -a \"$LOG_FILE_FRIENDLY\"; \
+  # The loop structure requires the shell process to remain to handle the sleep and next iteration.
+  \"$NCK_DIR/target/release/nockchain\" --threads \"\$MINING_THREADS\" 2>&1 | tee -a \"$LOG_FILE_FRIENDLY\"; \
   echo -e \"\n${RED}>>> $(date '+%Y-%m-%d %H:%M:%S') - Miner exited with status \$?. Restarting in 10 seconds...${RESET}\" | tee -a \"$LOG_FILE_FRIENDLY\"; \
   sleep 10; \
 done"
 
   # Start new screen session
+  # Use -L to automatically log screen output to screenlog.0, which is in NCK_DIR
+  # This is redundant with tee, but can be a fallback. Let's rely on tee for our LOG_FILE_FRIENDLY.
+  # screen -dmSL nockchain bash -c "$screen_cmd_with_log"
+  # Just use -dmS
   screen -dmS nockchain bash -c "$screen_cmd_with_log"
 
 
@@ -632,7 +680,7 @@ done"
     echo -e "${RED}         ❌ 节点启动失败 ❌         ${RESET}"
     echo -e "${RED}===============================================${RESET}"
     echo -e "请尝试查看日志文件 ${CYAN}$LOG_FILE_FRIENDLY${RESET} 或手动运行命令进行调试:"
-    echo -e "${YELLOW}  cd $NCK_DIR && source \"$ENV_FILE\" && export MINING_PUBKEY=\"$mining_pubkey\" && export MINING_THREADS=\"$mining_threads\" && ./target/release/nockchain --threads \"\$MINING_THREADS\"${RESET}"
+    echo -e "${YELLOW}  cd $NCK_DIR && source \"$ENV_FILE\" && export MINING_PUBKEY=\"$mining_pubkey\" && export MINING_THREADS=\"$mining_threads\" && \"$NCK_DIR/target/release/nockchain\" --threads \"\$MINING_THREADS\"${RESET}"
     # Attempt to show any output from the screen session if it exited quickly
     if [[ -f "$LOG_FILE_FRIENDLY" ]]; then
         echo -e "${YELLOW}--- 最近的日志文件内容 ($LOG_FILE_FRIENDLY) ---${RESET}"
@@ -651,16 +699,16 @@ function view_screen_logs() {
   echo -e "${CYAN}[*] 查看 screen 会话 'nockchain' 的实时输出 (进入会话)...${RESET}"
   if screen -list | grep -qw "nockchain"; then
     echo -e "${YELLOW}[!] 正在进入 screen 会话。在会话中按 '${BOLD}Ctrl+A 然后按 D${RESET}${YELLOW}' 可退出 screen 会话并保持节点运行。${RESET}"
-    echo -e "${YELLOW}[!] 按 '${BOLD}Ctrl+C${RESET}${YELLOW}' 将尝试停止节点进程 (但由于自动重启可能会立即重启)。${RESET}"
+    echo -e "${YELLOW}[!] 按 '${BOLD}Ctrl+C${RESET}${YELLOW}' 将尝试停止当前节点进程 (但由于自动重启可能会立即重启)。${RESET}"
     # Attempt to attach to screen session
     # Check if screen is already attached to avoid "Cannot attach to a detached screen session"
-    if screen -list | grep -q "nockchain[[:space:]]*(" ; then # Matches "(Attached)" or "(Detached)" - only need (Detached)
-         echo -e "${YELLOW}[*] Screen 会话 'nockchain' 当前未附加，尝试进入...${RESET}"
-         screen -r nockchain || echo -e "${RED}[-] 无法附加到 screen 会话。可能是权限问题、会话状态异常或会话已退出。${RESET}"
-    else
-         echo -e "${YELLOW}[*] Screen 会话 'nockchain' 当前已附加，请从该终端查看。${RESET}"
-         echo -e "${YELLOW}如果无法进入，请尝试 'screen -d -r nockchain' 来强制分离并重新附加。${RESET}"
-    fi
+    # screen -list output is like "ID.sessionname (status)" e.g., "1234.nockchain (Detached)" or "5678.nockchain (Attached)"
+    # We want to attach if it's Detached or just exists.
+    # The `screen -r` command itself handles both cases (attaching if detached, or showing message if attached).
+    # Let's simplify the check to just if the session name exists, and rely on `screen -r` to do the right thing.
+    # If it's attached elsewhere, `screen -r` will tell the user.
+    screen -r nockchain || echo -e "${RED}[-] 无法附加到 screen 会话 'nockchain'。可能是权限问题、会话状态异常或会话已退出。${RESET}"
+
   else
     echo -e "${RED}[-] 节点未在 screen 会话 'nockchain' 中运行。请先启动节点 (选项 7)。${RESET}"
   fi
@@ -675,6 +723,8 @@ function view_log_file() {
 
     # Start tailing, handle potential errors like file not found initially
     # Use || true so that if tail fails (e.g. file doesn't exist yet), the script doesn't exit due to set -e
+    # Add a brief sleep before tailing in case the file creation is slightly delayed after mkdir
+    sleep 1
     tail -f "$LOG_FILE_FRIENDLY" || {
         echo -e "${RED}[-] tail -f 命令失败。请确保节点已经运行过 (选项 7) 且日志文件 '$LOG_FILE_FRIENDLY' 存在。${RESET}"
         echo -e "${YELLOW}尝试手动查看: less '$LOG_FILE_FRIENDLY'${RESET}"
@@ -690,9 +740,10 @@ function filter_log_file() {
          return 1
     fi
 
-    echo -e "${YELLOW}正在搜索包含 'Found block' 或 'Mined block' 的日志行...${RESET}"
+    echo -e "${YELLOW}正在搜索包含 'Found block' 或 'Mined block' 或 'Successfully mined block' 的日志行...${RESET}"
     echo "-----------------------------------------------"
-    grep -E "Found block|Mined block|Successfully mined block" "$LOG_FILE_FRIENDLY" || echo -e "${YELLOW}未找到相关信息。${RESET}"
+    # Use egrep for extended regex (allowing | for OR) and --color=auto for highlighting
+    egrep --color=auto "Found block|Mined block|Successfully mined block" "$LOG_FILE_FRIENDLY" || echo -e "${YELLOW}未找到相关信息。${RESET}"
     echo "-----------------------------------------------"
     echo -e "${YELLOW}注意: Nockchain 的日志输出可能会因版本而异，请根据实际情况调整搜索关键词。${RESET}"
 
@@ -701,7 +752,8 @@ function filter_log_file() {
         read -p "请输入要搜索的关键词: " keyword
         if [[ -n "$keyword" ]]; then
             echo "-----------------------------------------------"
-            grep -i "$keyword" "$LOG_FILE_FRIENDLY" || echo -e "${YELLOW}未找到包含 '$keyword' 的信息。${RESET}"
+            # Use grep -i for case-insensitive search
+            grep -i --color=auto "$keyword" "$LOG_FILE_FRIENDLY" || echo -e "${YELLOW}未找到包含 '$keyword' 的信息。${RESET}"
              echo "-----------------------------------------------"
         else
              echo -e "${YELLOW}[*] 未输入关键词，取消搜索。${RESET}"
@@ -765,7 +817,7 @@ function main_menu() {
     echo -e "  ${CYAN}7) 启动节点 (在 screen 后台运行，带自动重启)${RESET}"
     echo -e "  ${CYAN}8) 查看节点 screen 实时输出 (进入会话)${RESET}"
     echo -e "  ${CYAN}9) 实时跟踪节点日志文件 (tail -f ${LOG_FILE_FRIENDLY})${RESET}"
-    echo -e "  ${CYAN}11) 过滤日志查看区块发现信息${RESET}" # Added log filtering
+    echo -e "  ${CYAN}11) 过滤日志查看区块发现信息${RESET}"
     echo -e "  ${RED}10) 停止节点 screen 会话${RESET}"
     echo -e "  -----------------------------------------------"
     echo -e "  ${RED}0) 退出脚本${RESET}"
