@@ -298,13 +298,15 @@ function setup_all() {
   make install-hoonc || { echo -e "${RED}[-] 错误: make install-hoonc 失败${RESET}"; pause_and_return; return 1; }
   echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
 
-  echo -e "${CYAN}[*] 编译 Nockchain (使用 $(get_num_cores) 核心: make -j $(get_num_cores))...${RESET}"
+  # --- START OF MODIFIED SECTION ---
+  echo -e "${CYAN}[*] 编译 Nockchain (使用 $(get_num_cores) 核心: make install -j $(get_num_cores))...${RESET}"
   cd_nck_dir || { pause_and_return; return 1; }
-  # Use make -j for faster compilation
-  # Also compile in release mode for performance
-  make build-release -j $(get_num_cores) || { echo -e "${RED}[-] 错误: make build-release 失败${RESET}"; pause_and_return; return 1; }
+  # Use make install which invokes cargo build --release
+  make install -j $(get_num_cores) || { echo -e "${RED}[-] 错误: make install 失败${RESET}"; pause_and_return; return 1; }
   echo -e "${GREEN}[+] Nockchain (release) 编译完成${RESET}"
+  # The node executable is now built at target/release/nockchain
   echo -e "${YELLOW}节点可执行文件位于 $NCK_DIR/target/release/nockchain${RESET}"
+  # --- END OF MODIFIED SECTION ---
 
 
   echo -e "${CYAN}[*] 安装钱包...${RESET}"
@@ -314,13 +316,11 @@ function setup_all() {
   echo -e "${GREEN}[+] 钱包安装完成${RESET}"
   echo -e "${YELLOW}钱包可执行文件位于 $NCK_DIR/target/release/nockchain-wallet${RESET}"
 
-  # Node executable is already built by build-release
+  # Node executable is already built by make install
 
   # Create log directory if it doesn't exist - still useful for potential symlinks or future features
   mkdir -p "$LOG_DIR" || { echo -e "${RED}[-] 错误: 创建日志目录失败 $LOG_DIR${RESET}"; pause_and_return; return 1; }
   echo -e "${GREEN}[+] 日志目录准备就绪: $LOG_DIR${RESET}"
-  # Create a symlink for user convenience? screen log file is hardcoded name.
-  # It's simpler to just tell the user where screen puts the log.
 
 
   echo -e "${GREEN}===============================================${RESET}"
@@ -552,8 +552,7 @@ function start_node() {
   echo -e "${CYAN}[*] 使用以下参数启动节点:${RESET}"
   echo -e "  MINING_PUBKEY: ${YELLOW}$mining_pubkey${RESET}"
   echo -e "  THREADS:       ${YELLOW}$mining_threads${RESET}"
-  echo -e "  Log File (via screen): ${CYAN}$LOG_FILE_SCREEN_DEFAULT${RESET}"
-  echo -e "    (Note: The primary log is written by screen to the file above.)${RESET}"
+  echo -e "  Log File:      ${CYAN}$LOG_FILE_FRIENDLY${RESET}"
 
 
   # Check and terminate old screen session
@@ -579,41 +578,6 @@ function start_node() {
   # Create log directory if it doesn't exist - still useful for potential symlinks or future features
   mkdir -p "$LOG_DIR" || { echo -e "${RED}[-] 错误: 创建日志目录失败 $LOG_DIR${RESET}"; pause_and_return; return 1; }
 
-  # screen -L logs to screenlog.0 in the *starting* directory.
-  # We are starting screen in $NCK_DIR.
-  # Check if the default screen log file exists and is old. We don't want to clear it on *every* restart *by the loop*,
-  # but clearing it on a *manual* start via this script is usually desired.
-  # We'll rely on `screen -L` handling file creation/appending.
-
-  echo -e "${CYAN}[*] 启动新的 screen 会话 'nockchain'...${RESET}"
-  echo -e "${YELLOW}日志将被记录到 $LOG_FILE_SCREEN_DEFAULT${RESET}"
-
-  # Construct the command to run inside screen
-  # Source .env, export MINING vars, then run node in a while loop with a delay.
-  # `exec` is removed from inside the loop so the shell process remains to handle the loop/sleep.
-  local screen_cmd="cd \"$NCK_DIR\" && \
-source \"$ENV_FILE\" 2>/dev/null; \
-export MINING_PUBKEY=\"$mining_pubkey\"; \
-export MINING_THREADS=\"$mining_threads\"; \
-echo -e \"${GREEN}>>> Nockchain Miner starting (PID \$\$)...${RESET}\"; \
-while true; do \
-  echo -e \"\n${YELLOW}>>> $(date '+%Y-%m-%d %H:%M:%S') - Starting miner instance...${RESET}\"; \
-  ./target/release/nockchain --threads \"\$MINING_THREADS\"; \
-  echo -e \"\n${RED}>>> $(date '+%Y-%m-%d %H:%M:%S') - Miner exited with status \$?. Restarting in 10 seconds...${RESET}\"; \
-  sleep 10; \
-done"
-
-
-  # Start new screen session with logging enabled
-  # screen -dmSL <logfile> <session_name> <command>
-  # Note: -S must come AFTER -L and -Logfile if used together. Let's just use -dmS nockchain and let command handle output
-  # Wait, the screen -L option IS designed for this. Let's use that.
-  # Using -L logs everything printed *to the screen window*.
-  # The miner output goes to stdout/stderr. screen -L captures this.
-  # screen -dmSL "$NCK_DIR/screenlog.0" nockchain bash -c "$screen_cmd"
-
-  # Let's try a different approach for logging robustly within the loop and file naming control.
-  # Use tee -a inside the loop to append to the log file we want.
   # Clear the log file ONCE before the screen session starts.
   if [[ -f "$LOG_FILE_FRIENDLY" ]]; then
       echo -e "${YELLOW}[*] 清除旧日志文件 $LOG_FILE_FRIENDLY ...${RESET}"
@@ -621,10 +585,12 @@ done"
       echo -n > "$LOG_FILE_FRIENDLY"
   fi
 
-  # Ensure the directory exists before tee tries to write
+  # Ensure the directory exists before tee tries to write (redundant check but harmless)
   mkdir -p "$(dirname "$LOG_FILE_FRIENDLY")" || { echo -e "${RED}[-] 错误: 创建日志目录失败 $LOG_DIR${RESET}"; pause_and_return; return 1; }
 
 
+  # Construct the command to run inside screen
+  # Source .env, export MINING vars, then run node in a while loop with a delay, piping output to tee for logging.
   local screen_cmd_with_log="cd \"$NCK_DIR\" && \
 source \"$ENV_FILE\" 2>/dev/null; \
 export MINING_PUBKEY=\"$mining_pubkey\"; \
@@ -632,6 +598,8 @@ export MINING_THREADS=\"$mining_threads\"; \
 echo -e \"${GREEN}>>> Nockchain Miner starting (PID \$\$), logging to $LOG_FILE_FRIENDLY...${RESET}\"; \
 while true; do \
   echo -e \"\n${YELLOW}>>> $(date '+%Y-%m-%d %H:%M:%S') - Starting miner instance...${RESET}\" | tee -a \"$LOG_FILE_FRIENDLY\"; \
+  # Use exec to replace the current shell process with the miner for simpler process management, but tee is still needed
+  # The loop structure requires the shell process to remain to handle the sleep and next iteration. So exec is NOT used here.
   ./target/release/nockchain --threads \"\$MINING_THREADS\" 2>&1 | tee -a \"$LOG_FILE_FRIENDLY\"; \
   echo -e \"\n${RED}>>> $(date '+%Y-%m-%d %H:%M:%S') - Miner exited with status \$?. Restarting in 10 seconds...${RESET}\" | tee -a \"$LOG_FILE_FRIENDLY\"; \
   sleep 10; \
@@ -655,9 +623,9 @@ done"
     echo ""
     echo -e "${YELLOW}重要提示:${RESET}"
     echo -e "  - 使用 '${CYAN}screen -r nockchain${RESET}' 进入会话查看实时输出。"
-    echo -e "    会话内按 '${YELLOW}Ctrl+A 然后按 D${RESET}' 可退出 screen 会话并保持节点运行。"
+    echo -e "    会话内按 '${YELLOW}Ctrl+A 然后按 D${RESET}${YELLOW}' 可退出 screen 会话并保持节点运行。"
     echo -e "  - 日志文件路径: ${CYAN}$LOG_FILE_FRIENDLY${RESET}"
-    echo -e "  - 使用选项 ${YELLOW}9) 查看节点日志文件${RESET} 来实时跟踪日志 (推荐，更方便)。"
+    echo -e "  - 使用选项 ${YELLOW}9) 实时跟踪节点日志文件${RESET} 来实时跟踪日志 (推荐，更方便)。"
     echo -e "  - 使用选项 ${YELLOW}11) 过滤日志查看区块信息${RESET} 快速检查是否挖到区块。"
   else
     echo -e "${RED}===============================================${RESET}"
