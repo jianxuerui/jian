@@ -805,7 +805,7 @@ function setup_sccache() {
             else
                 # Append the variable setting
                 echo "$SCCACHE_ENV_VAR" >> "$RC_FILE"
-                echo -e "${GREEN}[+] 已将 '$SCCACHE_ENV_VAR' 添加到 $RC_FILE${RESET}"
+                echo -e "${GREEN}[+] 已将 '$SCCACHE_ENV_VAR' 添加到 ${RC_FILE} (文件已创建)。${RESET}"
             fi
         fi
     else
