@@ -12,13 +12,14 @@ RED='\033[0;31m'
 # ========= 项目路径 =========
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
+SERVICE_FILE="/etc/systemd/system/nockchain-miner.service"
 
 # ========= 横幅 =========
 function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain 安装助手 / Setup Tool"
+  echo "         Nockchain 安装/管理助手"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
@@ -36,10 +37,11 @@ function show_banner() {
 # 切换到项目目录
 function cd_nck_dir() {
   if [ -d "$NCK_DIR" ]; then
-    cd "$NCK_DIR" || { echo -e "${RED}[-] 错误: 无法进入项目目录: $NCK_DIR${RESET}"; exit 1; }
+    cd "$NCK_DIR" || { echo -e "${RED}[-] 错误: 无法进入项目目录: $NCK_DIR${RESET}"; return 1; } # Use return instead of exit
+    return 0
   else
     echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
-    exit 1
+    return 1 # Indicate failure
   fi
 }
 
@@ -126,12 +128,12 @@ function run_with_retries() {
 
 # ========= 主功能函数 =========
 
-# 1) 一键安装并构建
+# 1) 一键安装并构建 (首次安装或完整重装)
 function setup_all() {
   show_banner # Refresh banner
-  echo -e "${BLUE}[*] 开始一键安装并构建...${RESET}"
+  echo -e "${BLUE}[*] 开始一键安装并构建 (首次安装或完整重装)...${RESET}"
   echo -e "${YELLOW}[!] 提示: Rust 编译时间可能较长，特别是首次编译。${RESET}"
-  echo -e "${YELLOW}[!] 推荐使用选项 10 安装并配置 sccache 以加速后续编译。${RESET}"
+  echo -e "${YELLOW}[!] 推荐使用选项 11 安装并配置 sccache 以加速后续编译。${RESET}"
 
 
   # 检查网络
@@ -141,7 +143,6 @@ function setup_all() {
   fi
 
   echo -e "[*] 安装系统依赖..."
-  # Using run_with_retries for apt commands
   if ! run_with_retries "sudo apt update && sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen"; then
     echo -e "${RED}[-] 系统依赖安装失败${RESET}"
     pause_and_return
@@ -151,25 +152,30 @@ function setup_all() {
 
   echo -e "[*] 安装 Rust..."
   if ! command -v cargo &>/dev/null; then
-    # Using run_with_retries for curl | sh
     if ! run_with_retries "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"; then
        echo -e "${RED}[-] Rust 安装失败${RESET}"
        pause_and_return
        return
     fi
+    # Source .cargo/env immediately for the current session
     source "$HOME/.cargo/env"
+    # Add to shell rc file if not present
     RC_FILE="$HOME/.bashrc"
     [[ "$SHELL" == *"zsh"* ]] && RC_FILE="$HOME/.zshrc"
-    if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$RC_FILE"; then
-      echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$RC_FILE"
-      echo -e "${GREEN}[+] Rust PATH 添加到 $RC_FILE${RESET}"
+    # Note: fish shell needs manual config
+    if [[ ! "$SHELL" == *"fish"* ]]; then
+      if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$RC_FILE"; then
+        echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$RC_FILE"
+        echo -e "${GREEN}[+] Rust PATH 添加到 $RC_FILE${RESET}"
+      fi
+    else
+        echo -e "${YELLOW}[!] 您使用的是 fish shell. 请手动将 '~/.cargo/bin' 添加到您的 PATH 环境变量。${RESET}"
     fi
-    # Ensure path is updated for the current session
-    export PATH="$HOME/.cargo/bin:$PATH"
     echo -e "${GREEN}[+] Rust 安装完成${RESET}"
   else
       echo -e "${YELLOW}[*] Rust 已安装，跳过安装步骤。${RESET}"
-      source "$HOME/.cargo/env" # Ensure path is sourced
+      # Ensure path is updated for the current session, assuming standard setup
+      source "$HOME/.cargo/env"
   fi
   echo -e "${GREEN}[+] Rust 安装/配置完成${RESET}"
 
@@ -177,7 +183,7 @@ function setup_all() {
   echo -e "[*] 获取或更新仓库..."
   if [ -d "$NCK_DIR" ]; then
     echo -e "[*] 项目目录已存在，进行 git pull..."
-    cd_nck_dir
+    if ! cd_nck_dir; then pause_and_return; return; fi # Check if cd was successful
     if ! run_with_retries "git pull"; then
         echo -e "${RED}[-] git pull 失败${RESET}"
         pause_and_return
@@ -185,13 +191,12 @@ function setup_all() {
     fi
   else
     echo -e "[*] 克隆项目仓库..."
-    # Using run_with_retries for git clone
     if ! run_with_retries "git clone https://github.com/zorp-corp/nockchain \"$NCK_DIR\""; then
         echo -e "${RED}[-] git clone 失败${RESET}"
         pause_and_return
         return
     fi
-    cd_nck_dir
+    if ! cd_nck_dir; then pause_and_return; return; fi # Check if cd was successful
   fi
   echo -e "${GREEN}[+] 仓库获取完成${RESET}"
 
@@ -210,52 +215,15 @@ function setup_all() {
   export CARGO_BUILD_JOBS="$NUM_PROCESSORS"
   # --------------------
 
-
-  # --- 使用 run_with_retries 包装所有 make 命令 ---
-  echo -e "[*] 安装 hoonc..."
-  if ! run_with_retries "make install-hoonc"; then
-      echo -e "${RED}[-] install-hoonc 失败${RESET}"
-      pause_and_return
-      return
+  # --- 调用通用的构建函数 ---
+  echo -e "[*] 开始构建项目..."
+  if ! build_project; then
+    echo -e "${RED}[-] 项目构建失败。${RESET}"
+    pause_and_return
+    return
   fi
-  echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
-
-  echo -e "[*] 编译 Nockchain..."
-  # make build likely calls cargo build --release
-  # CARGO_BUILD_JOBS env var is picked up by cargo
-  if ! run_with_retries "make build"; then
-      echo -e "${RED}[-] build 失败${RESET}"
-      echo -e "${YELLOW}[!] 编译失败可能是由于依赖下载、网络问题或代码错误。检查错误日志。${RESET}"
-      echo -e "${YELLOW}[!] 如果是网络问题，重试安装通常可以解决。如果持续失败，可能是环境或代码问题。${RESET}"
-      pause_and_return
-      return
-  fi
-  echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
-
-  echo -e "[*] 安装钱包..."
-  if ! run_with_retries "make install-nockchain-wallet"; then
-      echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"
-      pause_and_return
-      return
-  fi
-    # Optional: Verify wallet executable exists
-    if [ ! -f "./target/release/nockchain-wallet" ]; then
-        echo -e "${RED}[-] 警告: 钱包可执行文件未找到，即使 make install-nockchain-wallet 报告成功。${RESET}"
-    fi
-  echo -e "${GREEN}[+] 钱包安装完成${RESET}"
-
-  echo -e "[*] 安装节点..."
-  if ! run_with_retries "make install-nockchain"; then
-      echo -e "${RED}[-] install-nockchain 失败${RESET}"
-      pause_and_return
-      return
-  fi
-    # Optional: Verify node executable exists
-    if [ ! -f "./target/release/nockchain" ]; then
-        echo -e "${RED}[-] 警告: 节点可执行文件未找到，即使 make install-nockchain 报告成功。${RESET}"
-    fi
-  echo -e "${GREEN}[+] 节点可执行文件安装完成${RESET}"
-  # --- make 命令包装结束 ---
+  echo -e "${GREEN}[+] 项目构建完成。${RESET}"
+  # --- 构建函数结束 ---
 
   # --- 清除 CARGO_BUILD_JOBS 环境变量，以免影响后续非编译命令 ---
   unset CARGO_BUILD_JOBS
@@ -269,16 +237,214 @@ function setup_all() {
   echo -e "${YELLOW}    4. 配置 Systemd 服务实现自动启动/重启 (选项 9) - 强烈推荐!"
   echo -e "${YELLOW}    5. 启动 Systemd 服务: ${BOLD}sudo systemctl start nockchain-miner${RESET}${YELLOW}"
   echo -e "${YELLOW}    (或使用选项 6/7 使用 Screen 方式，但 Systemd 更稳定持久)${RESET}"
-  echo -e "${TERMINAL_BLUE}[!] 推荐: 使用选项 10 安装配置 sccache 加速后续编译/更新速度!${RESET}"
+  echo -e "${TERMINAL_BLUE}[!] 推荐: 使用选项 11 安装配置 sccache 加速后续编译/更新速度!${RESET}"
 
   pause_and_return
 }
+
+# --- 新增通用构建函数 ---
+# This function performs the compilation and installation of binaries.
+# It assumes the script is already in the NCK_DIR.
+# It relies on CARGO_BUILD_JOBS being set externally if desired.
+function build_project() {
+    echo -e "[*] 安装 hoonc..."
+    if ! run_with_retries "make install-hoonc"; then
+        echo -e "${RED}[-] install-hoonc 失败${RESET}"
+        return 1
+    fi
+    echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
+
+    echo -e "[*] 编译 Nockchain..."
+    # make build likely calls cargo build --release
+    # CARGO_BUILD_JOBS env var is picked up by cargo
+    if ! run_with_retries "make build"; then
+        echo -e "${RED}[-] build 失败${RESET}"
+        echo -e "${YELLOW}[!] 编译失败可能是由于依赖下载、网络问题或代码错误。检查错误日志。${RESET}"
+        echo -e "${YELLOW}[!] 如果是网络问题，重试安装通常可以解决。如果持续失败，可能是环境或代码问题。${RESET}"
+        return 1
+    fi
+    echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
+
+    echo -e "[*] 安装钱包..."
+    if ! run_with_retries "make install-nockchain-wallet"; then
+        echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"
+        return 1
+    fi
+      # Optional: Verify wallet executable exists
+      if [ ! -f "./target/release/nockchain-wallet" ]; then
+          echo -e "${YELLOW}[-] 警告: 钱包可执行文件未找到，即使 make install-nockchain-wallet 报告成功。${RESET}"
+      fi
+    echo -e "${GREEN}[+] 钱包安装完成${RESET}"
+
+    echo -e "[*] 安装节点..."
+    if ! run_with_retries "make install-nockchain"; then
+        echo -e "${RED}[-] install-nockchain 失败${RESET}"
+        return 1
+    fi
+      # Optional: Verify node executable exists
+      if [ ! -f "./target/release/nockchain" ]; then
+          echo -e "${YELLOW}[-] 警告: 节点可执行文件未找到，即使 make install-nockchain 报告成功。${RESET}"
+      fi
+    echo -e "${GREEN}[+] 节点可执行文件安装完成${RESET}"
+
+    return 0 # Indicate success
+}
+# --- 结束通用构建函数 ---
+
+# --- 新增更新代码并重新构建函数 ---
+function update_and_rebuild() {
+  show_banner # Refresh banner
+  echo -e "${BLUE}[*] 开始更新代码并重新构建...${RESET}"
+  echo -e "${YELLOW}[!] 提示: 增量编译通常比首次编译快，特别是如果使用 sccache。${RESET}"
+
+  # Check if NCK_DIR exists
+  if [ ! -d "$NCK_DIR" ]; then
+      echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
+      echo "请先使用选项 1 进行首次安装。"
+      pause_and_return
+      return
+  fi
+
+  # Change to NCK_DIR
+  if ! cd_nck_dir; then pause_and_return; return; fi
+
+  # Perform git pull
+  echo -e "[*] 拉取最新代码..."
+  if ! run_with_retries "git pull"; then
+      echo -e "${RED}[-] git pull 失败，无法更新代码。${RESET}"
+      pause_and_return
+      return
+  fi
+  echo -e "${GREEN}[+] 代码更新完成${RESET}"
+
+  # --- Rust 编译优化 ---
+  NUM_PROCESSORS=$(nproc)
+  echo -e "[*] 设置 CARGO_BUILD_JOBS=${NUM_PROCESSORS} 启用 ${NUM_PROCESSORS} 核心并行编译..."
+  export CARGO_BUILD_JOBS="$NUM_PROCESSORS"
+  # --------------------
+
+  # Build the project using the common function
+  echo -e "[*] 开始重新构建项目..."
+  if ! build_project; then
+    echo -e "${RED}[-] 项目重新构建失败。${RESET}"
+    # Unset jobs var even on failure
+    unset CARGO_BUILD_JOBS
+    pause_and_return
+    return
+  fi
+  echo -e "${GREEN}[+] 项目重新构建完成。${RESET}"
+
+  # --- 清除 CARGO_BUILD_JOBS 环境变量 ---
+  unset CARGO_BUILD_JOBS
+  # ------------------------------------
+
+  echo -e "${GREEN}[+] 代码更新并重新构建完成。${RESET}"
+  echo -e "${YELLOW}[!] 重要: 您需要手动停止并重新启动矿机，以运行新构建的可执行文件。${RESET}"
+  echo -e "${YELLOW}[!] 如果使用 Systemd，请使用选项 13 进行更新、构建并自动重启。${RESET}"
+
+  pause_and_return
+}
+# --- 结束更新代码并重新构建函数 ---
+
+# --- 新增更新、构建并重启 Systemd 服务函数 ---
+function update_rebuild_restart_systemd() {
+    show_banner # Refresh banner
+    echo -e "${BLUE}[*] 开始更新代码、重新构建并重启 Systemd 矿机服务...${RESET}"
+
+    # Check root permissions
+    if [ "$EUID" -ne 0 ]; then
+      echo -e "${RED}[-] 错误: 执行此操作需要 root 权限。请使用 ${BOLD}sudo $0${RESET}${RED} 运行此脚本或切换到 root 用户。${RESET}"
+      pause_and_return
+      return
+    fi
+
+    # Check if NCK_DIR exists
+    if [ ! -d "$NCK_DIR" ]; then
+        echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
+        echo "请先使用选项 1 进行首次安装。"
+        pause_and_return
+        return
+    fi
+
+    # Check if Systemd service file exists
+    if [ ! -f "$SERVICE_FILE" ]; then
+        echo -e "${RED}[-] Systemd 服务文件不存在: $SERVICE_FILE${RESET}"
+        echo "请先使用选项 9 配置 Systemd 服务。"
+        pause_and_return
+        return
+    fi
+
+    # Change to NCK_DIR
+    if ! cd_nck_dir; then pause_and_return; return; fi
+
+    # Perform git pull
+    echo -e "[*] 拉取最新代码..."
+    if ! run_with_retries "git pull"; then
+        echo -e "${RED}[-] git pull 失败，无法更新代码。${RESET}"
+        echo "请检查网络或手动处理 git 问题。"
+        pause_and_return
+        return
+    fi
+    echo -e "${GREEN}[+] 代码更新完成${RESET}"
+
+    # --- Rust 编译优化 ---
+    NUM_PROCESSORS=$(nproc)
+    echo -e "[*] 设置 CARGO_BUILD_JOBS=${NUM_PROCESSORS} 启用 ${NUM_PROCESSORS} 核心并行编译..."
+    export CARGO_BUILD_JOBS="$NUM_PROCESSORS"
+    # --------------------
+
+    # Build the project
+    echo -e "[*] 开始重新构建项目..."
+    if ! build_project; then
+      echo -e "${RED}[-] 项目重新构建失败。${RESET}"
+      # Unset jobs var even on failure
+      unset CARGO_BUILD_JOBS
+      echo -e "${YELLOW}[!] 由于构建失败，未重启矿机服务。请检查构建错误并手动处理。${RESET}"
+      pause_and_return
+      return
+    fi
+    echo -e "${GREEN}[+] 项目重新构建完成。${RESET}"
+
+    # --- 清除 CARGO_BUILD_JOBS 环境变量 ---
+    unset CARGO_BUILD_JOBS
+    # ------------------------------------
+
+    echo -e "[*] 停止当前运行的 miner Systemd 服务..."
+    # Stop the service. Use || true in case it's not running, to avoid script exit.
+    if ! sudo systemctl stop nockchain-miner || true; then
+        echo -e "${YELLOW}[!] 警告: 停止 nockchain-miner 服务可能失败，但将继续尝试启动新版本。${RESET}"
+    else
+        echo -e "${GREEN}[+] nockchain-miner 服务已停止。${RESET}"
+    fi
+
+    echo -e "[*] 等待 5 秒以确保服务完全停止..."
+    sleep 5
+
+    echo -e "[*] 启动新构建的 miner Systemd 服务..."
+    if ! sudo systemctl start nockchain-miner; then
+        echo -e "${RED}[-] 错误: 启动 nockchain-miner 服务失败。${RESET}"
+        echo -e "${YELLOW}[!] 请使用 '${BOLD}sudo systemctl status nockchain-miner${RESET}${YELLOW}' 和 '${BOLD}sudo journalctl -u nockchain-miner -f${RESET}${YELLOW}' 检查日志。${RESET}"
+        pause_and_return
+        return
+    fi
+    echo -e "${GREEN}[+] nockchain-miner 服务已启动。${RESET}"
+
+    echo -e "[*] 服务状态简报:"
+    sudo systemctl status nockchain-miner --no-pager # Show status without pager
+
+    echo -e "${GREEN}[+] 代码更新、重新构建并重启服务流程完成。${RESET}"
+    echo -e "${YELLOW}[!] 使用 '${BOLD}sudo journalctl -u nockchain-miner -f${RESET}${YELLOW}' 查看实时日志。${RESET}"
+
+    pause_and_return
+}
+# --- 结束更新、构建并重启 Systemd 服务函数 ---
+
 
 # 2) 生成钱包
 function generate_wallet() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 生成钱包...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   if [ ! -f "./target/release/nockchain-wallet" ]; then
       echo -e "${RED}[-] 钱包可执行文件不存在。请先执行安装选项 1。${RESET}"
@@ -287,7 +453,6 @@ function generate_wallet() {
   fi
 
   echo -e "${YELLOW}[!] 正在生成钱包密钥对...请记录下公钥！${RESET}"
-  # Removed run_with_retries here as this command is usually not network dependent
   ./target/release/nockchain-wallet keygen || { echo -e "${RED}[-] 钱包生成失败${RESET}"; }
 
   echo -e "${YELLOW}[!] 钱包生成完成。请手动将上面输出的公钥复制，并使用选项 3 将其写入 .env 文件中的 MINING_PUBKEY=${RESET}"
@@ -298,7 +463,7 @@ function generate_wallet() {
 function set_pubkey_env() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; }
 
   if [ ! -f "$ENV_FILE" ]; then
       echo -e "${RED}[-] .env 文件不存在: $ENV_FILE。请先执行安装选项 1。${RESET}"
@@ -329,7 +494,7 @@ function set_pubkey_env() {
 function export_keys() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 导出钱包密钥...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   if [ ! -f "./target/release/nockchain-wallet" ]; then
       echo -e "${RED}[-] 钱包可执行文件不存在。请先执行安装选项 1。${RESET}"
@@ -337,6 +502,7 @@ function export_keys() {
       return
   fi
 
+  echo -e "${YELLOW}[!] 正在导出钱包密钥到 keys.export...${RESET}"
   ./target/release/nockchain-wallet export-keys || { echo -e "${RED}[-] 密钥导出失败${RESET}"; }
 
   echo -e "${GREEN}[+] 密钥已导出到 keys.export${RESET}"
@@ -348,7 +514,7 @@ function export_keys() {
 function import_keys() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 导入钱包密钥...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   if [ ! -f "./target/release/nockchain-wallet" ]; then
       echo -e "${RED}[-] 钱包可执行文件不存在。请先执行安装选项 1。${RESET}"
@@ -365,6 +531,7 @@ function import_keys() {
       return
   fi
 
+  echo -e "${YELLOW}[!] 正在从 $keyfile 导入密钥...${RESET}"
   ./target/release/nockchain-wallet import-keys --input "$keyfile" || { echo -e "${RED}[-] 密钥导入失败${RESET}"; }
 
   echo -e "${GREEN}[+] 密钥已导入${RESET}"
@@ -375,7 +542,7 @@ function import_keys() {
 function configure_miner_script() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 配置挖矿启动脚本以优化线程利用...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   MINER_SCRIPT="$NCK_DIR/scripts/run_nockchain_miner.sh"
   BACKUP_SCRIPT="$MINER_SCRIPT.bak_$(date +%Y%m%d%H%M%S)"
@@ -416,7 +583,10 @@ ENV_FILE="$NCK_DIR/.env"
 
 # Source .env file if it exists, needed for MINING_PUBKEY and other potential env vars
 if [ -f "$ENV_FILE" ]; then
+  # Use 'set -a' to automatically export variables read from the file
+  set -a
   source "$ENV_FILE"
+  set +a
 fi
 
 # Check if MINING_PUBKEY is set and not empty
@@ -427,7 +597,6 @@ if [ -z "$MINING_PUBKEY" ]; then
 fi
 
 # Get number of CPU cores - This value is hardcoded during script creation by the setup tool
-# Setup tool calculated: NUM_CORES_VALUE
 NUM_CORES=NUM_CORES_PLACEHOLDER # Placeholder for the number of cores calculated by the setup script
 
 # Check if the miner executable exists
@@ -475,7 +644,6 @@ EOL
 function setup_systemd_miner() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 配置 Systemd 服务 (推荐用于自动启动和重启)...${RESET}"
-  cd_nck_dir # 确保在项目目录
 
   # 检查 root 权限
   if [ "$EUID" -ne 0 ]; then
@@ -483,6 +651,30 @@ function setup_systemd_miner() {
     pause_and_return
     return
   fi
+
+  # Check if NCK_DIR exists
+  if [ ! -d "$NCK_DIR" ]; then
+      echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
+      echo "请先使用选项 1 进行首次安装。"
+      pause_and_return
+      return
+  fi
+  # Check if .env exists
+  if [ ! -f "$ENV_FILE" ]; then
+      echo -e "${RED}[-] .env 文件不存在: $ENV_FILE${RESET}"
+      echo "请先使用选项 1 安装或选项 3 设置。"
+      pause_and_return
+      return
+  fi
+  # Check if the run script exists
+  local MINER_SCRIPT="$NCK_DIR/scripts/run_nockchain_miner.sh"
+  if [ ! -f "$MINER_SCRIPT" ]; then
+      echo -e "${RED}[-] 挖矿启动脚本不存在: $MINER_SCRIPT${RESET}"
+      echo "请先使用选项 8 配置挖矿启动脚本。"
+      pause_and_return
+      return
+  fi
+
 
   echo -e "${YELLOW}[!] 建议您在配置 Systemd 服务前，先使用选项 8 配置挖矿启动脚本以优化线程利用。${RESET}"
   echo -e "${YELLOW}[!] 并且确保已使用选项 3 设置了 MINING_PUBKEY。${RESET}"
@@ -493,13 +685,12 @@ function setup_systemd_miner() {
      return
   fi
 
-  SERVICE_FILE="/etc/systemd/system/nockchain-miner.service"
   USERNAME=$(whoami -u) # 获取执行脚本的用户的实际用户名
 
   # --- 创建 Systemd 服务文件内容 ---
   echo -e "[*] 创建 Systemd 服务文件: $SERVICE_FILE"
-  # 使用 heredoc 写入服务文件内容
-  cat <<EOL > "$SERVICE_FILE"
+  # Use tee with sudo to write to privileged location
+  cat <<EOL | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
 Description=Nockchain Miner Node
 After=network.target
@@ -508,7 +699,7 @@ After=network.target
 User=$USERNAME # 以当前用户身份运行
 WorkingDirectory=$NCK_DIR # 工作目录为项目根目录
 EnvironmentFile=$ENV_FILE # 从 .env 文件加载环境变量 (例如 MINING_PUBKEY)
-ExecStart=$NCK_DIR/scripts/run_nockchain_miner.sh # 执行配置好的挖矿启动脚本
+ExecStart=$MINER_SCRIPT # 执行配置好的挖矿启动脚本
 Restart=always # 关键: 程序退出时自动重启
 RestartSec=10 # 10秒后尝试重启
 
@@ -524,6 +715,13 @@ StandardError=journal
 WantedBy=multi-user.target
 EOL
   # --- 结束服务文件内容 ---
+
+  # Check if the file was written successfully
+  if [ ! -f "$SERVICE_FILE" ]; then
+    echo -e "${RED}[-] 错误: Systemd 服务文件创建失败。请检查权限。${RESET}"
+    pause_and_return
+    return
+  fi
 
   echo -e "[*] 重载 Systemd 管理器配置..."
   if ! systemctl daemon-reload; then
@@ -550,26 +748,25 @@ EOL
   pause_and_return
 }
 
-# 10) 安装和配置 sccache 加速编译
+# 11) 安装和配置 sccache 加速编译
 function setup_sccache() {
     show_banner # Refresh banner
     echo -e "${TERMINAL_BLUE}[*] 安装和配置 sccache 以加速 Rust 编译...${RESET}"
     echo -e "${YELLOW}[!] sccache 会缓存编译结果，对后续增量编译提速明显。${RESET}"
     echo -e "${YELLOW}[!] 首次安装 sccache 本身可能需要一些时间。${RESET}"
 
-    # 检查 Rust 是否已安装
+    # Check if Rust is installed
     if ! command -v cargo &>/dev/null; then
         echo -e "${RED}[-] 错误: 未检测到 Rust/cargo。请先执行选项 1 安装 Rust。${RESET}"
         pause_and_return
         return
     fi
 
-    # 检查 sccache 是否已安装
+    # Check if sccache is already installed
     if command -v sccache &>/dev/null; then
         echo -e "${YELLOW}[*] sccache 已安装。跳过安装步骤。${RESET}"
     else
         echo -e "[*] 安装 sccache (可能需要一些时间)..."
-        # 使用 run_with_retries 安装 sccache
         if ! run_with_retries "cargo install sccache"; then
             echo -e "${RED}[-] sccache 安装失败。${RESET}"
             echo -e "${YELLOW}[!] 请检查网络或 cargo 安装是否正常。${RESET}"
@@ -580,7 +777,7 @@ function setup_sccache() {
     fi
 
     echo -e "[*] 配置 shell 环境变量 (RUSTC_WRAPPER)..."
-    # 确定用户当前的 shell 配置文件
+    # Determine user's current shell config file
     RC_FILE="$HOME/.bashrc"
     if [[ "$SHELL" == *"zsh"* ]]; then
       RC_FILE="$HOME/.zshrc"
@@ -591,31 +788,42 @@ function setup_sccache() {
     fi
 
     SCCACHE_ENV_VAR="export RUSTC_WRAPPER=sccache"
+    SCCACHE_FISH_CMD="set -gx RUSTC_WRAPPER sccache"
 
     # Check if RUSTC_WRAPPER is already set to sccache in the target file
-    if [ -f "$RC_FILE" ] && grep -q "^export RUSTC_WRAPPER=sccache" "$RC_FILE"; then
-        echo -e "${YELLOW}[*] RUSTC_WRAPPER=sccache 已存在于 $RC_FILE。跳过配置。${RESET}"
-    elif [ -f "$RC_FILE" ]; then
-         if [[ "$SHELL" == *"fish"* ]]; then
-             echo -e "${YELLOW}[!] 您使用的是 fish shell。请手动将 'set -gx RUSTC_WRAPPER sccache' 添加到您的 fish 配置文件 (${RC_FILE})。${RESET}"
-         else
-             # Append the variable setting
-             echo "$SCCACHE_ENV_VAR" >> "$RC_FILE"
-             echo -e "${GREEN}[+] 已将 '$SCCACHE_ENV_VAR' 添加到 $RC_FILE${RESET}"
-         fi
+    if [ -f "$RC_FILE" ]; then
+        if [[ "$SHELL" == *"fish"* ]]; then
+             if grep -q "^set -gx RUSTC_WRAPPER sccache" "$RC_FILE"; then
+                  echo -e "${YELLOW}[*] RUSTC_WRAPPER=sccache (fish syntax) 已存在于 $RC_FILE。跳过配置。${RESET}"
+             else
+                  echo "$SCCACHE_FISH_CMD" >> "$RC_FILE"
+                  echo -e "${GREEN}[+] 已将 '$SCCACHE_FISH_CMD' 添加到 $RC_FILE${RESET}"
+             fi
+         else # bash/zsh
+            if grep -q "^export RUSTC_WRAPPER=sccache" "$RC_FILE"; then
+                echo -e "${YELLOW}[*] RUSTC_WRAPPER=sccache 已存在于 $RC_FILE。跳过配置。${RESET}"
+            else
+                # Append the variable setting
+                echo "$SCCACHE_ENV_VAR" >> "$RC_FILE"
+                echo -e "${GREEN}[+] 已将 '$SCCACHE_ENV_VAR' 添加到 $RC_FILE${RESET}"
+            fi
+        fi
     else
-        # If .bashrc/.zshrc doesn't exist, create it (unlikely but possible)
-        # Or maybe warn if it's not a standard shell/config
+        # If rc file doesn't exist, create it or warn depending on shell
         if [[ "$SHELL" == *"fish"* ]]; then
              echo -e "${YELLOW}[!] 您使用的是 fish shell，且配置文件 (${RC_FILE}) 不存在。请手动创建文件并添加 'set -gx RUSTC_WRAPPER sccache'。${RESET}"
-        else
+        else # bash/zsh
              echo "$SCCACHE_ENV_VAR" >> "$RC_FILE"
              echo -e "${GREEN}[+] 已将 '$SCCACHE_ENV_VAR' 添加到 ${RC_FILE} (文件已创建)。${RESET}"
         fi
     fi
 
     echo -e "${GREEN}[+] sccache 配置完成。${RESET}"
-    echo -e "${YELLOW}[!] 重要: 为了使 sccache 在当前终端生效，请运行: ${BOLD}source $RC_FILE${RESET}${YELLOW}"
+    if [[ ! "$SHELL" == *"fish"* ]]; then
+        echo -e "${YELLOW}[!] 重要: 为了使 sccache 在当前终端生效，请运行: ${BOLD}source $RC_FILE${RESET}${YELLOW}"
+    else
+        echo -e "${YELLOW}[!] 重要: 为了使 sccache 在当前终端生效，请重新启动您的 fish shell 会话。${RESET}"
+    fi
     echo -e "${YELLOW}[!] 对于新的终端会话或 Systemd/Screen 服务，通常会自动加载此配置。${RESET}"
     echo -e "${YELLOW}[!] sccache 缓存默认存储在 ~/.cache/sccache。您可以使用 '${BOLD}sccache --show-stats${RESET}${YELLOW}' 查看缓存状态。${RESET}"
 
@@ -628,38 +836,46 @@ function setup_sccache() {
 function start_node_screen() {
   show_banner # Refresh banner
   echo -e "${BLUE}[*] 启动节点 (screen 后台运行)...${RESET}"
-  cd_nck_dir
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
-  # 检查 MINING_PUBKEY 是否已设置
-  if ! check_pubkey; then
-    pause_and_return
-    return # 如果检查失败则退出函数
+  # Check if miner executable exists
+  local MINER_EXEC="$NCK_DIR/target/release/nockchain"
+  if [ ! -f "$MINER_EXEC" ]; then
+      echo -e "${RED}[-] 矿机可执行文件不存在: $MINER_EXEC${RESET}"
+      echo "请先执行安装选项 1 或选项 12 进行构建。"
+      pause_and_return
+      return
   fi
 
-  # 确保启动脚本存在并有执行权限
+
+  # Ensure starting script exists and is executable
   local MINER_SCRIPT="$NCK_DIR/scripts/run_nockchain_miner.sh"
   if [ ! -f "$MINER_SCRIPT" ]; then
       echo -e "${RED}[-] 错误: 挖矿启动脚本不存在: $MINER_SCRIPT${RESET}"
-      echo "请先执行安装选项 1。"
+      echo "请先执行安装选项 1 或选项 8。"
       pause_and_return
       return
   fi
-  # Ensure script is executable. Add a retry just in case of filesystem glitch, though rare.
-  if ! run_with_retries "chmod +x \"$MINER_SCRIPT\"" 2 5; then
-      echo -e "${RED}[-] 设置脚本执行权限失败${RESET}"
-      pause_and_return
-      return
+  if [ ! -x "$MINER_SCRIPT" ]; then
+       echo -e "[*] 设置脚本执行权限..."
+       if ! run_with_retries "chmod +x \"$MINER_SCRIPT\"" 2 5; then
+           echo -e "${RED}[-] 设置脚本执行权限失败${RESET}"
+           pause_and_return
+           return
+       fi
   fi
 
 
-  # 检查旧的 screen 会话并关闭
+  # Check and close old screen sessions
   if screen -list | grep -qw "nockchain"; then
-    echo "[*] 检测到旧的 'nockchain' screen 会话，正在关闭..."
-    # Add a timeout to the screen quit command
-    timeout 10s screen -S nockchain -X quit
-    # Check if it still exists after timeout
+    echo "[*] 检测到旧的 'nockchain' screen 会话，正在尝试关闭..."
+    # Try graceful quit first
+    screen -S nockchain -X quit
+    # Give it a moment
+    sleep 2
+    # Check if it's still running
     if screen -list | grep -qw "nockchain"; then
-         echo -e "${YELLOW}[-] 旧的 screen 会话可能未完全关闭，尝试强制杀掉...${RESET}"
+         echo -e "${YELLOW}[-] 旧的 screen 会话未完全关闭，尝试强制终止...${RESET}"
          screen -wipe # Clean up dead sessions
          # Find the process and kill it if screen -wipe didn't work
          pkill -f "SCREEN -S nockchain"
@@ -670,22 +886,17 @@ function start_node_screen() {
              return
          fi
     fi
-    sleep 2 # Wait for old session to terminate fully
+    echo -e "${GREEN}[+] 旧的 screen 会话已清理。${RESET}"
   fi
 
   echo -e "[*] 正在启动新的 'nockchain' screen 会话..."
-  # Use screen -dmS in the background to create a session and execute the command
-  # The bash -c command will:
-  # 1. cd into NCK_DIR
-  # 2. Source the .env file
-  # 3. Execute the miner script using 'exec'. 'exec' replaces the bash process
-  #    with the miner process, which is good for signal handling (like Ctrl+C if you attach)
-  #    and resource usage.
-  # Use a retry for the screen command itself, although screen is generally robust.
-  # The important script execution is handled within screen.
-  if ! run_with_retries "screen -dmS nockchain bash -c \"cd '$NCK_DIR' && source '$ENV_FILE' && exec '$MINER_SCRIPT'\"" 2 5; then
+  # Use screen -dmS in the background to create a session and execute the command.
+  # The bash -c command will cd into NCK_DIR and then execute the miner script.
+  # The miner script itself should handle sourcing the .env and running the binary with exec.
+  # Use a retry for the screen command itself.
+  if ! run_with_retries "screen -dmS nockchain bash -c \"cd '$NCK_DIR' && '$MINER_SCRIPT'\"" 2 5; then
       echo -e "${RED}[-] 启动 screen 会话失败。${RESET}"
-      echo "请检查 $MINER_SCRIPT 脚本内容或权限。"
+      echo "请检查 $MINER_SCRIPT 脚本内容、权限或依赖是否正确。"
       pause_and_return
       return
   fi
@@ -696,6 +907,7 @@ function start_node_screen() {
     echo -e "${GREEN}[+] 节点已成功启动在 'nockchain' screen 会话中。${RESET}"
     echo -e "${YELLOW}[!] 您可以使用选项 7 查看日志 (按 Ctrl+A+D 分离).${RESET}"
     echo -e "${YELLOW}[!] 注意: Screen 方式不如 Systemd (选项 9) 稳定和持久，不具备自动重启功能。${RESET}"
+    echo -e "${YELLOW}[!] 强烈推荐使用 Systemd (选项 9 和 13) 来管理您的矿机。${RESET}"
   else
     echo -e "${RED}[-] 节点启动失败。未找到名为 'nockchain' 的 screen 会话。${RESET}"
     echo "请尝试使用选项 7 查看日志（如果 screen 会话短暂启动后退出）。"
@@ -712,7 +924,7 @@ function view_logs_screen() {
     echo -e "${YELLOW}[!] 连接到 'nockchain' screen 会话。按 Ctrl+A+D 组合键可分离会话返回脚本菜单，不会停止矿机。${RESET}"
     echo -e "${YELLOW}[!] 按 Ctrl+C 可能会停止矿机！请谨慎操作。${RESET}"
     # screen -r attempts to resume a session. -d -r can detach from elsewhere and resume here.
-    # Add a check if the session is actually attached elsewhere
+    # Check if the session is actually attached elsewhere
     if screen -list | grep -q "nockchain[[:space:]]"; then # Check for 'nockchain' followed by space (indicating attached)
         echo -e "${YELLOW}[*] 'nockchain' screen 会话当前已连接。尝试重新连接...${RESET}"
         screen -x nockchain # Connect to already attached session
@@ -732,17 +944,24 @@ function view_logs_screen() {
 function main_menu() {
   show_banner
   echo "请选择操作:"
-  echo "  1) 一键安装并构建 (系统依赖, Rust, 代码, bin) - 推荐首先执行"
-  echo " ${TERMINAL_BLUE}10) 安装并配置 sccache (可选, 加速后续编译) - 强烈推荐!${RESET}"
   echo "-----------------------------------------------"
+  echo " ${BLUE}📦 安装/构建${RESET}"
+  echo "  1) 一键安装并构建 (首次安装推荐)"
+  echo " ${TERMINAL_BLUE}11) 安装并配置 sccache (可选, 加速后续编译) - 强烈推荐!${RESET}"
+  echo "-----------------------------------------------"
+  echo " ${BLUE}🔄 更新/升级 (代码与程序)${RESET}"
+  echo "  12) 更新代码并重新构建"
+  echo "  13) 更新代码、重新构建并重启矿机 (Systemd) - 推荐!"
+  echo "-----------------------------------------------"
+  echo " ${BLUE}🔑 钱包/密钥管理${RESET}"
   echo "  2) 生成钱包 (查看输出日志)"
   echo "  3) 设置 MINING_PUBKEY 到 .env (手动输入) - 必须设置!"
   echo "  4) 导出钱包密钥"
   echo "  5) 导入钱包密钥"
   echo "-----------------------------------------------"
+  echo " ${BLUE}⚙️ 矿机配置/启动管理${RESET}"
   echo "  8) 配置挖矿启动脚本 (优化线程利用, 推荐!)"
   echo "  9) 配置 Systemd 服务 (推荐! 实现自动启动/重启)"
-  echo "-----------------------------------------------"
   echo "  6) 启动节点 (Screen 后台运行, 基本方式)"
   echo "  7) 查看 Screen 节点日志"
   echo "-----------------------------------------------"
@@ -760,7 +979,9 @@ function main_menu() {
     7) view_logs_screen ;;  # Screen 日志
     8) configure_miner_script ;; # 配置启动脚本
     9) setup_systemd_miner ;; # Systemd 方式
-    10) setup_sccache ;; # sccache installation/config
+    11) setup_sccache ;; # sccache installation/config (Changed from 10 to 11)
+    12) update_and_rebuild ;; # New update option
+    13) update_rebuild_restart_systemd ;; # New update and restart option
     0) echo -e "${GREEN}退出脚本.${RESET}"; exit 0 ;;
     *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
   esac
