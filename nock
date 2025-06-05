@@ -19,6 +19,8 @@ RED='\033[0;31m'
 # ========= 项目路径 =========
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
+SERVICE_NAME="nockchain-miner"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # ========= 横幅 =========
 function show_banner() {
@@ -29,6 +31,7 @@ function show_banner() {
   echo "==============================================="
   echo -e "${RESET}"
   echo "🔧 增强编译并行度，配置挖矿线程数"
+  echo "🚀 ${BOLD}更强大的挖矿锄头：采用 Systemd 服务管理，提升稳定性与性能！${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
@@ -76,8 +79,7 @@ function cd_nck_dir() {
 # 暂停并返回主菜单
 function pause_and_return() {
   echo ""
-  # 使用 `-s` 隐藏按键输入，`-r` 防止反斜杠转义
-  read -r -p "按任意键返回主菜单..." -s -n 1 # -n 1: 只读取一个字符
+  read -r -p "按任意键返回主菜单..." -s -n 1 # -s 隐藏输入，-n 1 只读取一个字符
   echo # 换行，因为 -s 不会换行
   main_menu
 }
@@ -118,11 +120,11 @@ function run_nockchain_binary() {
 
     local binary_path=""
 
-    # 1. 尝试从 PATH 中查找
+    # 1. 尝试从 PATH 中查找 (make install 后的理想路径)
     if command -v "$binary_name" &>/dev/null; then
         binary_path=$(command -v "$binary_name")
         echo -e "[*] 正在使用 PATH 中的 '$binary_path'${RESET}"
-    # 2. 尝试从 NCK_DIR/target/release 中查找
+    # 2. 尝试从 NCK_DIR/target/release 中查找 (直接编译后的路径)
     elif [ -x "$NCK_DIR/target/release/$binary_name" ]; then
         binary_path="$NCK_DIR/target/release/$binary_name"
         echo -e "[*] 正在使用项目目录中的 '$binary_path'${RESET}"
@@ -193,18 +195,15 @@ function set_pubkey_env() {
     return
   fi
 
-  # 使用 sed 删除旧行并添加新行
-  # 兼容 GNU/BSD sed，先尝试 GNU 语法，失败则尝试 BSD 语法
+  # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)
   if grep -q '^MINING_PUBKEY=' "$ENV_FILE"; then
-    if sed -i "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE${RESET}"
-    elif sed -i "" "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE (使用 BSD sed 兼容模式)${RESET}"
-    else
+    if ! sed -i "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null && \
+       ! sed -i "" "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
       echo -e "${RED}[-] 警告: 无法更新 MINING_PUBKEY 到 $ENV_FILE，请手动编辑。${RESET}"
       pause_and_return
       return
     fi
+    echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE${RESET}"
   else
     # 如果不存在，则添加
     echo "" >> "$ENV_FILE" # 确保在末尾添加时格式正确
@@ -243,17 +242,15 @@ function set_miner_threads_env() {
     return
   fi
 
-   # 使用 sed 删除旧行并添加新行
+   # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)
   if grep -q '^MINER_THREADS=' "$ENV_FILE"; then
-    if sed -i "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
-    elif sed -i "" "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE (使用 BSD sed 兼容模式)${RESET}"
-    else
+    if ! sed -i "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null && \
+       ! sed -i "" "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
       echo -e "${RED}[-] 警告: 无法更新 MINER_THREADS 到 $ENV_FILE，请手动编辑。${RESET}"
       pause_and_return
       return
     fi
+    echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
   else
     # 如果不存在，则添加
      if ! grep -q '^# 挖矿线程数' "$ENV_FILE"; then
@@ -276,9 +273,17 @@ function set_miner_threads_env() {
   pause_and_return
 }
 
+
 # ========= 安装构建函数 =========
 function setup_all() {
   show_banner # 在安装前再次显示横幅
+
+  # 提前检查关键命令
+  if ! check_command sudo || ! check_command git || ! check_command curl; then
+      echo -e "${RED}[-] 缺少必要的系统命令 (sudo, git, curl)，请先手动安装。${RESET}"
+      pause_and_return
+      return
+  fi
 
   # 检查磁盘空间
   echo -e "[*] 检查磁盘空间..."
@@ -287,15 +292,16 @@ function setup_all() {
       return
   fi
 
-  echo -e "[*] 安装系统依赖 (build-essential, cmake, curl, git, make, screen)..."
-  # 确保所有关键命令存在，如果不存在则尝试安装
-  # 检查 screen 是否安装
-  if ! check_command screen; then
-      echo -e "${YELLOW}[!] 'screen' 命令未找到，将尝试安装。${RESET}"
-  fi
-
+  echo -e "[*] 安装系统依赖 (build-essential, clang, llvm-dev, libclang-dev, pkg-config, libssl-dev, cmake, make, systemd)..."
   sudo apt update || { echo -e "${RED}[-] apt update 失败${RESET}"; pause_and_return; return; }
-  sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
+  # 确保安装 screen 或 systemd 工具
+  if check_command systemctl; then
+      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
+  else # Fallback for systems without systemd, though less robust
+      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make screen || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
+      echo -e "${YELLOW}[!] 警告: 系统未检测到 systemd。节点将默认使用 screen 后台运行 (稳定性不如 systemd)。${RESET}"
+      echo -e "${YELLOW}    建议在支持 systemd 的 Linux 系统上运行此脚本以获得最佳体验。${RESET}"
+  fi
   echo -e "${GREEN}[+] 系统依赖安装完成${RESET}"
 
   echo -e "[*] 安装 Rust..."
@@ -311,7 +317,6 @@ function setup_all() {
   fi
 
   # 确保 cargo bin 目录在 PATH 中 (持久化)
-  # 使用 $SHELL 变量判断用户当前使用的 shell
   local rc_file=""
   case "$(basename "$SHELL")" in
       "bash") rc_file="$HOME/.bashrc" ;;
@@ -326,7 +331,6 @@ function setup_all() {
   else
      echo -e "${YELLOW}[!] Cargo 已在 ${rc_file} 的 PATH 中${RESET}"
   fi
-
 
   echo -e "[*] 获取或更新仓库..."
   if [ -d "$NCK_DIR" ]; then
@@ -349,6 +353,11 @@ function setup_all() {
   if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
   if check_command cargo; then cargo clean || echo -e "${YELLOW}[!] cargo clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
   echo -e "${GREEN}[+] 清理完成 (或已跳过)${RESET}"
+
+  # 设置 Rust 编译优化标志
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+  export CARGO_PROFILE_RELEASE_LTO="true"
+  echo -e "${GREEN}[+] 已设置 Rust 编译优化标志: RUSTFLAGS='$RUSTFLAGS', CARGO_PROFILE_RELEASE_LTO='$CARGO_PROFILE_RELEASE_LTO'${RESET}"
 
   local num_j_cores=$(get_num_cores) # 使用兼容性函数获取核心数
   if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题
@@ -381,7 +390,7 @@ function setup_all() {
   echo -e "${YELLOW}  1. 生成您的钱包密钥对 (菜单选项 2)。${RESET}"
   echo -e "${YELLOW}  2. 将生成的公钥配置到 .env 文件中 (菜单选项 3)。${RESET}"
   echo -e "${YELLOW}  3. 检查 .env 中的 MINER_THREADS 配置 (菜单选项 8 可设置)。${RESET}"
-  echo -e "${YELLOW}  4. 启动节点进行挖矿 (菜单选项 6)。${RESET}"
+  echo -e "${YELLOW}  4. 启动节点进行挖矿 (菜单选项 6) - 推荐使用 systemd 服务。${RESET}"
   echo ""
 
   pause_and_return
@@ -460,8 +469,227 @@ function import_keys() {
   pause_and_return
 }
 
-# ========= 节点操作函数 =========
-function start_node() {
+# ========= 节点操作函数 (Systemd) =========
+
+function install_systemd_service() {
+    echo -e "[*] 检查是否支持 systemd..."
+    if ! check_command systemctl; then
+        echo -e "${RED}[-] 您的系统不支持 systemd。请考虑在支持 systemd 的 Linux 系统上运行此脚本。${RESET}"
+        echo -e "${RED}    如果仍需运行，请使用选项 6a (旧版 Screen 启动) 来启动节点。${RESET}"
+        pause_and_return
+        return 1
+    fi
+
+    echo -e "[*] 创建 systemd 服务文件: $SERVICE_FILE..."
+    if ! cd_nck_dir; then pause_and_return; return 1; fi
+
+    # 检查启动脚本是否存在并赋予执行权限
+    local run_script="./scripts/run_nockchain_miner.sh"
+    if [ ! -f "$run_script" ]; then
+        echo -e "${RED}[-] 错误: 找不到启动脚本 $run_script。请先运行选项 1 完成安装构建。${RESET}"
+        pause_and_return
+        return 1
+    fi
+    chmod +x "$run_script"
+
+    # 重新 .env 确保最新的配置被读取
+    if [ -f "$ENV_FILE" ]; then
+        . "$ENV_FILE" # POSIX `.` 命令替代 `source`
+        echo -e "${GREEN}[+] 已加载 .env 配置文件${RESET}"
+    else
+        echo -e "${RED}[-] 警告: .env 文件不存在，部分配置可能缺失。请先运行选项 1 或手动创建 .env${RESET}"
+        pause_and_return # 如果 .env 都不存在，大概率无法启动
+        return 1
+    fi
+
+    # 检查 MINING_PUBKEY 是否已设置 (非空)
+    if [ -z "$MINING_PUBKEY" ]; then
+        echo -e "${RED}[-] 错误: MINING_PUBKEY 未在 .env 文件中设置!${RESET}"
+        echo "请先运行菜单选项 2 (生成钱包) 和 3 (设置公钥) 完成配置。"
+        pause_and_return
+        return 1
+    fi
+    echo -e "[*] MINING_PUBKEY 已配置: ${GREEN}$MINING_PUBKEY${RESET}"
+
+    # 检查 MINER_THREADS 是否已设置 (非空)，并提示
+    if [ -z "$MINER_THREADS" ]; then
+        echo -e "${YELLOW}[!] 警告: MINER_THREADS 未在 .env 文件中设置。${RESET}"
+        echo "    矿工可能会以默认线程数运行 (通常为单线程)。建议通过选项 8 设置。"
+    else
+        echo -e "[*] MINER_THREADS 已配置: ${GREEN}$MINER_THREADS${RESET}"
+    fi
+
+    # 创建 systemd 服务文件
+    sudo bash -c "cat <<EOF > $SERVICE_FILE
+[Unit]
+Description=$SERVICE_NAME service
+After=network.target
+
+[Service]
+User=$USER
+Group=$USER
+WorkingDirectory=$NCK_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=/bin/bash -c \"$NCK_DIR/scripts/run_nockchain_miner.sh\"
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536 # Increase file descriptor limit for potential network connections
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[-] 错误: 创建 systemd 服务文件失败。请检查权限或尝试手动创建。${RESET}"
+        pause_and_return
+        return 1
+    fi
+
+    echo -e "${GREEN}[+] Systemd 服务文件已创建: $SERVICE_FILE${RESET}"
+
+    echo -e "[*] 重载 systemd daemon..."
+    sudo systemctl daemon-reload || { echo -e "${RED}[-] 错误: systemctl daemon-reload 失败${RESET}"; pause_and_return; return 1; }
+    echo -e "${GREEN}[+] Systemd daemon 已重载${RESET}"
+
+    echo -e "[*] 启用 $SERVICE_NAME 服务 (开机自启)..."
+    sudo systemctl enable "$SERVICE_NAME" || { echo -e "${RED}[-] 错误: systemctl enable 失败${RESET}"; pause_and_return; return 1; }
+    echo -e "${GREEN}[+] $SERVICE_NAME 服务已启用${RESET}"
+
+    echo -e "${GREEN}===============================================${RESET}"
+    echo -e "${GREEN}[+] Nockchain 挖矿服务已成功安装为 systemd 服务！${RESET}"
+    echo -e "${GREEN}    现在可以通过选项 6 来启动它。${RESET}"
+    echo -e "${GREEN}===============================================${RESET}"
+
+    pause_and_return
+}
+
+function start_node_systemd() {
+  echo -e "[*] 启动节点 (systemd 服务: $SERVICE_NAME)..."
+  if ! check_command systemctl; then
+      echo -e "${RED}[-] 您的系统不支持 systemd。请使用选项 6a (旧版 Screen 启动)。${RESET}"
+      pause_and_return
+      return
+  fi
+
+  if [ ! -f "$SERVICE_FILE" ]; then
+      echo -e "${RED}[-] 错误: systemd 服务文件 '$SERVICE_FILE' 不存在。请先运行选项 6a (安装 Systemd 服务)。${RESET}"
+      pause_and_return
+      return
+  fi
+
+  # 检查并停止旧的 screen 会话 (以防万一用户从 screen 切换到 systemd)
+  if screen -list | grep -q "nockchain"; then
+    echo "[*] 检测到旧的 'nockchain' screen 会话，尝试关闭..."
+    screen -S nockchain -X quit || {
+      echo -e "${YELLOW}[!] 警告: 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
+    }
+    sleep 2
+  fi
+
+  sudo systemctl start "$SERVICE_NAME" || {
+    echo -e "${RED}===============================================${RESET}"
+    echo -e "${RED}[-] 节点启动失败!${RESET}"
+    echo -e "${RED}    请检查日志: journalctl -u $SERVICE_NAME --no-pager${RESET}"
+    echo -e "${RED}===============================================${RESET}"
+    pause_and_return
+    return
+  }
+
+  echo -e "${GREEN}===============================================${RESET}"
+  echo -e "${GREEN}[+] 节点已成功启动为 systemd 服务 '$SERVICE_NAME'${RESET}"
+  echo -e "${YELLOW}[!] 使用 'systemctl status $SERVICE_NAME' 查看状态。${RESET}"
+  echo -e "${YELLOW}[!] 使用 'journalctl -u $SERVICE_NAME -f' 查看实时日志。${RESET}"
+  echo -e "${GREEN}===============================================${RESET}"
+
+  pause_and_return
+}
+
+function view_node_status_systemd() {
+  echo -e "[*] 查看节点状态 (systemd 服务: $SERVICE_NAME)..."
+  if ! check_command systemctl; then
+      echo -e "${RED}[-] 您的系统不支持 systemd。此功能不可用。${RESET}"
+      pause_and_return
+      return
+  fi
+  sudo systemctl status "$SERVICE_NAME" || {
+    echo -e "${RED}[-] 无法获取服务状态，可能服务未安装或已停止。${RESET}"
+  }
+  pause_and_return
+}
+
+function view_logs_systemd() {
+  echo -e "[*] 查看节点日志 (systemd 服务: $SERVICE_NAME)..."
+  if ! check_command journalctl; then
+      echo -e "${RED}[-] 您的系统不支持 journalctl 或 systemd 日志。${RESET}"
+      pause_and_return
+      return
+  fi
+  echo -e "${YELLOW}[!] 按 Ctrl+C 退出日志查看。${RESET}"
+  echo "-----------------------------------------------"
+  journalctl -u "$SERVICE_NAME" -f --no-pager || {
+    echo -e "${RED}[-] 无法查看日志，可能服务未运行或日志文件不存在。${RESET}"
+  }
+  pause_and_return
+}
+
+function stop_node_systemd() {
+    echo -e "[*] 停止节点 (systemd 服务: $SERVICE_NAME)..."
+    if ! check_command systemctl; then
+        echo -e "${RED}[-] 您的系统不支持 systemd。此功能不可用。${RESET}"
+        pause_and_return
+        return
+    fi
+
+    if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+        sudo systemctl stop "$SERVICE_NAME" || {
+            echo -e "${RED}[-] 无法停止服务，可能需要手动操作。${RESET}"
+            pause_and_return
+            return
+        }
+        echo -e "${GREEN}[+] 节点服务 '$SERVICE_NAME' 已停止${RESET}"
+    else
+        echo -e "${YELLOW}[!] 节点服务 '$SERVICE_NAME' 未运行，无需停止。${RESET}"
+    fi
+    pause_and_return
+}
+
+function uninstall_systemd_service() {
+    echo -e "[*] 卸载节点 systemd 服务 ($SERVICE_NAME)..."
+    if ! check_command systemctl; then
+        echo -e "${RED}[-] 您的系统不支持 systemd。此功能不可用。${RESET}"
+        pause_and_return
+        return
+    fi
+
+    if [ -f "$SERVICE_FILE" ]; then
+        echo -e "[*] 禁用并停止服务..."
+        sudo systemctl disable --now "$SERVICE_NAME" &>/dev/null
+        echo -e "[*] 删除服务文件..."
+        sudo rm "$SERVICE_FILE" || {
+            echo -e "${RED}[-] 错误: 无法删除服务文件 '$SERVICE_FILE'。请手动删除。${RESET}"
+            pause_and_return
+            return
+        }
+        echo -e "[*] 重载 systemd daemon..."
+        sudo systemctl daemon-reload || {
+            echo -e "${RED}[-] 错误: systemctl daemon-reload 失败。${RESET}"
+        }
+        echo -e "${GREEN}[+] 节点 systemd 服务 '$SERVICE_NAME' 已成功卸载。${RESET}"
+    else
+        echo -e "${YELLOW}[!] 服务文件 '$SERVICE_FILE' 不存在，无需卸载。${RESET}"
+    fi
+    pause_and_return
+}
+
+
+# ========= 节点操作函数 (旧版 Screen 兼容) =========
+# 仅作为备用，如果 systemd 不可用
+function start_node_screen_legacy() {
+  echo -e "${YELLOW}[!] 您选择了旧版 Screen 启动方式，这不如 Systemd 稳定和易于管理。${RESET}"
+  echo -e "${YELLOW}[!] 建议在支持 Systemd 的系统上使用选项 6 (启动 Systemd 服务)。${RESET}"
   echo -e "[*] 启动节点 (screen 后台会话: nockchain)..."
   if ! cd_nck_dir; then pause_and_return; return; fi
 
@@ -475,7 +703,7 @@ function start_node() {
   fi
   chmod +x "$run_script"
 
-  # 检查节点程序是否存在 (使用 run_nockchain_binary 的检查逻辑)
+  # 检查节点程序是否存在
   if ! run_nockchain_binary "nockchain" --version &>/dev/null; then # 简单检查是否存在
       echo -e "${RED}[-] 错误: 节点程序 'nockchain' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
       pause_and_return
@@ -510,12 +738,12 @@ function start_node() {
   fi
 
   # 检查并关闭旧的 screen 会话
-  if screen -list | grep -q "nockchain"; then # 使用 grep -q 检查存在性，避免输出
+  if screen -list | grep -q "nockchain"; then
     echo "[*] 检测到旧的 'nockchain' screen 会话，尝试关闭..."
     screen -S nockchain -X quit || {
-      echo -e "${RED}[-] 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
+      echo -e "${YELLOW}[!] 警告: 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
     }
-    sleep 2 # 等待旧会话完全退出
+    sleep 2
     if ! screen -list | grep -q "nockchain"; then
         echo -e "${GREEN}[+] 旧的 screen 会话已关闭${RESET}"
     else
@@ -523,12 +751,10 @@ function start_node() {
     fi
   fi
 
-  # 启动新的 screen 会话并运行脚本
   echo -e "[*] 在 screen 会话 'nockchain' 中启动挖矿脚本..."
-  # 注意这里的命令：cd 到目录，然后 . .env，最后执行脚本。
   screen -dmS nockchain sh -c "cd '$NCK_DIR' && . '$ENV_FILE' && './scripts/run_nockchain_miner.sh'"
 
-  sleep 3 # 等待 screen 会话启动并执行命令
+  sleep 3
 
   if screen -list | grep -q "nockchain"; then
     echo -e "${GREEN}===============================================${RESET}"
@@ -547,7 +773,8 @@ function start_node() {
   pause_and_return
 }
 
-function view_logs() {
+function view_logs_screen_legacy() {
+  echo -e "${YELLOW}[!] 您正在查看旧版 Screen 运行的日志。${RESET}"
   if screen -list | grep -q "nockchain"; then
     echo -e "${YELLOW}[!] 连接到 screen 会话 'nockchain' 查看日志。${RESET}"
     echo -e "${YELLOW}[!] 在 screen 中按 Ctrl+A 然后按 D 键可以退出会话并让其在后台运行。${RESET}"
@@ -556,12 +783,13 @@ function view_logs() {
     screen -r nockchain
   else
     echo -e "${RED}[-] 节点 screen 会话 'nockchain' 未运行。${RESET}"
-    echo "请使用菜单选项 6 启动节点。"
+    echo "请使用菜单选项 6a 启动节点。"
   fi
   pause_and_return
 }
 
-function stop_node() {
+function stop_node_screen_legacy() {
+    echo -e "${YELLOW}[!] 您正在停止旧版 Screen 运行的节点。${RESET}"
     echo -e "[*] 停止节点 screen 会话..."
     if screen -list | grep -q "nockchain"; then
         echo "[*] 检测到 'nockchain' screen 会话，尝试停止..."
@@ -570,7 +798,7 @@ function stop_node() {
             pause_and_return
             return
         }
-        sleep 2 # 等待会话完全退出
+        sleep 2
         if ! screen -list | grep -q "nockchain"; then
              echo -e "${GREEN}[+] 节点 screen 会话已停止${RESET}"
         else
@@ -582,7 +810,6 @@ function stop_node() {
     pause_and_return
 }
 
-
 # ========= 主菜单 =========
 function main_menu() {
   show_banner
@@ -593,11 +820,17 @@ function main_menu() {
   echo "  3) 设置 MINING_PUBKEY 到 .env (根据公钥设置挖矿地址)"
   echo "  4) 导出钱包密钥到文件 (keys.export)"
   echo "  5) 导入钱包密钥文件"
-  echo "  ${BLUE}--- 节点操作 ---${RESET}"
-  echo "  6) 启动节点 (screen 后台运行)"
-  echo "  7) 查看节点日志 (连接到 screen 会话)"
-  echo "  8) 设置挖矿线程数 (MINER_THREADS) 到 .env"
-  echo "  9) 停止节点 (screen 会话)"
+  echo "  ${BLUE}--- 节点操作 (推荐 Systemd 管理) ---${RESET}"
+  echo "  6) 启动节点服务 (Systemd 自动管理)"
+  echo "  7) 查看节点状态 (Systemd)"
+  echo "  8) 查看节点日志 (Systemd)"
+  echo "  9) 停止节点服务 (Systemd)"
+  echo "  10) 卸载节点服务 (Systemd)"
+  echo "  ${YELLOW}--- 节点配置与旧版 Screen 兼容 ---${RESET}"
+  echo "  11) 设置挖矿线程数 (MINER_THREADS) 到 .env"
+  echo "  12) ${YELLOW}旧版: 启动节点 (Screen 后台运行 - 建议 Systemd)${RESET}"
+  echo "  13) ${YELLOW}旧版: 查看节点日志 (Screen)${RESET}"
+  echo "  14) ${YELLOW}旧版: 停止节点 (Screen)${RESET}"
   echo "  ${RED}0) 退出${RESET}"
   echo ""
   read -r -p "请输入编号: " choice
@@ -608,10 +841,17 @@ function main_menu() {
     3) set_pubkey_env ;;
     4) export_keys ;;
     5) import_keys ;;
-    6) start_node ;;
-    7) view_logs ;;
-    8) set_miner_threads_env ;;
-    9) stop_node ;;
+    # Systemd 选项
+    6) install_systemd_service && start_node_systemd ;; # 先安装服务再启动
+    7) view_node_status_systemd ;;
+    8) view_logs_systemd ;;
+    9) stop_node_systemd ;;
+    10) uninstall_systemd_service ;;
+    # 配置与旧版 Screen 选项
+    11) set_miner_threads_env ;;
+    12) start_node_screen_legacy ;;
+    13) view_logs_screen_legacy ;;
+    14) stop_node_screen_legacy ;;
     0) echo "退出脚本."; exit 0 ;;
     *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
   esac
@@ -619,7 +859,6 @@ function main_menu() {
 
 # ========= 脚本入口 =========
 # 确保在脚本开始时就加载 .env，以便后续函数可以使用其中的变量（如果文件已存在）
-# 注意：这里使用 POSIX `.` 命令替代 `source`
 if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
 fi
