@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# ==============================================================================
+# Nockchain 安装与挖矿助手
+# ------------------------------------------------------------------------------
+# 作者: K2 节点教程分享
+# Telegram: https://t.me/+EaCiFDOghoM3Yzll
+# Twitter:  https://x.com/BtcK241918
+# ==============================================================================
+
 # ========= 色彩定义 =========
 RESET='\033[0m'
 BOLD='\033[1m'
@@ -29,28 +37,60 @@ function show_banner() {
 }
 
 # ========= 常用函数 =========
+
+# 检查命令是否存在
+function check_command() {
+    local cmd="$1"
+    if ! command -v "$cmd" &>/dev/null; then
+        echo -e "${RED}[-] 错误: 命令 '$cmd' 未找到。请确保已安装或在 PATH 中。${RESET}"
+        return 1
+    fi
+    return 0
+}
+
+# 获取CPU核心数（兼容不同系统）
+function get_num_cores() {
+    local cores
+    if check_command nproc; then
+        cores=$(nproc)
+    elif check_command sysctl; then # macOS/BSD
+        cores=$(sysctl -n hw.ncpu)
+    else
+        echo -e "${YELLOW}[!] 警告: 无法自动检测CPU核心数，默认为 2。${RESET}"
+        cores=2 # 默认值
+    fi
+    echo "$cores"
+}
+
+# 切换到项目目录
 function cd_nck_dir() {
   if [ -d "$NCK_DIR" ]; then
-    cd "$NCK_DIR" || { echo -e "${RED}[-] 无法进入项目目录: $NCK_DIR${RESET}"; exit 1; }
+    cd "$NCK_DIR" || { echo -e "${RED}[-] 无法进入项目目录: $NCK_DIR${RESET}"; return 1; }
   else
     echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
-    # exit 1 # 如果目录不存在，在 setup_all 中会克隆，所以不一定需要立即退出
-    # 在需要目录存在的函数中再判断并退出
     return 1
   fi
   return 0
 }
 
+# 暂停并返回主菜单
 function pause_and_return() {
   echo ""
-  read -n1 -r -p "按任意键返回主菜单..." key
+  # 使用 `-s` 隐藏按键输入，`-r` 防止反斜杠转义
+  read -r -p "按任意键返回主菜单..." -s -n 1 # -n 1: 只读取一个字符
+  echo # 换行，因为 -s 不会换行
   main_menu
 }
 
 # 检查最低磁盘空间 (例如，5GB)
 function check_disk_space() {
     local required_gb=5
-    local available_kb=$(df -k --output=avail "$HOME" 2>/dev/null | tail -n 1)
+    local available_kb
+
+    # 尝试使用 df -k 并解析，兼容性更好
+    # awk '{print $4}' 获取第四列 (Available)
+    # tail -n 1 确保只取最后一行 (通常是磁盘挂载点信息)
+    available_kb=$(df -k "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
 
     if [ -z "$available_kb" ]; then
         echo -e "${YELLOW}[!] 警告: 无法检查磁盘空间，请手动确认您的磁盘空间是否充足。${RESET}"
@@ -69,6 +109,36 @@ function check_disk_space() {
     fi
 }
 
+# 查找并执行 Nockchain 二进制文件
+# 参数: binary_name (例如: nockchain-wallet), ...args
+function run_nockchain_binary() {
+    local binary_name="$1"
+    shift # 移除第一个参数 (binary_name)
+    local args="$@"
+
+    local binary_path=""
+
+    # 1. 尝试从 PATH 中查找
+    if command -v "$binary_name" &>/dev/null; then
+        binary_path=$(command -v "$binary_name")
+        echo -e "[*] 正在使用 PATH 中的 '$binary_path'${RESET}"
+    # 2. 尝试从 NCK_DIR/target/release 中查找
+    elif [ -x "$NCK_DIR/target/release/$binary_name" ]; then
+        binary_path="$NCK_DIR/target/release/$binary_name"
+        echo -e "[*] 正在使用项目目录中的 '$binary_path'${RESET}"
+    else
+        echo -e "${RED}[-] 错误: 找不到可执行文件 '$binary_name'。请确保已编译并安装 (运行选项 1)。${RESET}"
+        return 1
+    fi
+
+    # 执行命令
+    "$binary_path" $args || {
+        echo -e "${RED}[-] 命令 '$binary_name $args' 执行失败${RESET}"
+        return 1
+    }
+    return 0
+}
+
 
 # ========= 配置函数 =========
 
@@ -76,7 +146,7 @@ function check_disk_space() {
 function configure_mining_env() {
   echo -e "[*] 检查并设置 .env 文件中的挖矿相关配置..."
   local env_file="$1"
-  local num_cores=$(nproc)
+  local num_cores=$(get_num_cores)
 
   # 复制示例文件如果 .env 不存在
   if [ ! -f "$env_file" ]; then
@@ -109,11 +179,6 @@ function configure_mining_env() {
     echo -e "[*] .env 文件中已存在 MINER_THREADS=$current_threads"
   fi
 
-  # 重新 source .env 使配置生效 for this script run
-  # 注意: 这只影响当前脚本的执行环境。如果希望启动脚本也生效，需要在启动脚本中 source .env
-  # start_node 函数中已经做了 source，这是正确的。
-  # source "$env_file" # 暂时不在这里 source，避免污染全局环境，只在需要时 source
-
   return 0
 }
 
@@ -121,7 +186,7 @@ function set_pubkey_env() {
   echo -e "[*] 设置 MINING_PUBKEY 到 .env..."
   if ! cd_nck_dir; then pause_and_return; return; fi
 
-  read -p "请输入公钥 (MINING_PUBKEY): " pubkey
+  read -r -p "请输入公钥 (MINING_PUBKEY): " pubkey
   if [ -z "$pubkey" ]; then
     echo -e "${RED}[-] 公钥不能为空${RESET}"
     pause_and_return
@@ -129,21 +194,28 @@ function set_pubkey_env() {
   fi
 
   # 使用 sed 删除旧行并添加新行
+  # 兼容 GNU/BSD sed，先尝试 GNU 语法，失败则尝试 BSD 语法
   if grep -q '^MINING_PUBKEY=' "$ENV_FILE"; then
-    sed -i "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE"
-    echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE${RESET}"
+    if sed -i "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
+      echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE${RESET}"
+    elif sed -i "" "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
+      echo -e "${GREEN}[+] 已更新 MINING_PUBKEY 到 $ENV_FILE (使用 BSD sed 兼容模式)${RESET}"
+    else
+      echo -e "${RED}[-] 警告: 无法更新 MINING_PUBKEY 到 $ENV_FILE，请手动编辑。${RESET}"
+      pause_and_return
+      return
+    fi
   else
     # 如果不存在，则添加
     echo "" >> "$ENV_FILE" # 确保在末尾添加时格式正确
     echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
-     echo -e "${GREEN}[+] 已添加 MINING_PUBKEY=$pubkey 到 $ENV_FILE${RESET}"
+    echo -e "${GREEN}[+] 已添加 MINING_PUBKEY=$pubkey 到 $ENV_FILE${RESET}"
   fi
-
 
   if grep -q "MINING_PUBKEY=$pubkey" "$ENV_FILE"; then
       echo -e "${GREEN}[+] MINING_PUBKEY=$pubkey 已成功写入/更新到 .env${RESET}"
-      # 重新 source .env 使配置生效 for this script run
-      source "$ENV_FILE"
+      # 重新 .env 使配置生效 for this script run
+      . "$ENV_FILE" # POSIX `.` 命令替代 `source`
   else
       echo -e "${RED}[-] 写入 MINING_PUBKEY 到 .env 失败${RESET}"
   fi
@@ -155,9 +227,9 @@ function set_miner_threads_env() {
   echo -e "[*] 设置 MINER_THREADS 到 .env..."
   if ! cd_nck_dir; then pause_and_return; return; fi
 
-  local max_cores=$(nproc)
+  local max_cores=$(get_num_cores)
   echo "您的系统检测到有 ${max_cores} 个 CPU 核心。"
-  read -p "请输入挖矿线程数 (MINER_THREADS，建议不超过核心数 $max_cores): " threads
+  read -r -p "请输入挖矿线程数 (MINER_THREADS，建议不超过核心数 $max_cores): " threads
   if [ -z "$threads" ]; then
     echo -e "${RED}[-] 线程数不能为空${RESET}"
     pause_and_return
@@ -165,7 +237,7 @@ function set_miner_threads_env() {
   fi
 
   # 验证输入是否为非负数字
-  if ! [[ "$threads" =~ ^[0-9]+$ ]]; then
+  if ! echo "$threads" | grep -q '^[0-9]\+$'; then # POSIX 兼容的数字检查
     echo -e "${RED}[-] 输入无效，请输入一个非负数字${RESET}"
     pause_and_return
     return
@@ -173,8 +245,15 @@ function set_miner_threads_env() {
 
    # 使用 sed 删除旧行并添加新行
   if grep -q '^MINER_THREADS=' "$ENV_FILE"; then
-    sed -i "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE"
-     echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
+    if sed -i "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
+      echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
+    elif sed -i "" "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
+      echo -e "${GREEN}[+] 已更新 MINER_THREADS=$threads 到 $ENV_FILE (使用 BSD sed 兼容模式)${RESET}"
+    else
+      echo -e "${RED}[-] 警告: 无法更新 MINER_THREADS 到 $ENV_FILE，请手动编辑。${RESET}"
+      pause_and_return
+      return
+    fi
   else
     # 如果不存在，则添加
      if ! grep -q '^# 挖矿线程数' "$ENV_FILE"; then
@@ -182,23 +261,20 @@ function set_miner_threads_env() {
         echo "# 挖矿线程数，建议设置为您的CPU核心数" >> "$ENV_FILE"
     fi
     echo "MINER_THREADS=$threads" >> "$ENV_FILE"
-     echo -e "${GREEN}[+] 已添加 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
+    echo -e "${GREEN}[+] 已添加 MINER_THREADS=$threads 到 $ENV_FILE${RESET}"
   fi
-
 
   if grep -q "MINER_THREADS=$threads" "$ENV_FILE"; then
       echo -e "${GREEN}[+] MINER_THREADS=$threads 已成功写入/更新到 .env${RESET}"
       echo -e "${YELLOW}[!] 注意: 启动节点脚本 (run_nockchain_miner.sh) 需要读取并使用这个变量才能生效。${RESET}"
-      # 重新 source .env 使配置生效 for this script run
-      source "$ENV_FILE"
+      # 重新 .env 使配置生效 for this script run
+      . "$ENV_FILE" # POSIX `.` 命令替代 `source`
   else
       echo -e "${RED}[-] 写入 MINER_THREADS 到 .env 失败${RESET}"
   fi
 
-
   pause_and_return
 }
-
 
 # ========= 安装构建函数 =========
 function setup_all() {
@@ -211,73 +287,90 @@ function setup_all() {
       return
   fi
 
-  echo -e "[*] 安装系统依赖..."
-  sudo apt update
+  echo -e "[*] 安装系统依赖 (build-essential, cmake, curl, git, make, screen)..."
+  # 确保所有关键命令存在，如果不存在则尝试安装
+  # 检查 screen 是否安装
+  if ! check_command screen; then
+      echo -e "${YELLOW}[!] 'screen' 命令未找到，将尝试安装。${RESET}"
+  fi
+
+  sudo apt update || { echo -e "${RED}[-] apt update 失败${RESET}"; pause_and_return; return; }
   sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
   echo -e "${GREEN}[+] 系统依赖安装完成${RESET}"
 
   echo -e "[*] 安装 Rust..."
-  if ! command -v cargo &>/dev/null; then
+  if ! check_command cargo; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || { echo -e "${RED}[-] Rust 安装失败${RESET}"; pause_and_return; return; }
-    source "$HOME/.cargo/env"
+    # 立即使 cargo 在当前 shell session 可用
+    export PATH="$HOME/.cargo/bin:$PATH"
     echo -e "${GREEN}[+] Rust 安装完成${RESET}"
   else
     echo -e "${YELLOW}[!] Rust 已安装，跳过安装步骤${RESET}"
-    source "$HOME/.cargo/env" # 确保当前 shell session 有 cargo
+    # 确保当前 shell session 有 cargo，即使已经安装
+    export PATH="$HOME/.cargo/bin:$PATH"
   fi
 
-  # 确保 cargo bin 目录在 PATH 中
-  RC_FILE="$HOME/.bashrc"
-  [[ "$SHELL" == *"zsh"* ]] && RC_FILE="$HOME/.zshrc"
-  if ! grep -q 'export PATH=.*\$HOME/\.cargo/bin:\$PATH' "$RC_FILE"; then
-    echo '# Add Rust cargo bin to PATH' >> "$RC_FILE"
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$RC_FILE"
-    echo -e "${GREEN}[+] 已将 Cargo 添加到 ${RC_FILE} 的 PATH (可能需要重新登录或 source ${RC_FILE} 生效)${RESET}"
+  # 确保 cargo bin 目录在 PATH 中 (持久化)
+  # 使用 $SHELL 变量判断用户当前使用的 shell
+  local rc_file=""
+  case "$(basename "$SHELL")" in
+      "bash") rc_file="$HOME/.bashrc" ;;
+      "zsh") rc_file="$HOME/.zshrc" ;;
+      *) rc_file="$HOME/.profile" # Fallback for other shells or non-interactive sessions
+  esac
+
+  if ! grep -q 'export PATH=.*\$HOME/\.cargo/bin:\$PATH' "$rc_file" 2>/dev/null; then
+    echo '# Add Rust cargo bin to PATH' >> "$rc_file"
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
+    echo -e "${GREEN}[+] 已将 Cargo 添加到 ${rc_file} 的 PATH (可能需要重新登录或 '. ${rc_file}' 生效)${RESET}"
   else
-     echo -e "${YELLOW}[!] Cargo 已在 ${RC_FILE} 的 PATH 中${RESET}"
+     echo -e "${YELLOW}[!] Cargo 已在 ${rc_file} 的 PATH 中${RESET}"
   fi
-  export PATH="$HOME/.cargo/bin:$PATH" # 确保当前 shell session 有 cargo
+
 
   echo -e "[*] 获取或更新仓库..."
   if [ -d "$NCK_DIR" ]; then
     echo -e "[*] 项目目录已存在，尝试拉取最新代码..."
-    if ! cd_nck_dir; then pause_and_return; return; }
+    if ! cd_nck_dir; then pause_and_return; return; fi
     git pull || { echo -e "${RED}[-] Git pull 失败${RESET}"; pause_and_return; return; }
     echo -e "${GREEN}[+] 仓库已更新${RESET}"
   else
     echo -e "[*] 克隆仓库到 $NCK_DIR..."
     git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" || { echo -e "${RED}[-] Git clone 失败${RESET}"; pause_and_return; return; }
     echo -e "${GREEN}[+] 仓库克隆完成${RESET}"
-    if ! cd_nck_dir; then pause_and_return; return; }
+    if ! cd_nck_dir; then pause_and_return; return; fi
   fi
 
   # 配置 .env 文件，包括挖矿线程数
   configure_mining_env "$ENV_FILE" || { echo -e "${RED}[-] .env 配置失败${RESET}"; pause_and_return; return; }
 
   echo -e "[*] 清理旧的构建文件..."
-  make clean || echo -e "${YELLOW}[!] make clean 可能失败，如果首次构建请忽略此警告。${RESET}"
-  cargo clean || echo -e "${YELLOW}[!] cargo clean 可能失败，如果首次构建请忽略此警告。${RESET}"
+  # 确保 make 和 cargo 命令存在
+  if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
+  if check_command cargo; then cargo clean || echo -e "${YELLOW}[!] cargo clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
   echo -e "${GREEN}[+] 清理完成 (或已跳过)${RESET}"
 
-  echo -e "[*] 安装 hoonc (使用多线程编译: make -j)..."
-  # 确保在 NCK_DIR 目录下执行
-  if ! cd_nck_dir; then pause_and_return; return; }
-  make -j install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j install-hoonc'"; pause_and_return; return; }
+  local num_j_cores=$(get_num_cores) # 使用兼容性函数获取核心数
+  if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题
+
+  echo -e "[*] 安装 hoonc (使用多线程编译: make -j$num_j_cores)..."
+  if ! cd_nck_dir; then pause_and_return; return; fi
+  make -j"$num_j_cores" install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-hoonc'"; pause_and_return; return; }
   echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
 
-  echo -e "[*] 编译 Nockchain (使用多线程编译: make -j)..."
-  if ! cd_nck_dir; then pause_and_return; return; }
-  make -j build || { echo -e "${RED}[-] build 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j build'"; pause_and_return; return; }
+  echo -e "[*] 编译 Nockchain (使用多线程编译: make -j$num_j_cores)..."
+  if ! cd_nck_dir; then pause_and_return; return; fi
+  make -j"$num_j_cores" build || { echo -e "${RED}[-] build 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores build'"; pause_and_return; return; }
   echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
 
-  echo -e "[*] 安装钱包 (使用多线程编译: make -j)..."
-  if ! cd_nck_dir; then pause_and_return; return; }
-  make -j install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j install-nockchain-wallet'"; pause_and_return; return; }
+  echo -e "[*] 安装钱包 (使用多线程编译: make -j$num_j_cores)..."
+  if ! cd_nck_dir; then pause_and_return; return; fi
+  make -j"$num_j_cores" install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain-wallet'"; pause_and_return; return; }
   echo -e "${GREEN}[+] 钱包安装完成${RESET}"
 
-  echo -e "[*] 安装节点 (使用多线程编译: make -j)..."
-  if ! cd_nck_dir; then pause_and_return; return; }
-  make -j install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j install-nockchain'"; pause_and_return; return; }
+  echo -e "[*] 安装节点 (使用多线程编译: make -j$num_j_cores)..."
+  if ! cd_nck_dir; then pause_and_return; return; fi
+  make -j"$num_j_cores" install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain'"; pause_and_return; return; }
   echo -e "${GREEN}[+] 节点程序安装完成${RESET}"
 
   echo -e "${GREEN}===============================================${RESET}"
@@ -297,7 +390,7 @@ function setup_all() {
 # ========= 钱包操作函数 =========
 function generate_wallet() {
   echo -e "[*] 生成钱包密钥对..."
-  if ! cd_nck_dir; then pause_and_return; return; }
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   # 检查目标目录是否有写入权限
   if [ ! -w "$NCK_DIR" ]; then
@@ -306,23 +399,14 @@ function generate_wallet() {
       return
   fi
 
-  # 检查钱包程序是否存在
-  if [ ! -x "./target/release/nockchain-wallet" ]; then
-      echo -e "${RED}[-] 错误: 钱包程序 './target/release/nockchain-wallet' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
-      pause_and_return
-      return
-  fi
-
-
   echo -e "${YELLOW}[!] 生成密钥对的输出会包含您的私钥和公钥，请务必保存好！${RESET}"
   echo -e "${YELLOW}    特别是公钥，稍后需要配置到 .env 文件中 (MINING_PUBKEY)。${RESET}"
   echo -e "${YELLOW}    私钥保存在您运行命令的当前目录下的 wallet.keys 文件中。${RESET}"
   echo "-----------------------------------------------"
 
   # 在当前目录下生成 wallet.keys
-  ./target/release/nockchain-wallet keygen || {
+  run_nockchain_binary "nockchain-wallet" keygen || {
     echo -e "${RED}[-] 钱包生成失败${RESET}"
-    echo "请确保 './target/release/nockchain-wallet' 可执行，并且您在项目根目录 $NCK_DIR 下运行。"
     pause_and_return
     return
   }
@@ -337,21 +421,13 @@ function generate_wallet() {
 
 function export_keys() {
   echo -e "[*] 导出钱包密钥到文件..."
-  if ! cd_nck_dir; then pause_and_return; return; }
-
-    # 检查钱包程序是否存在
-  if [ ! -x "./target/release/nockchain-wallet" ]; then
-      echo -e "${RED}[-] 错误: 钱包程序 './target/release/nockchain-wallet' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
-      pause_and_return
-      return
-  fi
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   echo -e "${YELLOW}[!] 密钥文件包含您的私钥，请妥善保管导出文件！${RESET}"
   echo -e "${YELLOW}    默认导出到 $NCK_DIR/keys.export${RESET}"
 
-  ./target/release/nockchain-wallet export-keys || {
+  run_nockchain_binary "nockchain-wallet" export-keys || {
     echo -e "${RED}[-] 导出密钥失败${RESET}"
-    echo "请确保 './target/release/nockchain-wallet' 可执行，并且您在项目根目录 $NCK_DIR 下运行。"
     pause_and_return
     return
   }
@@ -362,16 +438,9 @@ function export_keys() {
 
 function import_keys() {
   echo -e "[*] 导入钱包密钥文件..."
-  if ! cd_nck_dir; then pause_and_return; return; }
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
-    # 检查钱包程序是否存在
-  if [ ! -x "./target/release/nockchain-wallet" ]; then
-      echo -e "${RED}[-] 错误: 钱包程序 './target/release/nockchain-wallet' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
-      pause_and_return
-      return
-  fi
-
-  read -p "[?] 请输入要导入的密钥文件路径 (默认: $NCK_DIR/keys.export): " keyfile_input
+  read -r -p "[?] 请输入要导入的密钥文件路径 (默认: $NCK_DIR/keys.export): " keyfile_input
   keyfile=${keyfile_input:-"$NCK_DIR/keys.export"}
 
   if [ ! -f "$keyfile" ]; then
@@ -381,9 +450,8 @@ function import_keys() {
   fi
 
   echo -e "[*] 尝试导入 '$keyfile'..."
-  ./target/release/nockchain-wallet import-keys --input "$keyfile" || {
+  run_nockchain_binary "nockchain-wallet" import-keys --input "$keyfile" || {
     echo -e "${RED}[-] 导入密钥失败${RESET}"
-    echo "请确保文件格式正确，并且 './target/release/nockchain-wallet' 可执行。"
     pause_and_return
     return
   }
@@ -395,7 +463,7 @@ function import_keys() {
 # ========= 节点操作函数 =========
 function start_node() {
   echo -e "[*] 启动节点 (screen 后台会话: nockchain)..."
-  if ! cd_nck_dir; then pause_and_return; return; }
+  if ! cd_nck_dir; then pause_and_return; return; fi
 
   # 检查启动脚本是否存在并赋予执行权限
   local run_script="./scripts/run_nockchain_miner.sh"
@@ -407,17 +475,16 @@ function start_node() {
   fi
   chmod +x "$run_script"
 
-  # 检查节点程序是否存在
-  if [ ! -x "./target/release/nockchain" ]; then
-      echo -e "${RED}[-] 错误: 节点程序 './target/release/nockchain' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
+  # 检查节点程序是否存在 (使用 run_nockchain_binary 的检查逻辑)
+  if ! run_nockchain_binary "nockchain" --version &>/dev/null; then # 简单检查是否存在
+      echo -e "${RED}[-] 错误: 节点程序 'nockchain' 不存在或不可执行。请先运行选项 1 完成安装构建。${RESET}"
       pause_and_return
       return
   fi
 
-
-  # 重新 source .env 确保最新的配置被读取
+  # 重新 .env 确保最新的配置被读取
   if [ -f "$ENV_FILE" ]; then
-      source "$ENV_FILE"
+      . "$ENV_FILE" # POSIX `.` 命令替代 `source`
       echo -e "${GREEN}[+] 已加载 .env 配置文件${RESET}"
   else
       echo -e "${RED}[-] 警告: .env 文件不存在，部分配置可能缺失。请先运行选项 1 或手动创建 .env${RESET}"
@@ -440,22 +507,16 @@ function start_node() {
       echo "    矿工可能会以默认线程数运行 (通常为单线程)。建议通过选项 8 设置。"
   else
       echo -e "[*] MINER_THREADS 已配置: ${GREEN}$MINER_THREADS${RESET}"
-      # 这里的提示已经包含在 set_miner_threads_env 中，可以在这里简化
-      # echo -e "${YELLOW}[!] 注意: 矿工实际使用的线程数取决于 run_nockchain_miner.sh 脚本是否读取并传递 MINER_THREADS 变量给矿工程序。${RESET}"
   fi
 
-
   # 检查并关闭旧的 screen 会话
-  if screen -list | grep -qw "nockchain"; then
+  if screen -list | grep -q "nockchain"; then # 使用 grep -q 检查存在性，避免输出
     echo "[*] 检测到旧的 'nockchain' screen 会话，尝试关闭..."
     screen -S nockchain -X quit || {
       echo -e "${RED}[-] 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
-      # 不退出，尝试继续，但提示用户可能存在问题
-      # pause_and_return; return;
     }
     sleep 2 # 等待旧会话完全退出
-    # 再次检查是否关闭成功
-    if ! screen -list | grep -qw "nockchain"; then
+    if ! screen -list | grep -q "nockchain"; then
         echo -e "${GREEN}[+] 旧的 screen 会话已关闭${RESET}"
     else
         echo -e "${YELLOW}[!] 警告: 旧的 screen 会话可能未能完全关闭。请手动检查。${RESET}"
@@ -463,16 +524,13 @@ function start_node() {
   fi
 
   # 启动新的 screen 会话并运行脚本
-  # 使用 bash -c "command" 是为了确保 screen 内的 shell 环境正确，并且能执行 source 和脚本
   echo -e "[*] 在 screen 会话 'nockchain' 中启动挖矿脚本..."
-  # 注意这里的命令：cd 到目录，然后 source .env，最后执行脚本。
-  # 脚本 run_nockchain_miner.sh 内部通常会再次调用 nockchain 程序并可能传递参数，
-  # 确保 run_nockchain_miner.sh 能够读取 MINER_THREADS 变量是关键。
-  screen -dmS nockchain bash -c "cd $NCK_DIR && source $ENV_FILE && ./scripts/run_nockchain_miner.sh"
+  # 注意这里的命令：cd 到目录，然后 . .env，最后执行脚本。
+  screen -dmS nockchain sh -c "cd '$NCK_DIR' && . '$ENV_FILE' && './scripts/run_nockchain_miner.sh'"
 
   sleep 3 # 等待 screen 会话启动并执行命令
 
-  if screen -list | grep -qw "nockchain"; then
+  if screen -list | grep -q "nockchain"; then
     echo -e "${GREEN}===============================================${RESET}"
     echo -e "${GREEN}[+] 节点已成功在 screen 会话 'nockchain' 后台启动${RESET}"
     echo -e "${GREEN}===============================================${RESET}"
@@ -481,7 +539,7 @@ function start_node() {
   else
     echo -e "${RED}===============================================${RESET}"
     echo -e "${RED}[-] 节点启动失败!${RESET}"
-    echo -e "${RED}    请尝试手动运行: cd $NCK_DIR && source $ENV_FILE && ./scripts/run_nockchain_miner.sh${RESET}"
+    echo -e "${RED}    请尝试手动运行: cd '$NCK_DIR' && . '$ENV_FILE' && './scripts/run_nockchain_miner.sh'${RESET}"
     echo -e "${RED}    检查错误输出。${RESET}"
     echo -e "${RED}===============================================${RESET}"
   fi
@@ -490,13 +548,11 @@ function start_node() {
 }
 
 function view_logs() {
-  if screen -list | grep -qw "nockchain"; then
+  if screen -list | grep -q "nockchain"; then
     echo -e "${YELLOW}[!] 连接到 screen 会话 'nockchain' 查看日志。${RESET}"
     echo -e "${YELLOW}[!] 在 screen 中按 Ctrl+A 然后按 D 键可以退出会话并让其在后台运行。${RESET}"
     echo -e "${YELLOW}[!] 按 Ctrl+C 可能终止节点进程，请谨慎操作。${RESET}"
     echo "-----------------------------------------------"
-    # 使用 exec screen -r nockchain 可以在退出 screen 后直接返回主菜单，而不是停留在 shell
-    # 但是为了兼容性，还是直接调用 screen -r nockchain，然后让 pause_and_return 处理返回
     screen -r nockchain
   else
     echo -e "${RED}[-] 节点 screen 会话 'nockchain' 未运行。${RESET}"
@@ -507,7 +563,7 @@ function view_logs() {
 
 function stop_node() {
     echo -e "[*] 停止节点 screen 会话..."
-    if screen -list | grep -qw "nockchain"; then
+    if screen -list | grep -q "nockchain"; then
         echo "[*] 检测到 'nockchain' screen 会话，尝试停止..."
         screen -S nockchain -X quit || {
             echo -e "${RED}[-] 无法停止 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
@@ -515,7 +571,7 @@ function stop_node() {
             return
         }
         sleep 2 # 等待会话完全退出
-        if ! screen -list | grep -qw "nockchain"; then
+        if ! screen -list | grep -q "nockchain"; then
              echo -e "${GREEN}[+] 节点 screen 会话已停止${RESET}"
         else
              echo -e "${YELLOW}[!] 警告: 节点 screen 会话可能未能完全停止。请手动检查。${RESET}"
@@ -544,7 +600,7 @@ function main_menu() {
   echo "  9) 停止节点 (screen 会话)"
   echo "  ${RED}0) 退出${RESET}"
   echo ""
-  read -p "请输入编号: " choice
+  read -r -p "请输入编号: " choice
 
   case "$choice" in
     1) setup_all ;;
@@ -554,8 +610,8 @@ function main_menu() {
     5) import_keys ;;
     6) start_node ;;
     7) view_logs ;;
-    8) set_miner_threads_env ;; # 新增选项
-    9) stop_node ;; # 新增选项
+    8) set_miner_threads_env ;;
+    9) stop_node ;;
     0) echo "退出脚本."; exit 0 ;;
     *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
   esac
@@ -563,13 +619,10 @@ function main_menu() {
 
 # ========= 脚本入口 =========
 # 确保在脚本开始时就加载 .env，以便后续函数可以使用其中的变量（如果文件已存在）
-# 但只在需要这些变量的函数中 source 更安全，避免污染全局环境。
-# start_node 函数中已经做了 source，其他如 set_* 函数直接修改文件。
-# 所以这里的全局 source 可以移除或保留，影响不大，保留是为了某些简单检查可能用到。
+# 注意：这里使用 POSIX `.` 命令替代 `source`
 if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+    . "$ENV_FILE"
 fi
-
 
 # 启动主菜单循环
 while true; do
