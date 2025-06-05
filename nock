@@ -8,6 +8,15 @@
 # Twitter:  https://x.com/BtcK241918
 # ==============================================================================
 
+# 设置脚本健壮性选项
+# -u: 遇到未设置的变量时报错
+# -o pipefail: 管道命令中任何一个命令失败，整个管道就失败
+set -uo pipefail
+
+# 如果你在非交互式会话中运行，或者希望防止 shell 自身超时，可以设置 TMOUT。
+# 但对于 SSH 会话，下面的 keep-alive 机制更直接。
+# export TMOUT=0 # 设置为0表示永不超时，需要时取消注释
+
 # ========= 色彩定义 =========
 RESET='\033[0m'
 BOLD='\033[1m'
@@ -21,6 +30,9 @@ NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
 SERVICE_NAME="nockchain-miner"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# ========= SSH 连接保持活跃变量 =========
+SSH_KEEP_ALIVE_PID=""
 
 # ========= 横幅 =========
 function show_banner() {
@@ -141,6 +153,32 @@ function run_nockchain_binary() {
     return 0
 }
 
+# ========= SSH 连接保持活跃函数 =========
+# 在后台启动一个进程，周期性地发送空字符到标准输出，以防止 SSH 会话因不活动而断开。
+function start_ssh_keep_alive() {
+    echo -e "${BLUE}[*] 启动 SSH 连接保持活动进程...${RESET}"
+    # 每 30 秒发送一个空行，抑制其输出，并在后台运行
+    while true; do
+        echo -n ""
+        sleep 30
+    done > /dev/null 2>&1 &
+    SSH_KEEP_ALIVE_PID=$! # 存储后台进程的 PID
+    echo -e "${GREEN}[+] SSH 连接保持活动进程已启动 (PID: $SSH_KEEP_ALIVE_PID)${RESET}"
+}
+
+# 停止 SSH 连接保持活动进程
+function stop_ssh_keep_alive() {
+    if [ -n "$SSH_KEEP_ALIVE_PID" ] && kill -0 "$SSH_KEEP_ALIVE_PID" 2>/dev/null; then
+        echo -e "${BLUE}[*] 停止 SSH 连接保持活动进程 (PID: $SSH_KEEP_ALIVE_PID)...${RESET}"
+        kill "$SSH_KEEP_ALIVE_PID" > /dev/null 2>&1 # 杀死进程并抑制错误输出
+        wait "$SSH_KEEP_ALIVE_PID" 2>/dev/null || true # 等待进程终止，忽略错误
+        echo -e "${GREEN}[+] SSH 连接保持活动进程已停止${RESET}"
+    fi
+    SSH_KEEP_ALIVE_PID="" # 清空 PID 变量
+}
+
+# 捕获脚本退出或中断信号，确保停止 SSH keep-alive 进程
+trap 'stop_ssh_keep_alive' EXIT SIGINT SIGTERM
 
 # ========= 配置函数 =========
 
@@ -213,7 +251,7 @@ function set_pubkey_env() {
 
   if grep -q "MINING_PUBKEY=$pubkey" "$ENV_FILE"; then
       echo -e "${GREEN}[+] MINING_PUBKEY=$pubkey 已成功写入/更新到 .env${RESET}"
-      # 重新 .env 使配置生效 for this script run
+      # 重新加载 .env 使配置生效 for this script run
       . "$ENV_FILE" # POSIX `.` 命令替代 `source`
   else
       echo -e "${RED}[-] 写入 MINING_PUBKEY 到 .env 失败${RESET}"
@@ -264,7 +302,7 @@ function set_miner_threads_env() {
   if grep -q "MINER_THREADS=$threads" "$ENV_FILE"; then
       echo -e "${GREEN}[+] MINER_THREADS=$threads 已成功写入/更新到 .env${RESET}"
       echo -e "${YELLOW}[!] 注意: 启动节点脚本 (run_nockchain_miner.sh) 需要读取并使用这个变量才能生效。${RESET}"
-      # 重新 .env 使配置生效 for this script run
+      # 重新加载 .env 使配置生效 for this script run
       . "$ENV_FILE" # POSIX `.` 命令替代 `source`
   else
       echo -e "${RED}[-] 写入 MINER_THREADS 到 .env 失败${RESET}"
@@ -278,122 +316,140 @@ function set_miner_threads_env() {
 function setup_all() {
   show_banner # 在安装前再次显示横幅
 
-  # 提前检查关键命令
-  if ! check_command sudo || ! check_command git || ! check_command curl; then
-      echo -e "${RED}[-] 缺少必要的系统命令 (sudo, git, curl)，请先手动安装。${RESET}"
+  # 在长时间操作前启动 SSH keep-alive
+  start_ssh_keep_alive
+
+  local success=0 # 标记安装是否成功
+
+  # 将所有安装步骤放入一个子 shell，以便统一处理错误并确保 keep-alive 停止
+  {
+    # 提前检查关键命令
+    if ! check_command sudo || ! check_command git || ! check_command curl; then
+        echo -e "${RED}[-] 缺少必要的系统命令 (sudo, git, curl)，请先手动安装。${RESET}"
+        return 1
+    fi
+
+    # 检查磁盘空间
+    echo -e "[*] 检查磁盘空间..."
+    if ! check_disk_space; then
+        return 1
+    fi
+
+    echo -e "[*] 安装系统依赖 (build-essential, clang, llvm-dev, libclang-dev, pkg-config, libssl-dev, cmake, make, systemd)..."
+    sudo apt update || { echo -e "${RED}[-] apt update 失败${RESET}"; return 1; }
+    # 确保安装 screen 或 systemd 工具
+    if check_command systemctl; then
+        sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; return 1; }
+    else # Fallback for systems without systemd, though less robust
+        sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make screen || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; return 1; }
+        echo -e "${YELLOW}[!] 警告: 系统未检测到 systemd。节点将默认使用 screen 后台运行 (稳定性不如 systemd)。${RESET}"
+        echo -e "${YELLOW}    建议在支持 systemd 的 Linux 系统上运行此脚本以获得最佳体验。${RESET}"
+    fi
+    echo -e "${GREEN}[+] 系统依赖安装完成${RESET}"
+
+    echo -e "[*] 安装 Rust..."
+    if ! check_command cargo; then
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || { echo -e "${RED}[-] Rust 安装失败${RESET}"; return 1; }
+      # 立即使 cargo 在当前 shell session 可用
+      export PATH="$HOME/.cargo/bin:$PATH"
+      echo -e "${GREEN}[+] Rust 安装完成${RESET}"
+    else
+      echo -e "${YELLOW}[!] Rust 已安装，跳过安装步骤${RESET}"
+      # 确保当前 shell session 有 cargo，即使已经安装
+      export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+
+    # 确保 cargo bin 目录在 PATH 中 (持久化)
+    local rc_file=""
+    case "$(basename "$SHELL")" in
+        "bash") rc_file="$HOME/.bashrc" ;;
+        "zsh") rc_file="$HOME/.zshrc" ;;
+        *) rc_file="$HOME/.profile" # Fallback for other shells or non-interactive sessions
+    esac
+
+    if ! grep -q 'export PATH=.*\$HOME/\.cargo/bin:\$PATH' "$rc_file" 2>/dev/null; then
+      echo '# Add Rust cargo bin to PATH' >> "$rc_file"
+      echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
+      echo -e "${GREEN}[+] 已将 Cargo 添加到 ${rc_file} 的 PATH (可能需要重新登录或 '. ${rc_file}' 生效)${RESET}"
+    else
+       echo -e "${YELLOW}[!] Cargo 已在 ${rc_file} 的 PATH 中${RESET}"
+    fi
+
+    echo -e "[*] 获取或更新仓库..."
+    if [ -d "$NCK_DIR" ]; then
+      echo -e "[*] 项目目录已存在，尝试拉取最新代码..."
+      if ! cd_nck_dir; then return 1; fi
+      git pull || { echo -e "${RED}[-] Git pull 失败${RESET}"; return 1; }
+      echo -e "${GREEN}[+] 仓库已更新${RESET}"
+    else
+      echo -e "[*] 克隆仓库到 $NCK_DIR..."
+      git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" || { echo -e "${RED}[-] Git clone 失败${RESET}"; return 1; }
+      echo -e "${GREEN}[+] 仓库克隆完成${RESET}"
+      if ! cd_nck_dir; then return 1; fi
+    fi
+
+    # 配置 .env 文件，包括挖矿线程数
+    configure_mining_env "$ENV_FILE" || { echo -e "${RED}[-] .env 配置失败${RESET}"; return 1; }
+
+    echo -e "[*] 清理旧的构建文件..."
+    # 确保 make 和 cargo 命令存在
+    if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
+    if check_command cargo; then cargo clean || echo -e "${YELLOW}[!] cargo clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
+    echo -e "${GREEN}[+] 清理完成 (或已跳过)${RESET}"
+
+    # 设置 Rust 编译优化标志
+    export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+    export CARGO_PROFILE_RELEASE_LTO="true"
+    echo -e "${GREEN}[+] 已设置 Rust 编译优化标志: RUSTFLAGS='$RUSTFLAGS', CARGO_PROFILE_RELEASE_LTO='$CARGO_PROFILE_RELEASE_LTO'${RESET}"
+
+    local num_j_cores=$(get_num_cores) # 使用兼容性函数获取核心数
+    if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题
+
+    echo -e "[*] 安装 hoonc (使用多线程编译: make -j$num_j_cores)..."
+    if ! cd_nck_dir; then return 1; fi
+    make -j"$num_j_cores" install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-hoonc'"; return 1; }
+    echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
+
+    echo -e "[*] 编译 Nockchain (使用多线程编译: make -j$num_j_cores)..."
+    if ! cd_nck_dir; then return 1; fi
+    make -j"$num_j_cores" build || { echo -e "${RED}[-] build 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores build'"; return 1; }
+    echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
+
+    echo -e "[*] 安装钱包 (使用多线程编译: make -j$num_j_cores)..."
+    if ! cd_nck_dir; then return 1; fi
+    make -j"$num_j_cores" install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain-wallet'"; return 1; }
+    echo -e "${GREEN}[+] 钱包安装完成${RESET}"
+
+    echo -e "[*] 安装节点 (使用多线程编译: make -j$num_j_cores)..."
+    if ! cd_nck_dir; then return 1; fi
+    make -j"$num_j_cores" install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain'"; return 1; }
+    echo -e "${GREEN}[+] 节点程序安装完成${RESET}"
+
+    echo -e "${GREEN}===============================================${RESET}"
+    echo -e "${GREEN}[+] Nockchain 安装和构建已完成！${RESET}"
+    echo -e "${GREEN}===============================================${RESET}"
+    echo ""
+    echo -e "${YELLOW}[!] 下一步重要事项: ${RESET}"
+    echo -e "${YELLOW}  1. 生成您的钱包密钥对 (菜单选项 2)。${RESET}"
+    echo -e "${YELLOW}  2. 将生成的公钥配置到 .env 文件中 (菜单选项 3)。${RESET}"
+    echo -e "${YELLOW}  3. 检查 .env 中的 MINER_THREADS 配置 (菜单选项 8 可设置)。${RESET}"
+    echo -e "${YELLOW}  4. 启动节点进行挖矿 (菜单选项 6) - 推荐使用 systemd 服务。${RESET}"
+    echo ""
+    success=1 # 标记成功
+  } || {
+    echo -e "${RED}[-] 安装构建过程中发生错误！请检查上述日志。${RESET}"
+    success=0 # 标记失败
+  }
+
+  # 停止 SSH keep-alive
+  stop_ssh_keep_alive
+
+  # 根据成功或失败决定是否暂停
+  if [ "$success" -eq 0 ]; then
       pause_and_return
-      return
-  fi
-
-  # 检查磁盘空间
-  echo -e "[*] 检查磁盘空间..."
-  if ! check_disk_space; then
+  else
       pause_and_return
-      return
   fi
-
-  echo -e "[*] 安装系统依赖 (build-essential, clang, llvm-dev, libclang-dev, pkg-config, libssl-dev, cmake, make, systemd)..."
-  sudo apt update || { echo -e "${RED}[-] apt update 失败${RESET}"; pause_and_return; return; }
-  # 确保安装 screen 或 systemd 工具
-  if check_command systemctl; then
-      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
-  else # Fallback for systems without systemd, though less robust
-      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make screen || { echo -e "${RED}[-] 系统依赖安装失败${RESET}"; pause_and_return; return; }
-      echo -e "${YELLOW}[!] 警告: 系统未检测到 systemd。节点将默认使用 screen 后台运行 (稳定性不如 systemd)。${RESET}"
-      echo -e "${YELLOW}    建议在支持 systemd 的 Linux 系统上运行此脚本以获得最佳体验。${RESET}"
-  fi
-  echo -e "${GREEN}[+] 系统依赖安装完成${RESET}"
-
-  echo -e "[*] 安装 Rust..."
-  if ! check_command cargo; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || { echo -e "${RED}[-] Rust 安装失败${RESET}"; pause_and_return; return; }
-    # 立即使 cargo 在当前 shell session 可用
-    export PATH="$HOME/.cargo/bin:$PATH"
-    echo -e "${GREEN}[+] Rust 安装完成${RESET}"
-  else
-    echo -e "${YELLOW}[!] Rust 已安装，跳过安装步骤${RESET}"
-    # 确保当前 shell session 有 cargo，即使已经安装
-    export PATH="$HOME/.cargo/bin:$PATH"
-  fi
-
-  # 确保 cargo bin 目录在 PATH 中 (持久化)
-  local rc_file=""
-  case "$(basename "$SHELL")" in
-      "bash") rc_file="$HOME/.bashrc" ;;
-      "zsh") rc_file="$HOME/.zshrc" ;;
-      *) rc_file="$HOME/.profile" # Fallback for other shells or non-interactive sessions
-  esac
-
-  if ! grep -q 'export PATH=.*\$HOME/\.cargo/bin:\$PATH' "$rc_file" 2>/dev/null; then
-    echo '# Add Rust cargo bin to PATH' >> "$rc_file"
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
-    echo -e "${GREEN}[+] 已将 Cargo 添加到 ${rc_file} 的 PATH (可能需要重新登录或 '. ${rc_file}' 生效)${RESET}"
-  else
-     echo -e "${YELLOW}[!] Cargo 已在 ${rc_file} 的 PATH 中${RESET}"
-  fi
-
-  echo -e "[*] 获取或更新仓库..."
-  if [ -d "$NCK_DIR" ]; then
-    echo -e "[*] 项目目录已存在，尝试拉取最新代码..."
-    if ! cd_nck_dir; then pause_and_return; return; fi
-    git pull || { echo -e "${RED}[-] Git pull 失败${RESET}"; pause_and_return; return; }
-    echo -e "${GREEN}[+] 仓库已更新${RESET}"
-  else
-    echo -e "[*] 克隆仓库到 $NCK_DIR..."
-    git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" || { echo -e "${RED}[-] Git clone 失败${RESET}"; pause_and_return; return; }
-    echo -e "${GREEN}[+] 仓库克隆完成${RESET}"
-    if ! cd_nck_dir; then pause_and_return; return; fi
-  fi
-
-  # 配置 .env 文件，包括挖矿线程数
-  configure_mining_env "$ENV_FILE" || { echo -e "${RED}[-] .env 配置失败${RESET}"; pause_and_return; return; }
-
-  echo -e "[*] 清理旧的构建文件..."
-  # 确保 make 和 cargo 命令存在
-  if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
-  if check_command cargo; then cargo clean || echo -e "${YELLOW}[!] cargo clean 可能失败，如果首次构建请忽略此警告。${RESET}"; fi
-  echo -e "${GREEN}[+] 清理完成 (或已跳过)${RESET}"
-
-  # 设置 Rust 编译优化标志
-  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
-  export CARGO_PROFILE_RELEASE_LTO="true"
-  echo -e "${GREEN}[+] 已设置 Rust 编译优化标志: RUSTFLAGS='$RUSTFLAGS', CARGO_PROFILE_RELEASE_LTO='$CARGO_PROFILE_RELEASE_LTO'${RESET}"
-
-  local num_j_cores=$(get_num_cores) # 使用兼容性函数获取核心数
-  if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题
-
-  echo -e "[*] 安装 hoonc (使用多线程编译: make -j$num_j_cores)..."
-  if ! cd_nck_dir; then pause_and_return; return; fi
-  make -j"$num_j_cores" install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-hoonc'"; pause_and_return; return; }
-  echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
-
-  echo -e "[*] 编译 Nockchain (使用多线程编译: make -j$num_j_cores)..."
-  if ! cd_nck_dir; then pause_and_return; return; fi
-  make -j"$num_j_cores" build || { echo -e "${RED}[-] build 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores build'"; pause_and_return; return; }
-  echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
-
-  echo -e "[*] 安装钱包 (使用多线程编译: make -j$num_j_cores)..."
-  if ! cd_nck_dir; then pause_and_return; return; fi
-  make -j"$num_j_cores" install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain-wallet'"; pause_and_return; return; }
-  echo -e "${GREEN}[+] 钱包安装完成${RESET}"
-
-  echo -e "[*] 安装节点 (使用多线程编译: make -j$num_j_cores)..."
-  if ! cd_nck_dir; then pause_and_return; return; fi
-  make -j"$num_j_cores" install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; echo "请检查错误信息并尝试手动运行 'cd $NCK_DIR && make -j$num_j_cores install-nockchain'"; pause_and_return; return; }
-  echo -e "${GREEN}[+] 节点程序安装完成${RESET}"
-
-  echo -e "${GREEN}===============================================${RESET}"
-  echo -e "${GREEN}[+] Nockchain 安装和构建已完成！${RESET}"
-  echo -e "${GREEN}===============================================${RESET}"
-  echo ""
-  echo -e "${YELLOW}[!] 下一步重要事项: ${RESET}"
-  echo -e "${YELLOW}  1. 生成您的钱包密钥对 (菜单选项 2)。${RESET}"
-  echo -e "${YELLOW}  2. 将生成的公钥配置到 .env 文件中 (菜单选项 3)。${RESET}"
-  echo -e "${YELLOW}  3. 检查 .env 中的 MINER_THREADS 配置 (菜单选项 8 可设置)。${RESET}"
-  echo -e "${YELLOW}  4. 启动节点进行挖矿 (菜单选项 6) - 推荐使用 systemd 服务。${RESET}"
-  echo ""
-
-  pause_and_return
 }
 
 # ========= 钱包操作函数 =========
@@ -492,7 +548,7 @@ function install_systemd_service() {
     fi
     chmod +x "$run_script"
 
-    # 重新 .env 确保最新的配置被读取
+    # 重新加载 .env 确保最新的配置被读取
     if [ -f "$ENV_FILE" ]; then
         . "$ENV_FILE" # POSIX `.` 命令替代 `source`
         echo -e "${GREEN}[+] 已加载 .env 配置文件${RESET}"
@@ -503,7 +559,7 @@ function install_systemd_service() {
     fi
 
     # 检查 MINING_PUBKEY 是否已设置 (非空)
-    if [ -z "$MINING_PUBKEY" ]; then
+    if [ -z "${MINING_PUBKEY:-}" ]; then # 使用 :- 防止未设置变量报错 (set -u)
         echo -e "${RED}[-] 错误: MINING_PUBKEY 未在 .env 文件中设置!${RESET}"
         echo "请先运行菜单选项 2 (生成钱包) 和 3 (设置公钥) 完成配置。"
         pause_and_return
@@ -512,7 +568,7 @@ function install_systemd_service() {
     echo -e "[*] MINING_PUBKEY 已配置: ${GREEN}$MINING_PUBKEY${RESET}"
 
     # 检查 MINER_THREADS 是否已设置 (非空)，并提示
-    if [ -z "$MINER_THREADS" ]; then
+    if [ -z "${MINER_THREADS:-}" ]; then # 使用 :- 防止未设置变量报错 (set -u)
         echo -e "${YELLOW}[!] 警告: MINER_THREADS 未在 .env 文件中设置。${RESET}"
         echo "    矿工可能会以默认线程数运行 (通常为单线程)。建议通过选项 8 设置。"
     else
@@ -710,7 +766,7 @@ function start_node_screen_legacy() {
       return
   fi
 
-  # 重新 .env 确保最新的配置被读取
+  # 重新加载 .env 确保最新的配置被读取
   if [ -f "$ENV_FILE" ]; then
       . "$ENV_FILE" # POSIX `.` 命令替代 `source`
       echo -e "${GREEN}[+] 已加载 .env 配置文件${RESET}"
@@ -721,7 +777,7 @@ function start_node_screen_legacy() {
   fi
 
   # 检查 MINING_PUBKEY 是否已设置 (非空)
-  if [ -z "$MINING_PUBKEY" ]; then
+  if [ -z "${MINING_PUBKEY:-}" ]; then
       echo -e "${RED}[-] 错误: MINING_PUBKEY 未在 .env 文件中设置!${RESET}"
       echo "请先运行菜单选项 2 (生成钱包) 和 3 (设置公钥) 完成配置。"
       pause_and_return
@@ -730,7 +786,7 @@ function start_node_screen_legacy() {
   echo -e "[*] MINING_PUBKEY 已配置: ${GREEN}$MINING_PUBKEY${RESET}"
 
   # 检查 MINER_THREADS 是否已设置 (非空)，并提示
-  if [ -z "$MINER_THREADS" ]; then
+  if [ -z "${MINER_THREADS:-}" ]; then
       echo -e "${YELLOW}[!] 警告: MINER_THREADS 未在 .env 文件中设置。${RESET}"
       echo "    矿工可能会以默认线程数运行 (通常为单线程)。建议通过选项 8 设置。"
   else
