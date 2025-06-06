@@ -421,17 +421,13 @@ function setup_all() {
     make -j"$num_j_cores" install-hoonc || { echo -e "${RED}[-] 错误: hoonc 编译或安装失败。${RESET}"; exit 1; }
     echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
 
-    # === 关键修改从这里开始 ===
     echo -e "${BLUE}[*] 正在编译 Nockchain Hoon 内核文件 (.jam)... (生成 wal.jam, dumb.jam, miner.jam等)${RESET}"
-    # Nockchain 的 Makefile 中，build-hoon 目标负责生成这些 .jam 文件
     make -j"$num_j_cores" build-hoon || { echo -e "${RED}[-] 错误: Nockchain Hoon 内核文件编译失败。请检查 hoonc 是否正常工作。${RESET}"; exit 1; }
     echo -e "${GREEN}[+] Nockchain Hoon 内核文件 (.jam) 编译完成${RESET}"
 
     echo -e "${BLUE}[*] 正在编译 Nockchain Rust 主程序... (依赖已生成的 .jam 文件)${RESET}"
-    # Nockchain 的 Makefile 中，build-rust 目标负责编译 Rust 代码
     make -j"$num_j_cores" build-rust || { echo -e "${RED}[-] 错误: Nockchain Rust 主程序编译失败。${RESET}"; exit 1; }
     echo -e "${GREEN}[+] Nockchain Rust 主程序编译完成${RESET}"
-    # === 关键修改到此结束 ===
 
     echo -e "${BLUE}[*] 正在编译并安装 Nockchain 钱包...${RESET}"
     make -j"$num_j_cores" install-nockchain-wallet || { echo -e "${RED}[-] 错误: Nockchain 钱包编译或安装失败。${RESET}"; exit 1; }
@@ -557,15 +553,19 @@ function install_systemd_service() {
     echo -e "${BLUE}[*] 准备创建 systemd 服务文件: $SERVICE_FILE...${RESET}"
     if ! cd_nck_dir; then pause_and_return; return 1; fi
 
-    # 检查启动脚本是否存在并赋予执行权限
-    local run_script="./scripts/run_nockchain_miner.sh"
-    if [ ! -f "$run_script" ]; then
-        echo -e "${RED}[-] 错误: 找不到启动脚本 $run_script。请先运行选项 1 完成安装构建。${RESET}"
-        pause_and_return
-        return 1
-    fi
-    chmod +x "$run_script"
-    echo -e "${GREEN}[+] 启动脚本 '$run_script' 已检查并赋予执行权限。${RESET}"
+    # -----------------------------------------------------------------------
+    # 核心修改：移除对不存在的 run_nockchain_miner.sh 脚本的检查和 chmod
+    # Nockchain 的官方仓库中没有这个脚本。
+    # -----------------------------------------------------------------------
+    # local run_script="./scripts/run_nockchain_miner.sh"
+    # if [ ! -f "$run_script" ]; then
+    #     echo -e "${RED}[-] 错误: 找不到启动脚本 $run_script。请先运行选项 1 完成安装构建。${RESET}"
+    #     pause_and_return
+    #     return 1
+    # fi
+    # chmod +x "$run_script"
+    # echo -e "${GREEN}[+] 启动脚本 '$run_script' 已检查并赋予执行权限。${RESET}"
+    # -----------------------------------------------------------------------
 
     # 重新加载 .env 确保最新的配置被读取
     echo -e "${BLUE}[*] 尝试加载 .env 配置文件...${RESET}"
@@ -607,7 +607,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$NCK_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/bin/bash -c \"$NCK_DIR/scripts/run_nockchain_miner.sh\"
+ExecStart=$NCK_DIR/target/release/nockchain  # 核心修改：直接运行 nockchain 二进制文件
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536 # Increase file descriptor limit for potential network connections
