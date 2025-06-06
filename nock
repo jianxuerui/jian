@@ -401,8 +401,8 @@ function setup_all() {
     configure_mining_env "$ENV_FILE" || exit 1 # 配置 .env，如果失败则退出
 
     echo -e "${BLUE}[*] 清理旧的构建文件 (如果存在)...${RESET}"
-    # 确保 make 和 cargo 命令存在
-    if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 警告: 如果首次构建请忽略此警告。${RESET}"; fi
+    # 确保 make 命令存在，并允许 make clean 失败，因为有些 Makefiles 可能没有这个目标
+    if check_command make; then make clean || echo -e "${YELLOW}[!] make clean 警告: 如果首次构建或 Makefile 无此目标请忽略此警告。${RESET}"; fi
     if check_command cargo; then cargo clean || echo -e "${YELLOW}[!] cargo clean 警告: 如果首次构建请忽略此警告。${RESET}"; fi
     echo -e "${GREEN}[+] 清理完成 (或已跳过)${RESET}"
 
@@ -421,9 +421,17 @@ function setup_all() {
     make -j"$num_j_cores" install-hoonc || { echo -e "${RED}[-] 错误: hoonc 编译或安装失败。${RESET}"; exit 1; }
     echo -e "${GREEN}[+] hoonc 安装完成${RESET}"
 
-    echo -e "${BLUE}[*] 正在编译 Nockchain 主程序...${RESET}"
-    make -j"$num_j_cores" build || { echo -e "${RED}[-] 错误: Nockchain 主程序编译失败。${RESET}"; exit 1; }
-    echo -e "${GREEN}[+] Nockchain 编译完成${RESET}"
+    # === 关键修改从这里开始 ===
+    echo -e "${BLUE}[*] 正在编译 Nockchain Hoon 内核文件 (.jam)... (生成 wal.jam, dumb.jam, miner.jam等)${RESET}"
+    # Nockchain 的 Makefile 中，build-hoon 目标负责生成这些 .jam 文件
+    make -j"$num_j_cores" build-hoon || { echo -e "${RED}[-] 错误: Nockchain Hoon 内核文件编译失败。请检查 hoonc 是否正常工作。${RESET}"; exit 1; }
+    echo -e "${GREEN}[+] Nockchain Hoon 内核文件 (.jam) 编译完成${RESET}"
+
+    echo -e "${BLUE}[*] 正在编译 Nockchain Rust 主程序... (依赖已生成的 .jam 文件)${RESET}"
+    # Nockchain 的 Makefile 中，build-rust 目标负责编译 Rust 代码
+    make -j"$num_j_cores" build-rust || { echo -e "${RED}[-] 错误: Nockchain Rust 主程序编译失败。${RESET}"; exit 1; }
+    echo -e "${GREEN}[+] Nockchain Rust 主程序编译完成${RESET}"
+    # === 关键修改到此结束 ===
 
     echo -e "${BLUE}[*] 正在编译并安装 Nockchain 钱包...${RESET}"
     make -j"$num_j_cores" install-nockchain-wallet || { echo -e "${RED}[-] 错误: Nockchain 钱包编译或安装失败。${RESET}"; exit 1; }
@@ -444,7 +452,7 @@ function setup_all() {
     echo -e "${RED}===============================================${RESET}"
     echo -e "${RED}[-] Nockchain 安装或构建过程中发生错误！请检查上述日志，查找 '错误:' 或 'Error' 关键字。${RESET}"
     echo -e "${RED}    如果某个 'make' 命令失败，您可以尝试进入 '$NCK_DIR' 目录，手动执行失败的 'make' 命令以查看详细错误。${RESET}"
-    echo -e "${RED}    例如: cd $NCK_DIR && make install-hoonc (替换为您失败的命令)${RESET}"
+    echo -e "${RED}    例如: cd $NCK_DIR && make build-hoon (或 make build-rust)${RESET}"
     echo -e "${RED}===============================================${RESET}"
   else
     echo -e "${GREEN}===============================================${RESET}"
