@@ -393,8 +393,8 @@ function setup_all() {
     if check_command systemctl; then
         sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make || { echo -e "${RED}[-] 错误: 系统依赖安装失败。请检查错误信息。${RESET}"; exit 1; }
     else
-        echo -e "${RED}[-] 错误: 您的系统不支持 systemd。此脚本主要依赖 systemd 进行节点管理。${RESET}"
-        echo -e "${RED}    建议在支持 systemd 的 Linux 系统上运行此脚本。${RESET}"
+        echo -e "${RED}[-] 错误: 您的系统不支持 systemd。此脚本主要依赖 systemd 进行节点管理。${RED}"
+        echo -e "${RED}    建议在支持 systemd 的 Linux 系统上运行此脚本。${RED}"
         exit 1
     fi
     echo -e "${GREEN}[+] 系统依赖安装完成${RESET}"
@@ -632,6 +632,7 @@ function install_systemd_service() {
 
     echo -e "${BLUE}[*] 正在写入 systemd 服务文件内容到 $SERVICE_FILE...${RESET}"
     # 创建 systemd 服务文件
+    # ==== 关键修改部分：移除了 ExecStart 行末尾的注释 ====
     sudo bash -c "cat <<EOF > $SERVICE_FILE
 [Unit]
 Description=$SERVICE_NAME service
@@ -642,7 +643,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$NCK_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$NCK_DIR/target/release/nockchain  # 直接运行 nockchain 二进制文件
+ExecStart=$NCK_DIR/target/release/nockchain
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536 # Increase file descriptor limit for potential network connections
@@ -653,6 +654,7 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF"
+    # ==== 关键修改部分结束 ====
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}[-] 错误: 创建 systemd 服务文件失败。请检查权限或尝试手动创建。${RESET}"
