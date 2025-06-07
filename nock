@@ -44,8 +44,8 @@ function show_banner() {
   echo "         Nockchain 安装与挖矿助手"
   echo "==============================================="
   echo -e "${RESET}"
-  echo "🔧 增强编译并行度，配置挖矿线程数"
-  echo "🚀 ${BOLD}更强大的挖矿锄头：采用 Systemd 服务管理，提升稳定性与性能！${RESET}"
+  echo "🔧 增强编译并行度，优化挖矿线程数"
+  echo "🚀 ${BOLD}更强大的挖矿锄头：采用 Systemd 服务管理，并优化 CPU 调度优先级，大幅提升挖矿稳定性与性能！${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
@@ -319,7 +319,8 @@ function set_miner_threads_env() {
 
   local max_cores=$(get_num_cores)
   echo "您的系统检测到有 ${max_cores} 个 CPU 核心。"
-  read -r -p "请输入挖矿线程数 (MINER_THREADS，建议不超过核心数 $max_cores): " threads
+  # 优化提示，引导用户选择合适的线程数以最大化性能
+  read -r -p "请输入挖矿线程数 (MINER_THREADS)。建议将其设置为您的CPU核心数 (${max_cores} 个) 以最大化挖矿性能，或设置为 ${max_cores}-1 以保持系统响应： " threads
   if [ -z "$threads" ]; then
     echo -e "${RED}[-] 线程数不能为空${RESET}"
     pause_and_return
@@ -382,7 +383,7 @@ function setup_all() {
     fi
     echo -e "${GREEN}[+] 核心系统命令检查通过。${RESET}"
 
-    echo -e "${BLUE}--- 步骤 2/8: 检查磁盘空间 ---${RESET}"
+    echo -e "${BLUE}--- 2/8: 检查磁盘空间 ---${RESET}"
     check_disk_space || exit 1 # 如果磁盘空间不足，退出子 shell
 
     echo -e "${BLUE}--- 步骤 3/8: 安装系统依赖 (build-essential, clang, llvm-dev, libclang-dev, pkg-config, libssl-dev, cmake, make, systemd) ---${RESET}"
@@ -497,7 +498,7 @@ function setup_all() {
     echo -e "${RED}===============================================${RESET}"
     echo -e "${RED}[-] Nockchain 安装或构建过程中发生错误！请检查上述日志，查找 '错误:' 或 'Error' 关键字。${RESET}"
     echo -e "${RED}    如果某个 'make' 命令失败，您可以尝试进入 '$NCK_DIR' 目录，手动执行失败的 'make' 命令以查看详细错误。${RED}"
-    echo -e "${RED}    例如: cd $NCK_DIR && make build-hoon (或 make build-rust)${RESET}"
+    echo -e "${RED}    例如: cd $NCK_DIR && make build-hoon (或 make build-rust)${RED}"
     echo -e "${RED}===============================================${RESET}"
   else
     echo -e "${GREEN}===============================================${RESET}"
@@ -631,8 +632,7 @@ function install_systemd_service() {
     fi
 
     echo -e "${BLUE}[*] 正在写入 systemd 服务文件内容到 $SERVICE_FILE...${RESET}"
-    # 创建 systemd 服务文件
-    # ==== 关键修改部分：移除了 ExecStart 行末尾的注释 ====
+    # 创建 systemd 服务文件，并添加挖矿模式优化参数
     sudo bash -c "cat <<EOF > $SERVICE_FILE
 [Unit]
 Description=$SERVICE_NAME service
@@ -646,7 +646,12 @@ EnvironmentFile=$ENV_FILE
 ExecStart=$NCK_DIR/target/release/nockchain
 Restart=on-failure
 RestartSec=5s
-LimitNOFILE=65536 # Increase file descriptor limit for potential network connections
+LimitNOFILE=65536 # 增加文件描述符限制，以应对潜在的网络连接
+
+# ====== Nockchain 挖矿模式性能优化 ======
+Nice=-5       # 提高进程调度优先级 (-20最高, 19最低, 0默认)，-5为适度提高
+CPUShares=2048 # 在CPU资源竞争时，分配更多的CPU份额 (默认1024)
+# ====== 结束挖矿模式性能优化 ======
 
 StandardOutput=journal
 StandardError=journal
@@ -654,7 +659,6 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF"
-    # ==== 关键修改部分结束 ====
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}[-] 错误: 创建 systemd 服务文件失败。请检查权限或尝试手动创建。${RESET}"
@@ -696,7 +700,7 @@ function start_node_systemd() {
 
   # 检查并停止旧的 screen 会话 (以防万一用户从 screen 切换到 systemd)
   if screen -list | grep -q "nockchain"; then
-    echo -e "${YELLOW}[*] 检测到旧的 'nockchain' screen 会话，尝试关闭...${RESET}" # Added -e
+    echo -e "${YELLOW}[*] 检测到旧的 'nockchain' screen 会话，尝试关闭...${RESET}"
     screen -S nockchain -X quit || {
       echo -e "${YELLOW}[!] 警告: 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
     }
