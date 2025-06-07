@@ -1,4 +1,6 @@
 #!/bin/bash
+# 这个脚本需要 Bash 环境，并且依赖一些 GNU/Linux 工具。
+# 已经尽力做了一些跨系统（如 macOS/BSD）兼容性处理，但主要设计为在基于 systemd 的 Linux 发行版上运行。
 
 # ==============================================================================
 # Nockchain 安装与挖矿助手
@@ -9,7 +11,7 @@
 # ==============================================================================
 
 # 设置脚本健壮性选项
-# -u: 遇到未设置的变量时报错
+# -u: 遇到未设置的变量时报错 (例如 ${VAR} 或 $VAR，但 ${VAR:-} 不会)
 # -o pipefail: 管道命令中任何一个命令失败，整个管道就失败
 set -uo pipefail
 
@@ -106,6 +108,8 @@ function get_num_cores() {
         cores=$(nproc)
     elif check_command sysctl; then # macOS/BSD
         cores=$(sysctl -n hw.ncpu)
+    elif check_command getconf; then # 更通用的 POSIX 兼容方法
+        cores=$(getconf _NPROCESSORS_ONLN)
     else
         echo -e "${YELLOW}[!] 警告: 无法自动检测CPU核心数，默认为 2。${RESET}"
         cores=2 # 默认值
@@ -139,7 +143,7 @@ function check_disk_space() {
 
     # 尝试使用 df -k 并解析，兼容性更好
     # awk '{print $4}' 获取第四列 (Available)
-    # tail -n 1 确保只取最后一行 (通常是磁盘挂载点信息)
+    # NR==2 确保只取第二行 (通常是磁盘挂载点信息)
     available_kb=$(df -k "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
 
     if [ -z "$available_kb" ]; then
@@ -164,11 +168,11 @@ function check_disk_space() {
 function run_nockchain_binary() {
     local binary_name="$1"
     shift # 移除第一个参数 (binary_name)
-    local args="$@"
+    local remaining_args=("$@") # 将所有剩余参数作为数组保存，以便正确引用
 
     local binary_path=""
 
-    echo -e "${BLUE}[*] 尝试查找并运行 Nockchain 二进制文件: '$binary_name' ${args}${RESET}"
+    echo -e "${BLUE}[*] 尝试查找并运行 Nockchain 二进制文件: '$binary_name' ${remaining_args[*]}${RESET}"
 
     # 1. 尝试从 PATH 中查找 (make install 后的理想路径)
     if command -v "$binary_name" &>/dev/null; then
@@ -183,10 +187,10 @@ function run_nockchain_binary() {
         return 1
     fi
 
-    # 执行命令
-    echo -e "${BLUE}[*] 执行: \"$binary_path\" ${args}${RESET}"
-    "$binary_path" $args || {
-        echo -e "${RED}[-] 命令 '$binary_name $args' 执行失败${RESET}"
+    # 执行命令，使用 "${remaining_args[@]}" 确保所有参数（包括带空格的）都被正确传递
+    echo -e "${BLUE}[*] 执行: \"$binary_path\" ${remaining_args[*]}${RESET}" # 仅用于显示
+    "$binary_path" "${remaining_args[@]}" || { # 实际执行时，正确引用数组元素
+        echo -e "${RED}[-] 命令 '$binary_name ${remaining_args[*]}' 执行失败${RESET}"
         return 1
     }
     return 0
@@ -196,10 +200,10 @@ function run_nockchain_binary() {
 # 在后台启动一个进程，周期性地发送空字符到标准输出，以防止 SSH 会话因不活动而断开。
 function start_ssh_keep_alive() {
     echo -e "${BLUE}[*] 启动 SSH 连接保持活动进程...${RESET}"
-    # 每 15 秒发送一个空行，抑制其输出，并在后台运行 (调整为更频繁)
+    # 每 15 秒发送一个空行，抑制其输出，并在后台运行
     while true; do
         echo -n ""
-        sleep 15 # 缩短间隔
+        sleep 15
     done > /dev/null 2>&1 &
     SSH_KEEP_ALIVE_PID=$! # 存储后台进程的 PID
     echo -e "${GREEN}[+] SSH 连接保持活动进程已启动 (PID: $SSH_KEEP_ALIVE_PID)${RESET}"
@@ -282,14 +286,16 @@ function set_pubkey_env() {
     return
   fi
 
-  # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)，确保无注释和空行
+  # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)
+  local sed_script="/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey"
   if grep -q '^MINING_PUBKEY=' "$ENV_FILE"; then
     echo -e "${BLUE}[*] 更新 .env 文件中的 MINING_PUBKEY...${RESET}"
-    if ! sed -i -e "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null && \
-       ! sed -i "" -e "/^MINING_PUBKEY=/c\MINING_PUBKEY=$pubkey" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${RED}[-] 警告: 无法更新 MINING_PUBKEY 到 $ENV_FILE，请手动编辑。${RESET}"
-      pause_and_return
-      return
+    if ! sed -i -e "$sed_script" "$ENV_FILE" 2>/dev/null; then # 尝试 GNU sed
+        if ! sed -i "" -e "$sed_script" "$ENV_FILE" 2>/dev/null; then # 尝试 BSD sed
+            echo -e "${RED}[-] 警告: 无法更新 MINING_PUBKEY 到 $ENV_FILE，请手动编辑。${RESET}"
+            pause_and_return
+            return
+        fi
     fi
   else
     echo -e "${BLUE}[*] 添加 MINING_PUBKEY 到 .env 文件...${RESET}"
@@ -327,14 +333,16 @@ function set_miner_threads_env() {
     return
   fi
 
-   # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)，确保无注释和空行
+  # 使用 sed 删除旧行并添加新行 (兼容 GNU/BSD sed)
+  local sed_script="/^MINER_THREADS=/c\MINER_THREADS=$threads"
   if grep -q '^MINER_THREADS=' "$ENV_FILE"; then
     echo -e "${BLUE}[*] 更新 .env 文件中的 MINER_THREADS...${RESET}"
-    if ! sed -i -e "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null && \
-       ! sed -i "" -e "/^MINER_THREADS=/c\MINER_THREADS=$threads" "$ENV_FILE" 2>/dev/null; then
-      echo -e "${RED}[-] 警告: 无法更新 MINER_THREADS 到 $ENV_FILE，请手动编辑。${RESET}"
-      pause_and_return
-      return
+    if ! sed -i -e "$sed_script" "$ENV_FILE" 2>/dev/null; then # 尝试 GNU sed
+        if ! sed -i "" -e "$sed_script" "$ENV_FILE" 2>/dev/null; then # 尝试 BSD sed
+            echo -e "${RED}[-] 警告: 无法更新 MINER_THREADS 到 $ENV_FILE，请手动编辑。${RESET}"
+            pause_and_return
+            return
+        fi
     fi
   else
     echo -e "${BLUE}[*] 添加 MINER_THREADS 到 .env 文件...${RESET}"
@@ -396,6 +404,8 @@ function setup_all() {
       echo -e "${BLUE}[*] Rust 未安装，正在通过 rustup.rs 进行安装...${RESET}"
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || { echo -e "${RED}[-] 错误: Rust 安装失败。请检查网络连接。${RESET}"; exit 1; }
       # 立即使 cargo 在当前 shell session 可用 (用于后续 make 命令)
+      # Rustup 会在安装完成后提示你运行 source "$HOME/.cargo/env"
+      # 但是对于脚本自动化，直接export PATH是必要的。
       export PATH="$HOME/.cargo/bin:$PATH"
       echo -e "${GREEN}[+] Rust 安装完成${RESET}"
     else
@@ -412,6 +422,7 @@ function setup_all() {
         *) rc_file="$HOME/.profile" # Fallback for other shells or non-interactive sessions
     esac
 
+    # 仅当文件存在且不包含该行时才添加
     if [ -f "$rc_file" ] && ! grep -q 'export PATH=.*\$HOME/\.cargo/bin:\$PATH' "$rc_file" 2>/dev/null; then
       echo '# Add Rust cargo bin to PATH' >> "$rc_file"
       echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
@@ -450,7 +461,7 @@ function setup_all() {
     echo -e "${GREEN}[+] 已设置 Rust 编译优化标志: RUSTFLAGS='$RUSTFLAGS', CARGO_PROFILE_RELEASE_LTO='$CARGO_PROFILE_RELEASE_LTO'${RESET}"
 
     local num_j_cores=$(get_num_cores) # 使用兼容性函数获取核心数
-    if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题
+    if [ "$num_j_cores" -eq 0 ]; then num_j_cores=1; fi # 避免 -j 0 导致的问题 (虽然 nproc 通常不会返回0)
 
     echo -e "${BLUE}--- 步骤 8/8: 编译并安装 Nockchain 组件 (使用多线程编译: -j$num_j_cores) ---${RESET}"
     cd_nck_dir # 再次确认在正确目录
@@ -583,13 +594,13 @@ function install_systemd_service() {
     echo -e "${BLUE}[*] 检查是否支持 systemd...${RESET}"
     if ! check_command systemctl; then
         echo -e "${RED}[-] 您的系统不支持 systemd。${RESET}"
-        echo -e "${RED}    此脚本主要依赖 systemd 进行节点管理，建议在支持 systemd 的 Linux 系统上运行。${RESET}"
+        echo -e "${RED}    此脚本主要依赖 systemd 进行节点管理，建议在支持 systemd 的 Linux 系统上运行。${RED}"
         pause_and_return
         return 1
     fi
 
     echo -e "${BLUE}[*] 准备创建 systemd 服务文件: $SERVICE_FILE...${RESET}"
-    if ! cd_nck_dir; then pause_and_return; return 1; }
+    if ! cd_nck_dir; then pause_and_return; return 1; fi
 
     # 重新加载 .env 确保最新的配置被读取
     echo -e "${BLUE}[*] 尝试加载 .env 配置文件...${RESET}"
@@ -683,7 +694,7 @@ function start_node_systemd() {
 
   # 检查并停止旧的 screen 会话 (以防万一用户从 screen 切换到 systemd)
   if screen -list | grep -q "nockchain"; then
-    echo "[*] 检测到旧的 'nockchain' screen 会话，尝试关闭...${RESET}"
+    echo -e "${YELLOW}[*] 检测到旧的 'nockchain' screen 会话，尝试关闭...${RESET}" # Added -e
     screen -S nockchain -X quit || {
       echo -e "${YELLOW}[!] 警告: 无法关闭旧的 screen 会话，可能需要手动操作: screen -S nockchain -X quit${RESET}"
     }
