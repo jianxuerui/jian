@@ -51,6 +51,42 @@ function show_banner() {
   echo ""
 }
 
+# ========= SSH 掉线防护提示 =========
+function show_preflight_message() {
+  show_banner
+  echo -e "${BOLD}${YELLOW}*** 重要提示：避免长时间操作（如编译）时 SSH 掉线 ***${RESET}"
+  echo -e "${YELLOW}  为了确保长时间的安装或编译过程不被 SSH 连接中断，${BOLD}强烈建议您采取以下措施：${RESET}"
+  echo ""
+  echo -e "${BOLD}1. 使用 'screen' 或 'tmux' (推荐！)${RESET}"
+  echo "   这两种工具允许您创建一个可分离的终端会话。即使您的 SSH 连接断开，进程也会在服务器上继续运行。"
+  echo "   当您重新连接后，可以重新附着到会话继续查看。这几乎是云服务器长时间任务的标准做法。"
+  echo ""
+  echo -e "   ${BOLD}--- 如何使用 screen ---${RESET}"
+  echo "   a. 连接到服务器后，先运行: ${GREEN}screen -S NCK_Session${RESET}"
+  echo "   b. 在新的 screen 会话中运行本脚本: ${GREEN}bash $(basename "$0")${RESET}"
+  echo "   c. 需要分离会话时 (不关闭进程): 按 ${GREEN}Ctrl + A${RESET}，然后松开，再按 ${GREEN}D${RESET}"
+  echo "   d. 重新连接并附着会话: ${GREEN}screen -r NCK_Session${RESET}"
+  echo ""
+  echo -e "   ${BOLD}--- 如何使用 tmux ---${RESET}"
+  echo "   a. 连接到服务器后，先运行: ${GREEN}tmux new -s NCK_Session${RESET}"
+  echo "   b. 在新的 tmux 会话中运行本脚本: ${GREEN}bash $(basename "$0")${RESET}"
+  echo "   c. 需要分离会话时 (不关闭进程): 按 ${GREEN}Ctrl + B${RESET}，然后松开，再按 ${GREEN}D${RESET}"
+  echo "   d. 重新连接并附着会话: ${GREEN}tmux attach -t NCK_Session${RESET}"
+  echo ""
+  echo -e "${BOLD}2. 配置您本地的 SSH 客户端 (可选，但推荐)${RESET}"
+  echo "   编辑您本地电脑的 ~/.ssh/config 文件 (如果不存在则创建)，添加以下内容以发送空包保持连接："
+  echo "   ${GREEN}Host your_server_alias_or_ip${RESET}"
+  echo "     ${GREEN}ServerAliveInterval 60${RESET}"
+  echo "     ${GREEN}ServerAliveCountMax 3${RESET}"
+  echo "   （将 'your_server_alias_or_ip' 替换为您的服务器 IP 或别名）"
+  echo ""
+  echo -e "${YELLOW}请确保您已理解并决定是否采取上述措施。${RESET}"
+  read -r -p "按任意键继续运行脚本主菜单..." -s -n 1
+  echo # 换行
+  clear # 清除提示信息，显示主菜单
+}
+
+
 # ========= 常用函数 =========
 
 # 检查命令是否存在
@@ -160,10 +196,10 @@ function run_nockchain_binary() {
 # 在后台启动一个进程，周期性地发送空字符到标准输出，以防止 SSH 会话因不活动而断开。
 function start_ssh_keep_alive() {
     echo -e "${BLUE}[*] 启动 SSH 连接保持活动进程...${RESET}"
-    # 每 30 秒发送一个空行，抑制其输出，并在后台运行
+    # 每 15 秒发送一个空行，抑制其输出，并在后台运行 (调整为更频繁)
     while true; do
         echo -n ""
-        sleep 30
+        sleep 15 # 缩短间隔
     done > /dev/null 2>&1 &
     SSH_KEEP_ALIVE_PID=$! # 存储后台进程的 PID
     echo -e "${GREEN}[+] SSH 连接保持活动进程已启动 (PID: $SSH_KEEP_ALIVE_PID)${RESET}"
@@ -553,19 +589,7 @@ function install_systemd_service() {
     fi
 
     echo -e "${BLUE}[*] 准备创建 systemd 服务文件: $SERVICE_FILE...${RESET}"
-    if ! cd_nck_dir; then pause_and_return; return 1; fi
-
-    # 核心修改：移除对不存在的 run_nockchain_miner.sh 脚本的检查和 chmod
-    # Nockchain 的官方仓库中没有这个脚本。
-    # local run_script="./scripts/run_nockchain_miner.sh"
-    # if [ ! -f "$run_script" ]; then
-    #     echo -e "${RED}[-] 错误: 找不到启动脚本 $run_script。请先运行选项 1 完成安装构建。${RESET}"
-    #     pause_and_return
-    #     return 1
-    # fi
-    # chmod +x "$run_script"
-    # echo -e "${GREEN}[+] 启动脚本 '$run_script' 已检查并赋予执行权限。${RESET}"
-
+    if ! cd_nck_dir; then pause_and_return; return 1; }
 
     # 重新加载 .env 确保最新的配置被读取
     echo -e "${BLUE}[*] 尝试加载 .env 配置文件...${RESET}"
@@ -607,7 +631,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$NCK_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$NCK_DIR/target/release/nockchain  # 核心修改：直接运行 nockchain 二进制文件
+ExecStart=$NCK_DIR/target/release/nockchain  # 直接运行 nockchain 二进制文件
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536 # Increase file descriptor limit for potential network connections
@@ -808,6 +832,9 @@ function main_menu() {
 if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
 fi
+
+# 在进入主菜单循环前，显示 SSH 掉线防护提示
+show_preflight_message
 
 # 启动主菜单循环
 while true; do
