@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v4.2 - 终极稳定版)
+# Nockchain 挖矿助手 (K2 增强融合版 v4.3 - 变量安全增强)
 # ------------------------------------------------------------------------------
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -35,7 +35,6 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 HOON_KERNEL_PATH="$NCK_DIR/pkg/sys/hoon"
 
 # --- 增强版 Hoon 内核 (Base64 编码) ---
-# 此处代码为最终稳定形式，无需修改。它保证了内核文件的精确性和兼容性。
 ENHANCED_HOON_KERNEL_BASE64="OjoKOjo6OAEgICAgL3N5cy9ob29uICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgOjoKICAPOjoiOjoAPToAPAE9PCAgcmlkZQo9PiAgJTEzOSAAPg==CiAgOjo6OgAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA6OgogIA86OiI6OiAPToAPAE8PACAwOiB2ZXJzaW9uIHN0dWIgICAgICAgICAgICAgICAgICAgOjoKICApOjo/Pjw6Ojo7PDs/Ojo+Pjs6OiAgaG9vbi12ZXJzaW9uICA+"
 
 # --- 核心函数 ---
@@ -44,12 +43,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo "  Nockchain 挖矿助手 (K2 增强融合版 v4.2)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.3)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 安装过程任何失败都会被捕获并明确提示！${RESET}"
+  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 修复了 'unbound variable' 错误，兼容所有环境！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -77,7 +76,8 @@ function pause_and_return() {
 
 # 智能检查并提示使用 screen/tmux
 function preflight_check() {
-    if [[ -z "${STY}" && -z "${TMUX}" ]]; then
+    # FIX: 使用 ${VAR:-} 语法来安全地检查未设置的变量，以兼容 set -u
+    if [[ -z "${STY:-}" && -z "${TMUX:-}" ]]; then
         echo -e "${BOLD}${YELLOW}*** 警告：您当前不在 screen 或 tmux 会话中！***${RESET}"
         echo -e "为防止SSH掉线导致安装中断，强烈建议您退出脚本，然后按以下步骤操作："
         echo -e "   1. 运行: ${GREEN}screen -S nck${RESET}"
@@ -100,7 +100,7 @@ function check_and_create_swap() {
     local ram_mb=$(free -m | awk '/^Mem:/{print $2}')
     local swap_mb=$(free -m | awk '/^Swap:/{print $2}')
     local total_mem_mb=$((ram_mb + swap_mb))
-    local min_mem_mb=3800 # 推荐至少有接近4GB的总内存（RAM+Swap）用于编译
+    local min_mem_mb=3800
 
     if [ "$total_mem_mb" -lt "$min_mem_mb" ]; then
         echo -e "${YELLOW}[!] 警告: 系统总内存 (RAM + Swap) 小于 ${min_mem_mb}MB。${RESET}"
@@ -132,10 +132,8 @@ function install_all() {
     preflight_check
     check_and_create_swap
 
-    # 使用子 shell 封装整个安装过程，以实现完美的错误捕获
     (
-    set -e # 在此代码块中，任何错误都会导致立即退出，并将错误码传递给父脚本
-
+    set -e
     echo -e "${BLUE}--- 步骤 1/5: 安装系统依赖 ---${RESET}"
     sudo apt-get update
     sudo apt-get install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix
@@ -160,7 +158,6 @@ function install_all() {
     fi
 
     echo -e "${PURPLE}--- 步骤 4/5: 注入 K2 增强版 Hoon 内核 (v139) ---${RESET}"
-    # 这是内核与脚本接洽的核心步骤，使用标准、可靠的命令
     echo "$ENHANCED_HOON_KERNEL_BASE64" | base64 --decode > "$HOON_KERNEL_PATH"
     if [ $? -ne 0 ]; then
         echo -e "${RED}[-] 致命错误: 注入增强版 Hoon 内核失败！请检查 base64 命令和目录权限。${RESET}"
@@ -175,15 +172,12 @@ function install_all() {
     echo -e "[*] 使用 ${num_cores} 个CPU核心进行编译..."
     make -j"$num_cores" install
     )
-
-    # 捕获上面子 shell 的退出码，这是实现“智能容错”的关键
     local exit_code=$?
 
     if [ "$exit_code" -ne 0 ]; then
         echo -e "\n${RED}=======================================================${RESET}"
         echo -e "${BOLD}${RED}[-] 安装失败！脚本已在出错处停止。${RESET}"
-        echo -e "${YELLOW}请向上滚动查看具体的错误信息（通常在最后几行）。"
-        echo -e "常见原因：权限不足(sudo)、网络问题、内存不足、依赖包冲突等。"
+        echo -e "${YELLOW}请向上滚动查看具体的错误信息。${RESET}"
         echo -e "${RED}=======================================================${RESET}"
     else
         echo -e "\n${GREEN}===============================================${RESET}"
@@ -194,8 +188,7 @@ function install_all() {
     pause_and_return
 }
 
-# 省略其他函数（set_pubkey, start_node 等），因为它们无需修改
-# ... (此处为其他函数，与上一版相同) ...
+# (其他函数 set_pubkey, start_node, stop_node, view_logs, main_menu 保持不变)
 # 2. 设置公钥
 function set_pubkey() {
     echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env 文件...${RESET}"
@@ -306,7 +299,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(自动环境检查, 终极容错)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极容错版)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
