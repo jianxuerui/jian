@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v4.4 - 目录存在性修复)
+# Nockchain 挖矿助手 (K2 增强融合版 v4.5 - Makefile .env 依赖修复)
 # ------------------------------------------------------------------------------
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -43,12 +43,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.4)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.5)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 修复了 'unbound variable' 和 'No such file or directory' 错误！${RESET}"
+  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env依赖)！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -74,9 +74,7 @@ function pause_and_return() {
   echo
 }
 
-# 智能检查并提示使用 screen/tmux
 function preflight_check() {
-    # FIX: 使用 ${VAR:-} 语法来安全地检查未设置的变量，以兼容 set -u
     if [[ -z "${STY:-}" && -z "${TMUX:-}" ]]; then
         echo -e "${BOLD}${YELLOW}*** 警告：您当前不在 screen 或 tmux 会话中！***${RESET}"
         echo -e "为防止SSH掉线导致安装中断，强烈建议您退出脚本，然后按以下步骤操作："
@@ -94,7 +92,6 @@ function preflight_check() {
     sleep 2
 }
 
-# 检查并创建 Swap 虚拟内存
 function check_and_create_swap() {
     echo -e "${BLUE}[*] 正在检查系统内存和Swap空间...${RESET}"
     local ram_mb=$(free -m | awk '/^Mem:/{print $2}')
@@ -158,10 +155,7 @@ function install_all() {
     fi
 
     echo -e "${PURPLE}--- 步骤 4/5: 注入 K2 增强版 Hoon 内核 (v139) ---${RESET}"
-    
-    # 【K2 脚本修复】: 强制创建父目录，防止因 git clone 失败或仓库结构变化导致 "No such file or directory" 错误
     mkdir -p "$(dirname "$HOON_KERNEL_PATH")"
-
     echo "$ENHANCED_HOON_KERNEL_BASE64" | base64 --decode > "$HOON_KERNEL_PATH"
     if [ $? -ne 0 ]; then
         echo -e "${RED}[-] 致命错误: 注入增强版 Hoon 内核失败！请检查 base64 命令和目录权限。${RESET}"
@@ -170,6 +164,13 @@ function install_all() {
     echo -e "${GREEN}[+] 增强版 Hoon 内核已成功注入。${RESET}"
 
     echo -e "${BLUE}--- 步骤 5/5: 编译并安装 Nockchain ---${RESET}"
+    
+    # 【K2 脚本修复 v4.5】: 为满足 Makefile 依赖，在编译前从模板创建 .env 文件
+    if [ -f ".env_example" ] && [ ! -f ".env" ]; then
+        echo -e "${BLUE}[*] 为满足编译依赖，正在从 .env_example 创建 .env 文件...${RESET}"
+        cp .env_example .env
+    fi
+
     export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
     export CARGO_PROFILE_RELEASE_LTO="true"
     local num_cores=$(get_num_cores)
