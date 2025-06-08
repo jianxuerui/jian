@@ -1,8 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v8.2 - 智能引导版)
+# Nockchain 挖矿助手 (K2 增强融合版 v8.2.1 - 智能引导版/修复版)
 # ==============================================================================
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
+#
+# v8.2.1 更新日志:
+# - [修复] 修正了在 install_all 函数中因特殊字符导致 su 子进程执行失败的严重错误。
+#   通过使用 Base64 编码安全地传递内核数据，确保了脚本的稳定性和兼容性。
 #
 # v8.2 更新日志:
 # - [智能引导] 新增自动权限提升功能！如果未使用 root 运行，脚本将自动尝试以 sudo 方式重新启动。
@@ -101,7 +105,7 @@ function detect_system_info() {
         export PKG_MANAGER="apt"
         export UPDATE_CMD="apt-get update -y"
         export INSTALL_CMD="apt-get install -y"
-        export DEP_PACKAGES="clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix"
+        export DEP_PACKAGES="clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix base-files"
     elif command -v dnf &>/dev/null; then
         export PKG_MANAGER="dnf"
         export UPDATE_CMD="dnf check-update"
@@ -140,7 +144,7 @@ function detect_system_info() {
 function show_banner() {
     clear
     echo -e "${BOLD}${BLUE}======================================================${RESET}"
-    echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 增强融合版 v8.2)${RESET}"
+    echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 增强融合版 v8.2.1)${RESET}"
     echo -e "${BOLD}${BLUE}======================================================${RESET}"
     echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"
     echo -e "⚙️ ${BOLD}${GREEN}运行模式: 智能引导版 (已自动获取 Root 权限)${RESET}"
@@ -211,6 +215,10 @@ function install_all() {
     echo -e "${BLUE}--- 步骤 4/5: 克隆和编译 Nockchain (以 '${MINER_USERNAME}' 用户身份) ---${RESET}"
     echo -e "${YELLOW}这部分将自动执行，请耐心等待编译完成...${RESET}"
     
+    # 【修复】将复杂的内核内容编码为安全的 Base64 字符串，以避免在 su 子进程中因特殊字符导致命令失败
+    local b64_kernel
+    b64_kernel=$(echo -n "$HOON_KERNEL_CONTENT" | base64)
+
     su - "${MINER_USERNAME}" -c bash <<EOF
     set -euo pipefail
     
@@ -228,7 +236,8 @@ function install_all() {
     cd "\$NCK_DIR_SUB"
     
     echo "--- [${MINER_USERNAME}] 正在注入增强版内核... ---"
-    echo -n "$HOON_KERNEL_CONTENT" > "\$NCK_DIR_SUB/pkg/sys/hoon"
+    # 【修复】从 Base64 解码并写入文件，确保数据完整性
+    echo "$b64_kernel" | base64 -d > "\$NCK_DIR_SUB/pkg/sys/hoon"
     
     echo "--- [${MINER_USERNAME}] 正在编译，这将花费几分钟时间... ---"
     cargo build --release -p hoonc
@@ -330,7 +339,7 @@ function main_menu() {
     echo -e "  ${CYAN}2)${RESET} 设置/更新挖矿公钥"
     echo ""
     if [[ "$(check_systemd)" == "true" ]]; then
-        if systemctl is-active --quiet "$SERVICE_NAME"; then SERVICE_STATUS="${GREEN}(运行中)${RESET}"; else SERVICE_STATUS="${RED}(已停止)${RESET}"; fi
+        if systemctl is-active --quiet "$SERVICE_NAME" &>/dev/null; then SERVICE_STATUS="${GREEN}(运行中)${RESET}"; else SERVICE_STATUS="${RED}(已停止)${RESET}"; fi
         echo -e "  ${CYAN}3)${RESET} ${BOLD}启动${RESET}挖矿服务 ${SERVICE_STATUS}"
         echo -e "  ${CYAN}4)${RESET} ${BOLD}停止${RESET}挖矿服务"
         echo -e "  ${CYAN}5)${RESET} 查看实时日志"
