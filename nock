@@ -1,13 +1,13 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v5.7 - 全自动权限配置)
+# Nockchain 挖矿助手 (K2 增强融合版 v5.8 - 官方源内核)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 直接用 root 用户运行此脚本。
 # 2. 脚本会自动创建 'miner' 用户、配置免密sudo、并切换执行。
 # 3. 建议在 screen/tmux 中运行: `screen -S nck` 然后 `./nock.sh`
 # ==============================================================================
-# 作者: K2 节点教程分享 (AI 终极自动化版)
+# 作者: K2 节点教程分享 (AI 终极稳定版)
 # Telegram: https://t.me/+EaCiFDOghoM3Yzll
 # Twitter:  https://x.com/BtcK241918
 # ==============================================================================
@@ -27,20 +27,21 @@ function run_as_miner() {
     ENV_FILE="$NCK_DIR/.env"
     SERVICE_NAME="nockchain-miner"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-    HOON_KERNEL_URL="https://gist.githubusercontent.com/git-k2/438b45f1b528a4c042da4938634e797d/raw/hoon_v139"
+    # [核心修复] 直接使用官方 GitHub 仓库的原始文件链接
+    OFFICIAL_HOON_KERNEL_URL="https://raw.githubusercontent.com/zorp-corp/nockchain/main/pkg/sys/hoon"
 
     function show_banner() {
       clear
       echo -e "${BOLD}${BLUE}"
       echo "======================================================"
-      echo " Nockchain 挖矿助手 (K2 增强融合版 v5.7)"
+      echo " Nockchain 挖矿助手 (K2 增强融合版 v5.8)"
       echo "======================================================"
       echo -e "${RESET}"
       echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"
-      echo -e "✨ ${BOLD}${PURPLE}内核增强: 动态下载 v139 优化版 Hoon 内核！${RESET}"
+      echo -e "✨ ${BOLD}${PURPLE}内核增强: 从官方源下载内核并自动升级至 v139！${RESET}"
       echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动编译，补全所有.jam依赖！${RESET}"
       echo -e "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
-      echo "📌 作者: K2 节点教程分享 (AI 终极自动化版)"
+      echo "📌 作者: K2 节点教程分享 (AI 终极稳定版)"
       echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
       echo "🐦 Twitter:  https://x.com/BtcK241918"
       echo "------------------------------------------------------"
@@ -67,7 +68,7 @@ function run_as_miner() {
         set -e
         echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 ---${RESET}"
         sudo apt-get update
-        sudo apt-get install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix
+        sudo apt-get install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix sed
 
         echo -e "${BLUE}--- 步骤 2/4: 安装 Rust ---${RESET}"
         if ! command -v cargo &>/dev/null; then
@@ -81,12 +82,16 @@ function run_as_miner() {
         git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
         cd "$NCK_DIR"
         
-        echo -e "${PURPLE}--- [增强] 动态下载并注入修复版 Hoon 内核 (v139) ---${RESET}"
-        if curl -sSLf -o "$NCK_DIR/pkg/sys/hoon" "$HOON_KERNEL_URL"; then
-            echo -e "${GREEN}[+] 增强版 Hoon 内核已成功注入。${RESET}"
+        echo -e "${PURPLE}--- [增强] 从官方源下载内核并自动升级至 v139 ---${RESET}"
+        # [核心修复] 1. 从官方源下载
+        if curl -sSLf -o "$NCK_DIR/pkg/sys/hoon" "$OFFICIAL_HOON_KERNEL_URL"; then
+            echo -e "${GREEN}[+] 已从官方源成功下载内核文件。${RESET}"
         else
-            echo -e "${RED}致命错误: 无法从 URL 下载内核文件！${RESET}"; exit 1;
+            echo -e "${RED}致命错误: 无法从官方 GitHub URL 下载内核文件！${RESET}"; exit 1;
         fi
+        # [核心修复] 2. 在本地自动修改版本号
+        sed -i 's/++  hoon-version   138/++  hoon-version   139/' "$NCK_DIR/pkg/sys/hoon"
+        echo -e "${GREEN}[+] 内核版本已自动升级至 v139！${RESET}"
         
         echo -e "${RED}${BOLD}--- 步骤 4/4: 执行手动编译流程 ---${RESET}"
         echo -e "${CYAN}[*] 正在编译 Hoon 编译器 (hoonc)...${RESET}"
@@ -116,6 +121,7 @@ function run_as_miner() {
         pause_and_return
     }
 
+    # ... 其他函数 (set_pubkey, start_node, stop_node, view_logs, main_menu) 保持不变 ...
     function set_pubkey() {
         show_banner
         if [ ! -d "$NCK_DIR" ]; then echo -e "${RED}项目目录不存在，请先运行安装。${RESET}"; pause_and_return; return; fi
@@ -191,7 +197,7 @@ EOF"
       echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
       echo "请选择操作:"
       echo ""
-      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v5.7)${RESET}"
+      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v5.8)${RESET}"
       echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
       echo ""
       echo -e "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
@@ -233,7 +239,7 @@ if [ "$(id -u)" -eq 0 ]; then
         echo -e "${GREEN}用户 '${MINER_USERNAME}' 创建并配置成功！${RESET}"
     fi
 
-    # 2. [核心修复] 自动配置 sudo 免密
+    # 2. 自动配置 sudo 免密
     SUDOERS_FILE="/etc/sudoers.d/90-miner-nopasswd"
     if [ ! -f "${SUDOERS_FILE}" ]; then
         echo -e "${BLUE}正在为用户 '${MINER_USERNAME}' 配置 sudo 免密权限...${RESET}"
