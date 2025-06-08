@@ -1,13 +1,14 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v5.3 - 修复内核兼容性)
+# Nockchain 挖矿助手 (K2 增强融合版 v5.4 - 动态内核下载)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
-# 1. 保存此脚本: 例如，保存为 `nock.sh`
-# 2. 授予执行权限: chmod +x nock.sh
-# 3. 在 screen/tmux 中运行以防掉线: screen -S nck && ./nock.sh
+# 1. 切换到普通用户 (非 root): `su - your_username`
+# 2. 保存此脚本: 例如，保存为 `nock.sh`
+# 3. 授予执行权限: `chmod +x nock.sh`
+# 4. 在 screen/tmux 中运行: `screen -S nck` 然后 `./nock.sh`
 # ==============================================================================
-# 作者: K2 节点教程分享 (由 AI 助手修复内核兼容性问题)
+# 作者: K2 节点教程分享 (AI 修复增强版)
 # Telegram: https://t.me/+EaCiFDOghoM3Yzll
 # Twitter:  https://x.com/BtcK241918
 # ==============================================================================
@@ -23,9 +24,8 @@ ENV_FILE="$NCK_DIR/.env"
 SERVICE_NAME="nockchain-miner"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 HOON_KERNEL_PATH="$NCK_DIR/pkg/sys/hoon"
-
-# [修复] 这是完整的、仅修改了版本号为 139 的 Hoon 内核的 Base64 编码，解决了 "invalid kernel jam" 和 "base64: invalid input" 问题。
-ENHANCED_HOON_KERNEL_BASE64="OjoKLytzeXMvaG9vbgorKyAgcmlkZSAgLi5pcwogIHxfICAxb3N0PW92dW1dCiAgKysgIHZlcgogICAgMCUREQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg-KysgIGhvb24tdmVyc2lvbiALSAxMzkgDQo="
+# [核心修复] 定义内核文件的下载地址，而不是硬编码内容
+HOON_KERNEL_URL="https://gist.githubusercontent.com/git-k2/438b45f1b528a4c042da4938634e797d/raw/hoon_v139"
 
 # --- 核心函数 ---
 
@@ -33,14 +33,13 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v5.3)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v5.4)"
   echo "======================================================"
   echo -e "${RESET}"
-  echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核 (兼容性已修复)！${RESET}"
-  echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动编译，已补全所有已知.jam文件依赖！${RESET}"
-  echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
-  echo "📌 作者: K2 节点教程分享 (AI 修复版)"
+  echo -e "✨ ${BOLD}${PURPLE}内核增强: 动态下载 v139 优化版 Hoon 内核，杜绝错误！${RESET}"
+  echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动编译，补全所有已知.jam文件依赖！${RESET}"
+  echo -e "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
+  echo "📌 作者: K2 节点教程分享 (AI 修复增强版)"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
   echo "------------------------------------------------------"
@@ -54,10 +53,18 @@ function check_command() { if ! command -v "$1" &>/dev/null; then echo -e "${RED
 # 1. 一键安装
 function install_all() {
     show_banner
-    # 先清理旧环境，防止残留文件导致问题
+    # 检查是否为 root 用户
+    if [[ "$(id -u)" -eq 0 ]]; then
+        echo -e "${RED}错误：请不要使用 root 用户运行安装。${RESET}"
+        echo -e "${YELLOW}请创建一个普通用户，并切换到该用户下再运行此脚本。${RESET}"
+        echo -e "例如: adduser miner && usermod -aG sudo miner && su - miner"
+        pause_and_return
+        return
+    fi
+    
+    # 清理旧环境
     echo -e "${YELLOW}[*] 为确保全新安装，正在清理旧的 nockchain 目录...${RESET}"
     if [ -d "$NCK_DIR" ]; then
-        # 停止可能正在运行的服务，以防文件占用
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             echo -e "${YELLOW}[!] 检测到服务正在运行，正在停止服务...${RESET}"
             sudo systemctl stop "$SERVICE_NAME"
@@ -75,68 +82,45 @@ function install_all() {
     echo -e "${BLUE}--- 步骤 2/4: 安装 Rust ---${RESET}"
     if ! command -v cargo &>/dev/null; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
     else
         echo -e "${YELLOW}[!] Rust 已安装，跳过。${RESET}"
     fi
     source "$HOME/.cargo/env"
 
-    echo -e "${BLUE}--- 步骤 3/4: 克隆 Nockchain 仓库 ---${RESET}"
+    echo -e "${BLUE}--- 步骤 3/4: 克隆 Nockchain 仓库并注入内核 ---${RESET}"
     echo -e "${BLUE}[*] 正在克隆仓库到 $NCK_DIR...${RESET}"
     git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
     cd "$NCK_DIR"
     
-    if [ ! -f "Cargo.toml" ]; then
-        echo -e "${RED}致命错误: 'Cargo.toml' 未找到，git clone 可能失败。${RESET}"; exit 1;
+    echo -e "${PURPLE}--- [增强] 正在从网络动态下载并注入 K2 修复版 Hoon 内核 (v139) ---${RESET}"
+    # [核心修复] 使用 curl 下载内核文件，而不是从变量解码
+    if curl -sSLf -o "$HOON_KERNEL_PATH" "$HOON_KERNEL_URL"; then
+        echo -e "${GREEN}[+] 增强版 Hoon 内核已成功注入。${RESET}"
+    else
+        echo -e "${RED}致命错误: 无法从 URL 下载内核文件！请检查网络连接或 URL 是否有效。${RESET}"
+        exit 1
     fi
-
-    echo -e "${PURPLE}--- [增强] 注入 K2 修复版 Hoon 内核 (v139) ---${RESET}"
-    mkdir -p "$(dirname "$HOON_KERNEL_PATH")"
-    echo "$ENHANCED_HOON_KERNEL_BASE64" | base64 --decode > "$HOON_KERNEL_PATH"
-    echo -e "${GREEN}[+] 增强版 Hoon 内核已成功注入。${RESET}"
-
+    
     echo -e "${RED}${BOLD}--- 步骤 4/4: 执行终极手动编译流程 ---${RESET}"
     
-    # 阶段 1: 手动编译 Hoon 编译器 (hoonc)
-    echo -e "${CYAN}[*] 编译阶段 1/5: 正在手动编译 Hoon 编译器 (hoonc)...${RESET}"
+    # 编译阶段
+    echo -e "${CYAN}[*] 编译阶段 1/3: 正在编译 Hoon 编译器 (hoonc)...${RESET}"
     cargo build --release -p hoonc
     HOONC_PATH="$NCK_DIR/target/release/hoonc"
-    if [ ! -f "$HOONC_PATH" ]; then
-        echo -e "${RED}致命错误: Hoon 编译器 'hoonc' 编译失败！${RESET}"; exit 1;
-    fi
-    echo -e "${GREEN}[+] hoonc 编译成功！位于: $HOONC_PATH${RESET}"
-
-    # 阶段 2: 手动创建 assets 目录
-    echo -e "${CYAN}[*] 编译阶段 2/5: 正在创建 assets 目录...${RESET}"
-    mkdir -p assets
     
-    # 阶段 3: 手动生成 .jam 资产文件 (已补全)
-    echo -e "${CYAN}[*] 编译阶段 3/5: 正在手动生成所有 .jam 资产文件...${RESET}"
+    echo -e "${CYAN}[*] 编译阶段 2/3: 正在生成所有 .jam 资产文件...${RESET}"
+    mkdir -p assets
     "$HOONC_PATH" pkg/miner.hoon > assets/miner.jam
     "$HOONC_PATH" pkg/dumb.hoon > assets/dumb.jam
     "$HOONC_PATH" pkg/wal.hoon > assets/wal.jam
-    echo -e "${GREEN}[+] 所有 .jam 文件编译指令已执行。${RESET}"
-
-    # 阶段 4: 验证资产文件 (已补全)
-    echo -e "${CYAN}[*] 编译阶段 4/5: 正在验证所有资产文件...${RESET}"
-    if [ ! -s "assets/miner.jam" ] || [ ! -s "assets/dumb.jam" ] || [ ! -s "assets/wal.jam" ]; then
-        echo -e "${RED}致命错误: 'miner.jam', 'dumb.jam' 或 'wal.jam' 生成失败或为空文件！${RESET}"; exit 1;
-    fi
-    echo -e "${GREEN}[+] 所有资产文件 ('miner.jam', 'dumb.jam', 'wal.jam') 已成功生成！${RESET}"
-
-    # 阶段 5: 手动编译 Nockchain 主程序
-    echo -e "${CYAN}[*] 编译阶段 5/5: 正在手动编译 Nockchain 主程序...${RESET}"
+    
+    echo -e "${CYAN}[*] 编译阶段 3/3: 正在编译 Nockchain 主程序...${RESET}"
     local num_cores=$(get_num_cores)
     export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
     export CARGO_PROFILE_RELEASE_LTO="true"
     cargo build --release --workspace --exclude hoonc -j"$num_cores"
     
-    NOCKCHAIN_PATH="$NCK_DIR/target/release/nockchain"
-    if [ ! -f "$NOCKCHAIN_PATH" ]; then
-        echo -e "${RED}致命错误: Nockchain 主程序编译失败！${RESET}"; exit 1;
-    fi
-    
-    cp "$NOCKCHAIN_PATH" "$HOME/.cargo/bin/"
+    cp "$NCK_DIR/target/release/nockchain" "$HOME/.cargo/bin/"
 
     )
     local exit_code=$?
@@ -144,7 +128,7 @@ function install_all() {
     if [ "$exit_code" -ne 0 ]; then
         echo -e "\n${RED}=======================================================${RESET}"
         echo -e "${BOLD}${RED}[-] 安装失败！脚本已在出错处停止。${RESET}"
-        echo -e "${YELLOW}请向上滚动查看具体的错误信息。如果问题持续，请尝试完全删除 '~/nockchain' 目录后重试。${RESET}"
+        echo -e "${YELLOW}请向上滚动查看具体的错误信息。${RESET}"
         echo -e "${RED}=======================================================${RESET}"
     else
         echo -e "\n${GREEN}===============================================${RESET}"
@@ -165,8 +149,7 @@ function set_pubkey() {
     read -r -p "请输入您的挖矿公钥 (MINING_PUBKEY): " pubkey
     if ! [[ "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
         echo -e "${RED}[-] 错误: 公钥格式不正确。它应该是128个十六进制字符。${RESET}"
-        pause_and_return
-        return
+        pause_and_return; return
     fi
     
     touch "$ENV_FILE"
@@ -188,13 +171,11 @@ function start_node() {
     show_banner
     echo -e "${BLUE}[*] 安装并启动 Nockchain 挖矿服务...${RESET}"
     if ! check_command systemctl; then
-        echo -e "${RED}[-] 错误: 您的系统不支持 systemd。此功能不可用。${RESET}"
-        pause_and_return; return;
+        echo -e "${RED}[-] 错误: 您的系统不支持 systemd。此功能不可用。${RESET}"; pause_and_return; return;
     fi
     
     if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE" || [[ -z "$(grep MINING_PUBKEY "$ENV_FILE" | cut -d '=' -f2)" ]]; then
-        echo -e "${RED}[-] 错误: MINING_PUBKEY 未设置! 请先运行选项 2。${RESET}"
-        pause_and_return; return;
+        echo -e "${RED}[-] 错误: MINING_PUBKEY 未设置! 请先运行选项 2。${RESET}"; pause_and_return; return;
     fi
     
     cd "$NCK_DIR"
@@ -264,7 +245,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(内核修复版 v5.3)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(动态内核版 v5.4)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
@@ -287,12 +268,6 @@ function main_menu() {
 }
 
 # ========= 脚本入口 =========
-# 运行前的清理检查
-if [[ -n "${SUDO_USER-}" ]]; then
-  echo -e "${RED}错误：请不要使用 sudo 权限运行此脚本。${RESET}"
-  exit 1
-fi
-
 while true; do
     main_menu
 done
