@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v4.8 - 编译依赖修复)
+# Nockchain 挖矿助手 (K2 增强融合版 v4.9 - 串行编译修复)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -31,12 +31,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.8)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.9)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env/make/依赖)！${RESET}"
+  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env/依赖/竞态条件)！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -76,16 +76,15 @@ function install_all() {
     if [ -d "$NCK_DIR" ]; then
         echo -e "${BLUE}[*] 目录存在，正在更新...${RESET}"
         cd "$NCK_DIR"
-        # 清理旧的编译产物，以防万一
         git pull
-        make clean || echo "清理失败，继续..."
+        echo -e "${YELLOW}[*] 正在清理旧的编译产物...${RESET}"
+        make clean || echo "清理失败，可以忽略。继续..."
     else
         echo -e "${BLUE}[*] 正在克隆仓库...${RESET}"
         git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
         cd "$NCK_DIR"
     fi
     
-    # 诊断检查仓库是否克隆成功
     if [ ! -f ".env_example" ]; then
         echo -e "${RED}致命错误: '.env_example' 未找到，git clone 可能失败。${RESET}"
         exit 1
@@ -104,11 +103,15 @@ function install_all() {
     export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
     export CARGO_PROFILE_RELEASE_LTO="true"
     local num_cores=$(get_num_cores)
-    echo -e "[*] 使用 ${num_cores} 个CPU核心进行编译..."
     
-    # 【K2 脚本修复 v4.8】: 使用 'make build' 确保 Hoon -> Rust 的编译依赖顺序。
-    # 'make build' 会先编译生成 .jam 文件，然后再编译需要它们的 Rust 代码，解决 "file not found" 错误。
-    make build -j"$num_cores"
+    # 【K2 脚本修复 v4.9 - 终极修复】: 强制串行编译，彻底解决竞态条件
+    # 1. 首先，只构建 hoon 编译器和资产文件 (.jam)
+    echo -e "${CYAN}[*] 编译阶段 1/2: 正在编译 Hoon 资产 (.jam 文件)...${RESET}"
+    make assets
+
+    # 2. 确认资产文件生成后，再独立编译 Rust 代码
+    echo -e "${CYAN}[*] 编译阶段 2/2: 正在编译 Rust 主程序 (使用 ${num_cores} 个核心)...${RESET}"
+    make build-rust -j"$num_cores"
     
     )
     local exit_code=$?
@@ -237,7 +240,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极修复版 v4.8)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极修复版 v4.9)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
