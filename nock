@@ -1,26 +1,51 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v5.9 - 内置内核)
+# Nockchain 挖矿助手 (K2 增强融合版 v6.0 - 超强兼容内核版)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
-# 1. 直接用 root 用户运行此脚本。
-# 2. 脚本会自动创建 'miner' 用户、配置免密sudo、并切换执行。
-# 3. 建议在 screen/tmux 中运行: `screen -S nck` 然后 `./nock.sh`
+# 1. 直接用 root 用户运行此脚本: `bash nock.sh`
+# 2. 脚本会自动检测系统、创建 'miner' 用户、配置免密sudo、并切换执行。
+# 3. 建议在 screen/tmux 中运行: `screen -S nck` 然后 `bash nock.sh`
 # ==============================================================================
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
 # Telegram: https://t.me/+EaCiFDOghoM3Yzll
 # Twitter:  https://x.com/BtcK241918
+#
+# v6.0 更新日志:
+# - [兼容性] 增加跨发行版支持 (Ubuntu/Debian, CentOS/RHEL, Arch)。
+# - [兼容性] 自动检测并修复 Windows (CRLF) 行尾符问题。
+# - [兼容性] 自动检测并使用正确的用户管理命令 (adduser/useradd)。
+# - [健壮性] 自动检测终端是否支持颜色，避免乱码。
+# - [健壮性] 自动检测 Systemd 是否存在，若不存在则禁用相关菜单。
 # ==============================================================================
+
+# --- 脚本自我修复与初始化 ---
+# 解决 Windows (CRLF) 行尾符问题，确保在 Linux 下可执行
+if [ -x "$(command -v sed)" ]; then
+    sed -i 's/\r$//' "$0"
+fi
 
 # 脚本健壮性设置
 set -e
 
-# --- 全局常量和颜色定义 ---
-RESET='\033[0m'; BOLD='\033[1m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; PURPLE='\033[0;35m'; CYAN='\033[0;36m'
+# --- 全局常量和动态变量 ---
 MINER_USERNAME="miner"
+OS_ID=""
+INSTALL_CMD=""
+SUDO_GROUP=""
+HAS_SYSTEMD=false
+
+# --- 颜色定义 (带 TTY 检测) ---
+if [ -t 1 ]; then
+    RESET='\033[0m'; BOLD='\033[1m'; GREEN='\033[0;32m'; BLUE='\033[0;34m';
+    YELLOW='\033[1;33m'; RED='\033[0;31m'; PURPLE='\033[0;35m'; CYAN='\033[0;36m'
+else
+    RESET=''; BOLD=''; GREEN=''; BLUE=''; YELLOW=''; RED=''; PURPLE=''; CYAN=''
+fi
 
 # --- 核心函数 (将在普通用户下执行) ---
 function run_as_miner() {
+    # 在函数内部重新设置 trap，因为 su/sudo 会重置
     set -euo pipefail
 
     NCK_DIR="$HOME/nockchain"
@@ -29,7 +54,6 @@ function run_as_miner() {
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # [核心修复] 使用 Here Document 将内核明文直接内置于脚本中
-# 这样可以完全避免网络问题和 Base64 编码错误
 read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
 ::
 /+  sys/hoon
@@ -57,12 +81,11 @@ read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
   --
 EOF
 
-
     function show_banner() {
       clear
       echo -e "${BOLD}${BLUE}"
       echo "======================================================"
-      echo " Nockchain 挖矿助手 (K2 增强融合版 v5.9)"
+      echo " Nockchain 挖矿助手 (K2 增强融合版 v6.0)"
       echo "======================================================"
       echo -e "${RESET}"
       echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"
@@ -81,10 +104,9 @@ EOF
 
     function install_all() {
         show_banner
-        # 清理旧环境
         echo -e "${YELLOW}[*] 为确保全新安装，正在清理旧的 nockchain 目录...${RESET}"
         if [ -d "$NCK_DIR" ]; then
-            if systemctl is-active --quiet "$SERVICE_NAME"; then
+            if [[ "$HAS_SYSTEMD" == "true" ]] && systemctl is-active --quiet "$SERVICE_NAME"; then
                 echo -e "${YELLOW}[!] 检测到服务正在运行，正在停止服务...${RESET}"
                 sudo systemctl stop "$SERVICE_NAME"
             fi
@@ -94,9 +116,9 @@ EOF
 
         (
         set -e
-        echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 ---${RESET}"
-        sudo apt-get update
-        sudo apt-get install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix
+        echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 (已自动适配您的系统) ---${RESET}"
+        # 这里 sudo 调用的是 root 用户的预设命令
+        sudo bash -c "$(declare -f pre_flight_checks); pre_flight_checks; \$INSTALL_CMD"
 
         echo -e "${BLUE}--- 步骤 2/4: 安装 Rust ---${RESET}"
         if ! command -v cargo &>/dev/null; then
@@ -104,6 +126,7 @@ EOF
         else
             echo -e "${YELLOW}[!] Rust 已安装，跳过。${RESET}"
         fi
+        # shellcheck source=/dev/null
         source "$HOME/.cargo/env"
 
         echo -e "${BLUE}--- 步骤 3/4: 克隆仓库并注入内核 ---${RESET}"
@@ -111,7 +134,6 @@ EOF
         cd "$NCK_DIR"
         
         echo -e "${PURPLE}--- [增强] 正在注入内置的 v139 内核 ---${RESET}"
-        # [核心修复] 直接将内置的明文内容写入文件
         echo -n "$HOON_KERNEL_CONTENT" > "$NCK_DIR/pkg/sys/hoon"
         echo -e "${GREEN}[+] 内置 v139 内核已成功注入！${RESET}"
         
@@ -143,14 +165,13 @@ EOF
         pause_and_return
     }
 
-    # ... 其他函数 (set_pubkey, start_node, etc.) 保持不变 ...
     function set_pubkey() {
         show_banner
         if [ ! -d "$NCK_DIR" ]; then echo -e "${RED}项目目录不存在，请先运行安装。${RESET}"; pause_and_return; return; fi
         local pubkey
         read -r -p "请输入您的挖矿公钥 (MINING_PUBKEY): " pubkey
         if ! [[ "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
-            echo -e "${RED}错误: 公钥格式不正确。${RESET}"; pause_and_return; return
+            echo -e "${RED}错误: 公钥格式不正确。它应该是一个128位的十六进制字符串。${RESET}"; pause_and_return; return
         fi
         
         touch "$ENV_FILE"
@@ -164,6 +185,9 @@ EOF
 
     function start_node() {
         show_banner
+        if [[ "$HAS_SYSTEMD" != "true" ]]; then
+            echo -e "${RED}错误: 您的系统不支持 Systemd，无法使用此功能。${RESET}"; pause_and_return; return;
+        fi
         if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE"; then
             echo -e "${RED}错误: MINING_PUBKEY 未设置! 请先运行选项 2。${RESET}"; pause_and_return; return;
         fi
@@ -196,6 +220,9 @@ EOF"
 
     function stop_node() {
         show_banner
+        if [[ "$HAS_SYSTEMD" != "true" ]]; then
+            echo -e "${RED}错误: 您的系统不支持 Systemd，无法使用此功能。${RESET}"; pause_and_return; return;
+        fi
         if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
             echo -e "${YELLOW}Systemd 服务未安装。${RESET}"; pause_and_return; return;
         fi
@@ -206,6 +233,9 @@ EOF"
 
     function view_logs() {
         show_banner
+        if [[ "$HAS_SYSTEMD" != "true" ]]; then
+            echo -e "${RED}错误: 您的系统不支持 Systemd，无法使用此功能。${RESET}"; pause_and_return; return;
+        fi
         if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
             echo -e "${YELLOW}Systemd 服务未安装。${RESET}"; pause_and_return; return;
         fi
@@ -219,12 +249,18 @@ EOF"
       echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
       echo "请选择操作:"
       echo ""
-      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v5.9)${RESET}"
+      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v6.0)${RESET}"
       echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
       echo ""
-      echo -e "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
-      echo -e "  ${RED}4) 停止挖矿服务 (Systemd)${RESET}"
-      echo "  ${YELLOW}5) 查看实时挖矿日志 (Systemd)${RESET}"
+      if [[ "$HAS_SYSTEMD" == "true" ]]; then
+          echo -e "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
+          echo -e "  ${RED}4) 停止挖矿服务 (Systemd)${RESET}"
+          echo -e "  ${YELLOW}5) 查看实时挖矿日志 (Systemd)${RESET}"
+      else
+          echo -e "  ${YELLOW}3) (不可用) 您的系统不支持 Systemd 服务管理${RESET}"
+          echo -e "  ${YELLOW}4) (不可用) 您的系统不支持 Systemd 服务管理${RESET}"
+          echo -e "  ${YELLOW}5) (不可用) 您的系统不支持 Systemd 服务管理${RESET}"
+      fi
       echo ""
       echo -e "  ${CYAN}0) 退出脚本${RESET}"
       echo ""
@@ -233,9 +269,9 @@ EOF"
       case "$choice" in
         1) install_all ;;
         2) set_pubkey ;;
-        3) start_node ;;
-        4) stop_node ;;
-        5) view_logs ;;
+        3) if [[ "$HAS_SYSTEMD" == "true" ]]; then start_node; else pause_and_return; fi ;;
+        4) if [[ "$HAS_SYSTEMD" == "true" ]]; then stop_node; else pause_and_return; fi ;;
+        5) if [[ "$HAS_SYSTEMD" == "true" ]]; then view_logs; else pause_and_return; fi ;;
         0) echo "退出脚本."; exit 0 ;;
         *) echo -e "${RED}无效选项。${RESET}"; pause_and_return ;;
       esac
@@ -247,8 +283,67 @@ EOF"
 }
 
 
+# --- 系统环境检测与适配 (仅在 root 下执行) ---
+function pre_flight_checks() {
+    echo -e "${BLUE}--- 正在进行系统兼容性预检 ---${RESET}"
+    
+    # 检查 Systemd
+    if [ -d /run/systemd/system ]; then
+        HAS_SYSTEMD=true
+        echo -e "${GREEN}[✓] 检测到 Systemd。${RESET}"
+    else
+        HAS_SYSTEMD=false
+        echo -e "${YELLOW}[!] 未检测到 Systemd，服务管理功能将不可用。${RESET}"
+    fi
+
+    # 识别操作系统和包管理器
+    if [ -f /etc/os-release ]; then
+        # shellcheck source=/dev/null
+        source /etc/os-release
+        OS_ID=$ID
+    else
+        echo -e "${RED}错误: 无法识别您的操作系统。此脚本支持基于 os-release 的现代发行版。${RESET}"
+        exit 1
+    fi
+    
+    local pkgs="clang llvm libclang-dev pkg-config libssl-dev cmake git make curl dos2unix"
+    local dev_tools_group=""
+
+    case "$OS_ID" in
+        ubuntu|debian)
+            INSTALL_CMD="apt-get update && apt-get install -y $pkgs build-essential"
+            SUDO_GROUP="sudo"
+            echo -e "${GREEN}[✓] 检测到 Debian/Ubuntu 系统。${RESET}"
+            ;;
+        centos|rhel|fedora|rocky|almalinux)
+            if command -v dnf &>/dev/null; then
+                INSTALL_CMD="dnf install -y"
+            elif command -v yum &>/dev/null; then
+                INSTALL_CMD="yum install -y"
+            else
+                echo -e "${RED}错误: 在类 RHEL 系统上未找到 dnf 或 yum。${RESET}"; exit 1
+            fi
+            pkgs="clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix"
+            dev_tools_group="\"Development Tools\""
+            INSTALL_CMD="$INSTALL_CMD $pkgs && $INSTALL_CMD groupinstall -y $dev_tools_group"
+            SUDO_GROUP="wheel"
+            echo -e "${GREEN}[✓] 检测到 RHEL/CentOS/Fedora 系列系统。${RESET}"
+            ;;
+        arch)
+            INSTALL_CMD="pacman -Syu --noconfirm --needed $pkgs base-devel"
+            SUDO_GROUP="wheel"
+            echo -e "${GREEN}[✓] 检测到 Arch Linux 系统。${RESET}"
+            ;;
+        *)
+            echo -e "${RED}错误: 不支持的操作系统 '$OS_ID'。${RESET}"; exit 1
+            ;;
+    esac
+}
+
 # --- 脚本入口：用户身份检查与切换 ---
 if [ "$(id -u)" -eq 0 ]; then
+    pre_flight_checks
+
     echo -e "${YELLOW}检测到您是 root 用户。脚本将自动为您创建并切换到普通用户 '${MINER_USERNAME}'。${RESET}"
     
     # 1. 创建用户并加入 sudo 组
@@ -256,9 +351,13 @@ if [ "$(id -u)" -eq 0 ]; then
         echo -e "${GREEN}用户 '${MINER_USERNAME}' 已存在，将直接使用。${RESET}"
     else
         echo -e "${BLUE}正在创建用户 '${MINER_USERNAME}'...${RESET}"
-        adduser --disabled-password --gecos "" "${MINER_USERNAME}"
-        usermod -aG sudo "${MINER_USERNAME}"
-        echo -e "${GREEN}用户 '${MINER_USERNAME}' 创建并配置成功！${RESET}"
+        if command -v adduser &>/dev/null && [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+            adduser --disabled-password --gecos "" "${MINER_USERNAME}"
+        else
+            useradd -m -s /bin/bash "${MINER_USERNAME}"
+        fi
+        usermod -aG "${SUDO_GROUP}" "${MINER_USERNAME}"
+        echo -e "${GREEN}用户 '${MINER_USERNAME}' 创建并加入 '${SUDO_GROUP}' 组成功！${RESET}"
     fi
 
     # 2. 自动配置 sudo 免密
@@ -281,12 +380,16 @@ if [ "$(id -u)" -eq 0 ]; then
     echo -e "\n${BOLD}${PURPLE}=== 正在切换到用户 '${MINER_USERNAME}' 并继续执行脚本 ===${RESET}\n"
     sleep 3
 
-    # 4. 切换用户并执行
-    su - "${MINER_USERNAME}" -c "${SCRIPT_PATH_IN_MINER_HOME}"
+    # 4. 切换用户并执行，同时传递检测到的系统信息
+    su - "${MINER_USERNAME}" -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
     
     exit 0
 else
     # 如果已经是普通用户，直接运行主函数
+    # HAS_SYSTEMD 变量由 su 命令传递过来
+    if [ -z "${HAS_SYSTEMD:-}" ]; then
+        if [ -d /run/systemd/system ]; then HAS_SYSTEMD=true; else HAS_SYSTEMD=false; fi
+    fi
     run_as_miner
 fi
 
