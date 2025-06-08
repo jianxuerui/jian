@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v6.0 - 超强兼容内核版)
+# Nockchain 挖矿助手 (K2 增强融合版 v6.1 - 兼容性修复版)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 直接用 root 用户运行此脚本: `bash nock.sh`
@@ -10,6 +10,9 @@
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
 # Telegram: https://t.me/+EaCiFDOghoM3Yzll
 # Twitter:  https://x.com/BtcK241918
+#
+# v6.1 更新日志:
+# - [修复] 将不稳定的 'su -' 命令替换为更兼容的 'sudo -i -u'，解决用户切换失败问题。
 #
 # v6.0 更新日志:
 # - [兼容性] 增加跨发行版支持 (Ubuntu/Debian, CentOS/RHEL, Arch)。
@@ -85,7 +88,7 @@ EOF
       clear
       echo -e "${BOLD}${BLUE}"
       echo "======================================================"
-      echo " Nockchain 挖矿助手 (K2 增强融合版 v6.0)"
+      echo " Nockchain 挖矿助手 (K2 增强融合版 v6.1)"
       echo "======================================================"
       echo -e "${RESET}"
       echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"
@@ -249,7 +252,7 @@ EOF"
       echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
       echo "请选择操作:"
       echo ""
-      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v6.0)${RESET}"
+      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v6.1)${RESET}"
       echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
       echo ""
       if [[ "$HAS_SYSTEMD" == "true" ]]; then
@@ -377,16 +380,17 @@ if [ "$(id -u)" -eq 0 ]; then
     chown "${MINER_USERNAME}:${MINER_USERNAME}" "${SCRIPT_PATH_IN_MINER_HOME}"
     chmod +x "${SCRIPT_PATH_IN_MINER_HOME}"
     
-    echo -e "\n${BOLD}${PURPLE}=== 正在切换到用户 '${MINER_USERNAME}' 并继续执行脚本 ===${RESET}\n"
-    sleep 3
+    echo -e "\n${BOLD}${PURPLE}=== 正在切换到用户 '${MINER_USERNAME}' 并继续执行脚本 (使用 sudo 模式) ===${RESET}\n"
+    sleep 2
 
-    # 4. 切换用户并执行，同时传递检测到的系统信息
-    su - "${MINER_USERNAME}" -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
+    # 4. [v6.1 核心修复] 切换用户并执行，同时传递检测到的系统信息
+    # 使用 sudo -i -u，它在脚本中比 su - 更稳定可靠
+    sudo -i -u "${MINER_USERNAME}" -- sh -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
     
     exit 0
 else
     # 如果已经是普通用户，直接运行主函数
-    # HAS_SYSTEMD 变量由 su 命令传递过来
+    # HAS_SYSTEMD 变量由 sudo/su 命令传递过来
     if [ -z "${HAS_SYSTEMD:-}" ]; then
         if [ -d /run/systemd/system ]; then HAS_SYSTEMD=true; else HAS_SYSTEMD=false; fi
     fi
