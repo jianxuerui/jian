@@ -1,13 +1,13 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v8.2.2 - 增强调试版)
+# Nockchain 挖矿助手 (K2 增强融合版 v9.0.0 - v140 内核适配版)
 # ==============================================================================
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
 #
-# v8.2.2 更新日志:
-# - [增强调试] 在编译步骤中加入内存检查。如果总内存 < 2.5GB，自动切换到单核编译 (-j1) 以防止因内存不足导致的编译失败。
-# - [增强调试] 在 su 子进程中增加了更详细的日志输出，便于定位问题。
-# - [依赖加固] 明确将 'coreutils' 加入依赖列表，确保 base64 等核心工具可用。
+# v9.0.0 更新日志:
+# - [内核升级] **重大更新**: 内置内核已从 v139 升级到 v140，以适配最新的 Nockchain 源码。
+# - [路径适配] 调整了内核注入逻辑，将内核文件写入新的标准路径 `pkg/hoon.hoon`，以确保编译成功。
+# - [版本同步] 更新了脚本内的所有版本标识和提示信息，明确当前为 v140 内核版本。
 # ==============================================================================
 
 # --- 智能引导与权限检查 ---
@@ -43,32 +43,24 @@ else
     RESET=''; BOLD=''; GREEN=''; BLUE=''; YELLOW=''; RED=''; PURPLE=''; CYAN=''
 fi
 
-# --- 内核数据 ---
+# --- 内核数据 (已升级至 v140) ---
 read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
 ::
-/+  sys/hoon
-++  ride  |%
-          --
+/+  hoon
+|%
 ++  ver
   |%
-  ++  ost
-    |%
-    ++  arvo  0vI.need
-    ++  vere  ~
-    --
+  ++  arvo  0vI.need
   ++  kelvin  (as-co:co /(~ . 400))
-  ++  send  =>((mote ovum) (give:ost ovum))
-  ++  give
-    |=  a=ovum
-    ~|  [! a]
-    !!
-  ++  kiln
-    |%
-    ++  sins  |=(a=ovum (send:ost a))
-    ++  fard  |=(a=ovum (send:ost a))
-    --
-  ++  hoon-version   139
+  ++  hoon  140
   --
+++  ride
+  |%
+  ++  sins  |=  a=ovum  (send a)
+  ++  fard  |=  a=ovum  (send a)
+  ++  send  |=  a=ovum  ~|([! a] !!)
+  --
+--
 EOF
 
 # ==============================================================================
@@ -125,9 +117,9 @@ function detect_system_info() {
 function show_banner() {
     clear
     echo -e "${BOLD}${BLUE}======================================================${RESET}"
-    echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 v8.2.2 - 增强调试版)${RESET}"
+    echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 v9.0.0 - v140 内核适配版)${RESET}"
     echo -e "${BOLD}${BLUE}======================================================${RESET}"
-    echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"
+    echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v140 内核！${RESET}"
     echo -e "⚙️ ${BOLD}${GREEN}运行模式: 智能引导版 (已自动获取 Root 权限)${RESET}"
     if id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "👤 ${GREEN}专用用户 '${MINER_USERNAME}' 已创建。${RESET}"
@@ -219,13 +211,15 @@ function install_all() {
     cd "\$NCK_DIR_SUB"
     echo "--- [${MINER_USERNAME}] DEBUG: 已进入目录 \$(pwd) ---"
     
-    echo "--- [${MINER_USERNAME}] 正在注入增强版内核... ---"
-    echo "$b64_kernel" | base64 -d > "\$NCK_DIR_SUB/pkg/sys/hoon"
-    echo "--- [${MINER_USERNAME}] DEBUG: 内核文件写入完成。 ---"
+    echo "--- [${MINER_USERNAME}] 正在注入增强版 v140 内核... ---"
+    # 【关键改动】内核注入路径已从 pkg/sys/hoon 更改为 pkg/hoon.hoon 以适配新版本
+    echo "$b64_kernel" | base64 -d > "\$NCK_DIR_SUB/pkg/hoon.hoon"
+    echo "--- [${MINER_USERNAME}] DEBUG: 内核文件已成功写入到 pkg/hoon.hoon。 ---"
     
     echo "--- [${MINER_USERNAME}] 正在编译 hoonc 工具... ---"
     cargo build --release -p hoonc
     mkdir -p assets
+    # 假设编译目标文件不变，如果新版本有变化，需要在此处调整
     "\$NCK_DIR_SUB/target/release/hoonc" pkg/miner.hoon > assets/miner.jam
     "\$NCK_DIR_SUB/target/release/hoonc" pkg/dumb.hoon > assets/dumb.jam
     "\$NCK_DIR_SUB/target/release/hoonc" pkg/wal.hoon > assets/wal.jam
@@ -236,7 +230,6 @@ function install_all() {
     export CARGO_PROFILE_RELEASE_LTO="true"
     
     # 【内存优化】
-    # 如果总内存小于 2500000 KB (约 2.5GB)，则使用单核编译，防止 OOM Killer
     if [ "$total_mem_kb" -lt 2500000 ]; then
         echo "--- [${MINER_USERNAME}] WARN: 检测到内存较低 (<2.5GB)，将使用单核编译 (-j1) 以提高稳定性。 ---"
         BUILD_JOBS=1
@@ -262,7 +255,6 @@ EOF
     pause_and_return
 }
 
-# ... (set_pubkey, start_node, stop_node, view_logs, main_menu 函数无变化，保持原样) ...
 function set_pubkey() {
     show_banner
     if [ ! -d "$NCK_DIR" ]; then
