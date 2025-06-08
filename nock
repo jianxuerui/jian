@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v6.2 - 终极自愈修复版)
+# Nockchain 挖矿助手 (K2 增强融合版 v6.3 - 终极兼容性修复版)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 直接用 root 用户运行此脚本: `bash nock.sh`
@@ -11,11 +11,11 @@
 # Telegram: https://t.me/+EaCiFDOghoM3Yzll
 # Twitter:  https://x.com/BtcK241918
 #
+# v6.3 更新日志:
+# - [终极修复] 将 'sudo -i -u' 替换为更兼容的 'sudo -u HOME=...'，解决深层系统环境的切换失败问题。
+#
 # v6.2 更新日志:
 # - [健壮性] 新增自动检测并提示清理旧'miner'用户的功能，避免环境污染问题。
-#
-# v6.1 更新日志:
-# - [修复] 将不稳定的 'su -' 命令替换为更兼容的 'sudo -i -u'，解决用户切换失败问题。
 # ==============================================================================
 
 # --- 脚本自我修复与初始化 ---
@@ -43,6 +43,12 @@ fi
 # --- 核心函数 (将在普通用户下执行) ---
 function run_as_miner() {
     set -euo pipefail
+
+    # 如果 HOME 环境变量不正确，则手动设置
+    if [ "$HOME" != "/home/$MINER_USERNAME" ]; then
+        export HOME="/home/$MINER_USERNAME"
+        cd "$HOME"
+    fi
 
     NCK_DIR="$HOME/nockchain"
     ENV_FILE="$NCK_DIR/.env"
@@ -80,12 +86,12 @@ EOF
       clear
       echo -e "${BOLD}${BLUE}"
       echo "======================================================"
-      echo " Nockchain 挖矿助手 (K2 增强融合版 v6.2)"
+      echo " Nockchain 挖矿助手 (K2 增强融合版 v6.3)"
       echo "======================================================"
       echo -e "${RESET}"
       echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"
       echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核，无需网络下载！${RESET}"
-      echo -e "🛡️ ${BOLD}${RED}自愈修复: 自动清理旧环境，确保纯净安装！${RESET}"
+      echo -e "🛡️ ${BOLD}${RED}终极修复: 解决深层系统环境兼容性问题！${RESET}"
       echo -e "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
       echo "📌 作者: K2 节点教程分享 (AI 终极离线内核版)"
       echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -231,7 +237,7 @@ EOF"
       echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
       echo "请选择操作:"
       echo ""
-      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v6.2)${RESET}"
+      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v6.3)${RESET}"
       echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
       echo ""
       if [[ "$HAS_SYSTEMD" == "true" ]]; then
@@ -281,18 +287,15 @@ if [ "$(id -u)" -eq 0 ]; then
         *) echo -e "${RED}错误: 不支持的操作系统 '$OS_ID'。${RESET}"; exit 1; ;;
     esac
 
-    # [v6.2 自愈功能] 检查并处理已存在的 miner 用户
     if id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "\n${YELLOW}[!] 警告: 用户 '${MINER_USERNAME}' 已存在。${RESET}"
         echo -e "${YELLOW}    为避免因旧环境配置导致安装失败，强烈建议进行清理重建。${RESET}"
         read -r -p "是否要自动删除并重建该用户以进行纯净安装? (y/N): " choice
         if [[ "$choice" =~ ^[Yy]$ ]]; then
             echo -e "${BLUE}--- 正在清理旧的 '${MINER_USERNAME}' 用户 ---${RESET}"
-            # 停止所有属于该用户的进程
-            killall -u "${MINER_USERNAME}" || true
-            pkill -u "${MINER_USERNAME}" || true
+            killall -u "${MINER_USERNAME}" 2>/dev/null || true
+            pkill -u "${MINER_USERNAME}" 2>/dev/null || true
             sleep 1
-            # 删除用户及其主目录
             userdel -r "${MINER_USERNAME}" || { echo -e "${RED}删除用户失败，请手动处理后重试。${RESET}"; exit 1; }
             echo -e "${GREEN}[✓] 旧用户已成功清理！${RESET}"
         else
@@ -300,7 +303,6 @@ if [ "$(id -u)" -eq 0 ]; then
         fi
     fi
 
-    # 创建用户（如果不存在）并配置 sudo
     if ! id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "${BLUE}--- 正在创建新用户 '${MINER_USERNAME}' ---${RESET}"
         if command -v adduser &>/dev/null && [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
@@ -314,7 +316,6 @@ if [ "$(id -u)" -eq 0 ]; then
         echo -e "${GREEN}[✓] 用户创建及免密Sudo配置完成！${RESET}"
     fi
     
-    # 准备并切换用户
     SCRIPT_PATH_IN_MINER_HOME="/home/${MINER_USERNAME}/$(basename "$0")"
     cp "$0" "${SCRIPT_PATH_IN_MINER_HOME}"
     chown "${MINER_USERNAME}:${MINER_USERNAME}" "${SCRIPT_PATH_IN_MINER_HOME}"
@@ -322,10 +323,15 @@ if [ "$(id -u)" -eq 0 ]; then
     
     echo -e "\n${BOLD}${PURPLE}=== 正在切换到用户 '${MINER_USERNAME}' 并继续执行脚本 ===${RESET}\n"
     sleep 2
-    sudo -i -u "${MINER_USERNAME}" -- sh -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
+    
+    # [v6.3 终极修复] 使用 'sudo -u' 代替 'sudo -i -u'，并明确指定 HOME 环境变量，以获得最大兼容性
+    sudo -u "${MINER_USERNAME}" \
+         HOME="/home/${MINER_USERNAME}" \
+         sh -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
     
     exit 0
 else
+    # 当以非 root 用户身份直接运行时
     if [ -z "${HAS_SYSTEMD:-}" ]; then
         if [ -d /run/systemd/system ]; then HAS_SYSTEMD=true; else HAS_SYSTEMD=false; fi
     fi
