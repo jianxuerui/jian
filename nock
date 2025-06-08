@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v4.9 - 串行编译修复)
+# Nockchain 挖矿助手 (K2 增强融合版 v5.0 - 诊断验证修复)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -31,12 +31,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.9)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v5.0)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env/依赖/竞态条件)！${RESET}"
+  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 增加编译资产验证，确保编译成功！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -49,14 +49,9 @@ function get_num_cores() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null ||
 function pause_and_return() { echo ""; read -r -p "按任意键返回主菜单..." -s -n 1; echo; }
 function check_command() { if ! command -v "$1" &>/dev/null; then echo -e "${RED}[-] 致命错误: 命令 '$1' 未找到。${RESET}" >&2; return 1; fi; }
 
-# (preflight_check 和 check_and_create_swap 等函数在这里，为简洁省略)
-
 # 1. 一键安装
 function install_all() {
     show_banner
-    # preflight_check
-    # check_and_create_swap
-
     (
     set -e
     echo -e "${BLUE}--- 步骤 1/5: 安装系统依赖 ---${RESET}"
@@ -74,10 +69,9 @@ function install_all() {
 
     echo -e "${BLUE}--- 步骤 3/5: 获取或更新 Nockchain 仓库 ---${RESET}"
     if [ -d "$NCK_DIR" ]; then
-        echo -e "${BLUE}[*] 目录存在，正在更新...${RESET}"
+        echo -e "${BLUE}[*] 目录存在，正在更新并清理...${RESET}"
         cd "$NCK_DIR"
         git pull
-        echo -e "${YELLOW}[*] 正在清理旧的编译产物...${RESET}"
         make clean || echo "清理失败，可以忽略。继续..."
     else
         echo -e "${BLUE}[*] 正在克隆仓库...${RESET}"
@@ -86,8 +80,7 @@ function install_all() {
     fi
     
     if [ ! -f ".env_example" ]; then
-        echo -e "${RED}致命错误: '.env_example' 未找到，git clone 可能失败。${RESET}"
-        exit 1
+        echo -e "${RED}致命错误: '.env_example' 未找到，git clone 可能失败。${RESET}"; exit 1;
     fi
 
     echo -e "${PURPLE}--- 步骤 4/5: 注入 K2 增强版 Hoon 内核 (v139) ---${RESET}"
@@ -95,22 +88,34 @@ function install_all() {
     echo "$ENHANCED_HOON_KERNEL_BASE64" | base64 --decode > "$HOON_KERNEL_PATH"
     echo -e "${GREEN}[+] 增强版 Hoon 内核已成功注入。${RESET}"
 
-    echo -e "${BLUE}--- 步骤 5/5: 编译并安装 Nockchain ---${RESET}"
+    echo -e "${BLUE}--- 步骤 5/5: 编译并安装 Nockchain (带诊断验证) ---${RESET}"
     
-    echo -e "${BLUE}[*] 为满足编译依赖，正在从 .env_example 创建 .env 文件...${RESET}"
     cp -n .env_example .env
 
     export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
     export CARGO_PROFILE_RELEASE_LTO="true"
     local num_cores=$(get_num_cores)
     
-    # 【K2 脚本修复 v4.9 - 终极修复】: 强制串行编译，彻底解决竞态条件
-    # 1. 首先，只构建 hoon 编译器和资产文件 (.jam)
-    echo -e "${CYAN}[*] 编译阶段 1/2: 正在编译 Hoon 资产 (.jam 文件)...${RESET}"
+    # 【v5.0 终极修复】: 分步编译并加入验证逻辑
+    echo -e "${CYAN}[*] 编译阶段 1/3: 正在编译 Hoon 资产 (.jam 文件)...${RESET}"
     make assets
 
-    # 2. 确认资产文件生成后，再独立编译 Rust 代码
-    echo -e "${CYAN}[*] 编译阶段 2/2: 正在编译 Rust 主程序 (使用 ${num_cores} 个核心)...${RESET}"
+    echo -e "${CYAN}[*] 编译阶段 2/3: 正在验证资产文件是否存在...${RESET}"
+    if [ ! -f "assets/miner.jam" ] || [ ! -f "assets/dumb.jam" ]; then
+        echo -e "\n${RED}======================= 致命错误 =======================${RESET}"
+        echo -e "${BOLD}${RED}[-] 验证失败！关键资产文件 'miner.jam' 或 'dumb.jam' 未能生成！${RESET}"
+        echo -e "${YELLOW}这通常意味着 'make assets' 命令在您的系统上未能按预期工作。${RESET}"
+        echo -e "${YELLOW}请尝试手动排查:${RESET}"
+        echo -e "${CYAN}1. cd ~/nockchain${RESET}"
+        echo -e "${CYAN}2. make clean${RESET}"
+        echo -e "${CYAN}3. make assets -d  (注意最后的 -d 参数，它会打印详细的调试信息)${RESET}"
+        echo -e "${YELLOW}查看调试信息的输出，找到错误原因。${RESET}"
+        echo -e "${RED}=======================================================${RESET}"
+        exit 1
+    fi
+    echo -e "${GREEN}[+] 资产文件验证通过！${RESET}"
+
+    echo -e "${CYAN}[*] 编译阶段 3/3: 正在编译 Rust 主程序 (使用 ${num_cores} 个核心)...${RESET}"
     make build-rust -j"$num_cores"
     
     )
@@ -130,6 +135,7 @@ function install_all() {
     pause_and_return
 }
 
+# (其他函数 set_pubkey, start_node 等保持不变，此处省略以保持简洁)
 # 2. 设置公钥
 function set_pubkey() {
     echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env 文件...${RESET}"
@@ -240,7 +246,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极修复版 v4.9)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极诊断版 v5.0)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
