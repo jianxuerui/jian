@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v5.5 - 自动用户切换)
+# Nockchain 挖矿助手 (K2 增强融合版 v5.6 - 绝对路径修复)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 可以直接用 root 用户运行此脚本。
@@ -33,7 +33,7 @@ function run_as_miner() {
       clear
       echo -e "${BOLD}${BLUE}"
       echo "======================================================"
-      echo " Nockchain 挖矿助手 (K2 增强融合版 v5.5)"
+      echo " Nockchain 挖矿助手 (K2 增强融合版 v5.6)"
       echo "======================================================"
       echo -e "${RESET}"
       echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"
@@ -191,7 +191,7 @@ EOF"
       echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
       echo "请选择操作:"
       echo ""
-      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v5.5)${RESET}"
+      echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(v5.6)${RESET}"
       echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
       echo ""
       echo -e "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
@@ -218,11 +218,11 @@ EOF"
     done
 }
 
+
 # --- 脚本入口：用户身份检查与切换 ---
 if [ "$(id -u)" -eq 0 ]; then
     echo -e "${YELLOW}检测到您是 root 用户。脚本将自动为您创建并切换到普通用户 '${MINER_USERNAME}'。${RESET}"
     
-    # 检查 miner 用户是否存在
     if id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "${GREEN}用户 '${MINER_USERNAME}' 已存在，将直接使用。${RESET}"
     else
@@ -233,22 +233,23 @@ if [ "$(id -u)" -eq 0 ]; then
         echo -e "${GREEN}用户 '${MINER_USERNAME}' 创建并配置成功！${RESET}"
     fi
 
-    # 清理旧环境，以防万一
-    echo -e "${YELLOW}正在清理旧环境...${RESET}"
-    rm -rf "/home/${MINER_USERNAME}/nockchain"
-    rm -f "/home/${MINER_USERNAME}/nock.sh"
-    
-    # 将此脚本自身复制到新用户的主目录
-    cp "$0" "/home/${MINER_USERNAME}/nock.sh"
-    chown "${MINER_USERNAME}:${MINER_USERNAME}" "/home/${MINER_USERNAME}/nock.sh"
-    chmod +x "/home/${MINER_USERNAME}/nock.sh"
+    # [核心修复] 获取脚本自身的绝对路径
+    SCRIPT_PATH="$(realpath "$0")"
 
+    # 将脚本自身复制到新用户的主目录，以确保所有权和权限正确
+    cp "${SCRIPT_PATH}" "/home/${MINER_USERNAME}/"
+    chown "${MINER_USERNAME}:${MINER_USERNAME}" "/home/${MINER_USERNAME}/$(basename "${SCRIPT_PATH}")"
+    chmod +x "/home/${MINER_USERNAME}/$(basename "${SCRIPT_PATH}")"
+    
     echo -e "\n${BOLD}${PURPLE}=== 正在切换到用户 '${MINER_USERNAME}' 并继续执行脚本 ===${RESET}\n"
     sleep 3
 
-    # 使用 su 切换用户并执行脚本的 'run_as_miner' 函数
-    export -f run_as_miner # 导出函数，使其在新shell中可用
-    su - "${MINER_USERNAME}" -c "bash -c 'source \"$0\" && run_as_miner'"
+    # [核心修复] 使用新用户家目录中的脚本路径来执行
+    # 这确保了即使原始脚本在/root下，新用户也能执行自己家目录下的副本
+    su - "${MINER_USERNAME}" -c "/home/${MINER_USERNAME}/$(basename "${SCRIPT_PATH}")"
+    
+    # 切换用户后，当前脚本的 root 实例退出
+    exit 0
 else
     # 如果已经是普通用户，直接运行主函数
     run_as_miner
