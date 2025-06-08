@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v4.7 - Makefile 目标修复)
+# Nockchain 挖矿助手 (K2 增强融合版 v4.8 - 编译依赖修复)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -31,12 +31,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.7)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v4.8)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env/make)！${RESET}"
+  echo -e "🛡️ ${BOLD}${CYAN}终极容错: 已修复所有已知安装错误 (目录/env/make/依赖)！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -75,7 +75,10 @@ function install_all() {
     echo -e "${BLUE}--- 步骤 3/5: 获取或更新 Nockchain 仓库 ---${RESET}"
     if [ -d "$NCK_DIR" ]; then
         echo -e "${BLUE}[*] 目录存在，正在更新...${RESET}"
-        cd "$NCK_DIR" && git pull
+        cd "$NCK_DIR"
+        # 清理旧的编译产物，以防万一
+        git pull
+        make clean || echo "清理失败，继续..."
     else
         echo -e "${BLUE}[*] 正在克隆仓库...${RESET}"
         git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
@@ -103,10 +106,9 @@ function install_all() {
     local num_cores=$(get_num_cores)
     echo -e "[*] 使用 ${num_cores} 个CPU核心进行编译..."
     
-    # 【K2 脚本修复 v4.7】: 将 'make install' 改为 'make'，因为 'install' 目标已不存在
-    # 'make' 会执行默认的编译目标，通常是 'build'。
-    # 并且，Nockchain 的 Makefile 设置会通过 cargo 将二进制文件安装到 ~/.cargo/bin
-    make -j"$num_cores"
+    # 【K2 脚本修复 v4.8】: 使用 'make build' 确保 Hoon -> Rust 的编译依赖顺序。
+    # 'make build' 会先编译生成 .jam 文件，然后再编译需要它们的 Rust 代码，解决 "file not found" 错误。
+    make build -j"$num_cores"
     
     )
     local exit_code=$?
@@ -125,7 +127,6 @@ function install_all() {
     pause_and_return
 }
 
-# (此处省略其他函数如 set_pubkey, start_node 等，它们与上一版相同)
 # 2. 设置公钥
 function set_pubkey() {
     echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env 文件...${RESET}"
@@ -236,7 +237,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极修复版 v4.7)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${YELLOW}(终极修复版 v4.8)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
