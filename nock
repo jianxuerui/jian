@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v5.1 - 手动编译终极修复)
+# Nockchain 挖矿助手 (K2 增强融合版 v5.2 - 补全 wal.jam 编译)
 # ==============================================================================
 # HOW TO RUN THIS SCRIPT (重要运行说明):
 # 1. 保存此脚本: 例如，保存为 `nock.sh`
@@ -31,12 +31,12 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "======================================================"
-  echo " Nockchain 挖矿助手 (K2 增强融合版 v5.1)"
+  echo " Nockchain 挖矿助手 (K2 增强融合版 v5.2)"
   echo "======================================================"
   echo -e "${RESET}"
   echo -e "✨ ${BOLD}${PURPLE}内核增强: 已注入 v139 优化版 Hoon 内核！${RESET}"
   echo -e "🧠 ${BOLD}${GREEN}智能环境感知: 自动检查内存并可创建Swap！${RESET}"
-  echo -e "🛡️ ${BOLD}${RED}终极修复: 采用完全手动编译流程，绕过所有Makefile问题！${RESET}"
+  echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动编译，已补全所有已知.jam文件依赖！${RESET}"
   echo "🚀 ${BOLD}使用 Systemd 服务管理，确保稳定运行。${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
@@ -72,7 +72,6 @@ function install_all() {
         echo -e "${BLUE}[*] 目录存在，正在更新并清理...${RESET}"
         cd "$NCK_DIR"
         git pull
-        # 尝试清理，失败也无妨
         cargo clean || echo "Cargo clean failed, continuing..."
     else
         echo -e "${BLUE}[*] 正在克隆仓库...${RESET}"
@@ -104,17 +103,19 @@ function install_all() {
     echo -e "${CYAN}[*] 编译阶段 2/5: 正在创建 assets 目录...${RESET}"
     mkdir -p assets
     
-    # 阶段 3: 手动生成 .jam 资产文件
-    echo -e "${CYAN}[*] 编译阶段 3/5: 正在手动生成 .jam 资产文件...${RESET}"
+    # 阶段 3: 手动生成 .jam 资产文件 (已补全)
+    echo -e "${CYAN}[*] 编译阶段 3/5: 正在手动生成所有 .jam 资产文件...${RESET}"
     "$HOONC_PATH" pkg/miner.hoon > assets/miner.jam
     "$HOONC_PATH" pkg/dumb.hoon > assets/dumb.jam
+    "$HOONC_PATH" pkg/wal.hoon > assets/wal.jam
+    echo -e "${GREEN}[+] 所有 .jam 文件编译指令已执行。${RESET}"
 
-    # 阶段 4: 验证资产文件
-    echo -e "${CYAN}[*] 编译阶段 4/5: 正在验证资产文件...${RESET}"
-    if [ ! -s "assets/miner.jam" ] || [ ! -s "assets/dumb.jam" ]; then
-        echo -e "${RED}致命错误: 'miner.jam' 或 'dumb.jam' 生成失败或为空文件！${RESET}"; exit 1;
+    # 阶段 4: 验证资产文件 (已补全)
+    echo -e "${CYAN}[*] 编译阶段 4/5: 正在验证所有资产文件...${RESET}"
+    if [ ! -s "assets/miner.jam" ] || [ ! -s "assets/dumb.jam" ] || [ ! -s "assets/wal.jam" ]; then
+        echo -e "${RED}致命错误: 'miner.jam', 'dumb.jam' 或 'wal.jam' 生成失败或为空文件！${RESET}"; exit 1;
     fi
-    echo -e "${GREEN}[+] 资产文件 'miner.jam' 和 'dumb.jam' 已成功生成！${RESET}"
+    echo -e "${GREEN}[+] 所有资产文件 ('miner.jam', 'dumb.jam', 'wal.jam') 已成功生成！${RESET}"
 
     # 阶段 5: 手动编译 Nockchain 主程序
     echo -e "${CYAN}[*] 编译阶段 5/5: 正在手动编译 Nockchain 主程序...${RESET}"
@@ -128,7 +129,6 @@ function install_all() {
         echo -e "${RED}致命错误: Nockchain 主程序编译失败！${RESET}"; exit 1;
     fi
     
-    # 将最终可执行文件复制到 bin 目录
     cp "$NOCKCHAIN_PATH" "$HOME/.cargo/bin/"
 
     )
@@ -148,7 +148,6 @@ function install_all() {
     pause_and_return
 }
 
-# (其他函数 set_pubkey, start_node 等保持不变)
 # 2. 设置公钥
 function set_pubkey() {
     echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env 文件...${RESET}"
@@ -161,12 +160,9 @@ function set_pubkey() {
         return
     fi
     
-    # 即使.env不存在，也先创建它
     touch "$ENV_FILE"
 
     local num_cores=$(get_num_cores)
-    # 使用 sed -i，如果模式不存在，它不会报错。如果文件为空，则会追加。
-    # 为了更稳健，我们先删除可能存在的旧行，再追加新行。
     sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
     sed -i '/^MINER_THREADS=/d' "$ENV_FILE"
     
@@ -186,7 +182,6 @@ function start_node() {
         pause_and_return; return;
     fi
     
-    # 确保公钥已设置
     if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE" || [[ -z "$(grep MINING_PUBKEY "$ENV_FILE" | cut -d '=' -f2)" ]]; then
         echo -e "${RED}[-] 错误: MINING_PUBKEY 未设置! 请先运行选项 2。${RESET}"
         pause_and_return; return;
@@ -257,7 +252,7 @@ function main_menu() {
   echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"
   echo "请选择操作:"
   echo ""
-  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(终极手动编译版 v5.1)${RESET}"
+  echo -e "  ${BOLD}1) 一键安装增强版 Nockchain${RESET} ${RED}(终极手动编译版 v5.2)${RESET}"
   echo -e "  ${BOLD}2) 设置挖矿公钥 (MINING_PUBKEY)${RESET}"
   echo ""
   echo "  ${GREEN}3) 安装并启动/重启挖矿服务 (Systemd)${RESET}"
