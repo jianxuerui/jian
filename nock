@@ -1,16 +1,24 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v7.0 - 终极手动切换模型)
+# Nockchain 挖矿助手 (K2 增强融合版 v8.0 - 菜单直达版)
 # ==============================================================================
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
 #
-# v7.0 更新日志:
-# - [架构重构] 采用“两步手动切换”模型，以适应最严格的系统安全策略。
-#   - 步骤1 (root): 运行脚本以准备系统环境。
-#   - 步骤2 (用户): 手动切换到 'miner' 用户，然后再次运行脚本以启动菜单。
+# v8.0 更新日志:
+# - [流程重构] 改为“菜单直达”模型，用户使用 root 权限运行一次即可。
+# - 脚本会自动创建 'miner' 用户，并在后台以该用户身份执行编译和运行。
+# - 保留了 v7 的所有核心功能和安全实践（如使用非 root 用户挖矿）。
+# - 简化了用户操作，无需手动切换用户。
 # ==============================================================================
 set -e
+
+# --- 全局配置 ---
 MINER_USERNAME="miner"
+MINER_HOME="/home/${MINER_USERNAME}"
+NCK_DIR="${MINER_HOME}/nockchain"
+ENV_FILE="${NCK_DIR}/.env"
+SERVICE_NAME="nockchain-miner"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # --- 颜色定义 ---
 if [ -t 1 ]; then
@@ -20,20 +28,8 @@ else
     RESET=''; BOLD=''; GREEN=''; BLUE=''; YELLOW=''; RED=''; PURPLE=''; CYAN=''
 fi
 
-# ==============================================================================
-# === MINER-MODE FUNCTIONS (仅在 miner 用户下执行) ===
-# ==============================================================================
-function run_as_miner() {
-    set -euo pipefail
-    # 由于是手动切换，systemd 支持情况需要重新检测
-    HAS_SYSTEMD=$(if [ -d /run/systemd/system ]; then echo true; else echo false; fi)
-
-    NCK_DIR="$HOME/nockchain"
-    ENV_FILE="$NCK_DIR/.env"
-    SERVICE_NAME="nockchain-miner"
-    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-
-    read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
+# --- 内核数据 ---
+read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
 ::
 /+  sys/hoon
 ++  ride  |%
@@ -59,118 +55,329 @@ function run_as_miner() {
   ++  hoon-version   139
   --
 EOF
-    # --- 所有菜单函数 (install_all, set_pubkey, etc.) 与之前版本完全相同 ---
-    # 此处为简洁省略，实际代码与 v6.3 版本中的函数一致
-    # 粘贴 v6.3 中完整的 run_as_miner 函数内容到这里即可
-    function show_banner() {
-      clear; echo -e "${BOLD}${BLUE}"; echo "======================================================"; echo " Nockchain 挖矿助手 (K2 增强融合版 v7.0)"; echo "======================================================"; echo -e "${RESET}"
-      echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"; echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"; echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动切换模型！${RESET}"
-      echo -e "🚀 ${BOLD}使用 Systemd 服务管理。${RESET}"; echo "📌 作者: K2 节点教程分享"; echo "------------------------------------------------------"; echo ""
-    }
-    function get_num_cores() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4; }
-    function pause_and_return() { echo ""; read -r -p "按任意键返回主菜单..." -s -n 1; echo; }
-    function install_all() {
-        show_banner; echo -e "${YELLOW}[*] 清理旧目录...${RESET}"; if [ -d "$NCK_DIR" ]; then if [[ "$HAS_SYSTEMD" == "true" ]] && systemctl is-active --quiet "$SERVICE_NAME"; then sudo systemctl stop "$SERVICE_NAME"; fi; rm -rf "$NCK_DIR"; echo -e "${GREEN}[+] 旧目录已清理。${RESET}"; fi
-        ( set -e
-        echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 ---${RESET}"; sudo bash -c "apt-get update >/dev/null 2>&1 && apt-get install -y clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix || dnf install -y clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix && dnf groupinstall -y 'Development Tools' || pacman -Syu --noconfirm --needed clang llvm libclang pkg-config openssl cmake git make curl dos2unix base-devel";
-        echo -e "${BLUE}--- 步骤 2/4: 安装 Rust ---${RESET}"; if ! command -v cargo &>/dev/null; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; else echo -e "${YELLOW}[!] Rust 已安装，跳过。${RESET}"; fi; source "$HOME/.cargo/env";
-        echo -e "${BLUE}--- 步骤 3/4: 克隆仓库并注入内核 ---${RESET}"; git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"; cd "$NCK_DIR";
-        echo -e "${PURPLE}--- [增强] 注入内核 ---${RESET}"; echo -n "$HOON_KERNEL_CONTENT" > "$NCK_DIR/pkg/sys/hoon"; echo -e "${GREEN}[+] 内核已注入！${RESET}";
-        echo -e "${RED}${BOLD}--- 步骤 4/4: 编译 ---${RESET}"; cargo build --release -p hoonc; mkdir -p assets; "$NCK_DIR/target/release/hoonc" pkg/miner.hoon > assets/miner.jam; "$NCK_DIR/target/release/hoonc" pkg/dumb.hoon > assets/dumb.jam; "$NCK_DIR/target/release/hoonc" pkg/wal.hoon > assets/wal.jam;
-        export RUSTFLAGS="-C target-cpu=native -C opt-level=3"; export CARGO_PROFILE_RELEASE_LTO="true"; cargo build --release --workspace --exclude hoonc -j"$(get_num_cores)";
-        cp "$NCK_DIR/target/release/nockchain" "$HOME/.cargo/bin/";
-        )
-        local exit_code=$?; if [ "$exit_code" -ne 0 ]; then echo -e "\n${RED}安装失败！${RESET}"; else echo -e "\n${GREEN}安装成功！请设置公钥。${RESET}"; fi; pause_and_return
-    }
-    function set_pubkey() {
-        show_banner; if [ ! -d "$NCK_DIR" ]; then echo -e "${RED}请先安装。${RESET}"; pause_and_return; return; fi; local pubkey; read -r -p "请输入公钥: " pubkey; if ! [[ "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then echo -e "${RED}格式错误。${RESET}"; pause_and_return; return; fi
-        touch "$ENV_FILE"; sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"; sed -i '/^MINER_THREADS=/d' "$ENV_FILE"; echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"; echo "MINER_THREADS=$(get_num_cores)" >> "$ENV_FILE"; echo -e "${GREEN}配置已更新。${RESET}"; pause_and_return
-    }
-    function start_node() {
-        show_banner; if [[ "$HAS_SYSTEMD" != "true" ]]; then echo -e "${RED}不支持 Systemd。${RESET}"; pause_and_return; return; fi; if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE"; then echo -e "${RED}请先设置公钥。${RESET}"; pause_and_return; return; fi
-        sudo bash -c "cat <<EOF > $SERVICE_FILE
-[Unit]
-Description=$SERVICE_NAME service
-After=network-online.target
-[Service]
-User=$(whoami); Group=$(id -gn); WorkingDirectory=$NCK_DIR; EnvironmentFile=$ENV_FILE; ExecStart=$HOME/.cargo/bin/nockchain
-Restart=on-failure; RestartSec=10; LimitNOFILE=65536; Nice=-5
-[Install]
-WantedBy=multi-user.target
-EOF"
-        sudo systemctl daemon-reload; sudo systemctl enable "$SERVICE_NAME"; sudo systemctl restart "$SERVICE_NAME"; echo -e "${GREEN}服务已启动！${RESET}"; pause_and_return
-    }
-    function stop_node() { show_banner; if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then echo -e "${YELLOW}服务未安装。${RESET}"; pause_and_return; return; fi; sudo systemctl stop "$SERVICE_NAME"; echo -e "${GREEN}服务已停止。${RESET}"; pause_and_return; }
-    function view_logs() { show_banner; if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then echo -e "${YELLOW}服务未安装。${RESET}"; pause_and_return; return; fi; echo -e "${YELLOW}按 Ctrl+C 退出。${RESET}"; journalctl -u "$SERVICE_NAME" -f --no-pager; pause_and_return; }
-    function main_menu() {
-      show_banner; echo -e "${BOLD}${GREEN}--- Nockchain 挖矿助手 ---${RESET}"; echo "请选择操作:"; echo ""; echo -e "  1) 安装增强版 Nockchain"; echo -e "  2) 设置挖矿公钥"; echo ""
-      if [[ "$HAS_SYSTEMD" == "true" ]]; then echo -e "  3) 启动服务"; echo -e "  4) 停止服务"; echo -e "  5) 查看日志"; else echo -e "  3-5) (不可用) 不支持 Systemd"; fi
-      echo ""; echo -e "  0) 退出脚本"; echo ""; read -r -p "请输入编号: " choice
-      case "$choice" in
-        1) install_all ;; 2) set_pubkey ;; 3) start_node ;; 4) stop_node ;; 5) view_logs ;; 0) exit 0 ;; *) echo -e "${RED}无效选项。${RESET}"; pause_and_return ;;
-      esac
-    }
-    while true; do main_menu; done
+
+# ==============================================================================
+# === 助手函数 ===
+# ==============================================================================
+
+# 检查是否以 root 身份运行
+function check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}错误: 此脚本需要以 root 权限运行。${RESET}"
+        echo -e "${YELLOW}请使用 'sudo ./your_script_name.sh' 或切换到 root 用户后运行。${RESET}"
+        exit 1
+    fi
+}
+
+# 显示横幅
+function show_banner() {
+    clear
+    echo -e "${BOLD}${BLUE}======================================================${RESET}"
+    echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 增强融合版 v8.0)${RESET}"
+    echo -e "${BOLD}${BLUE}======================================================${RESET}"
+    echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"
+    echo -e "⚙️ ${BOLD}${CYAN}运行模式: 菜单直达 (需要 Root 权限)${RESET}"
+    if id "${MINER_USERNAME}" &>/dev/null; then
+        echo -e "👤 ${GREEN}专用用户 '${MINER_USERNAME}' 已创建。${RESET}"
+    else
+        echo -e "👤 ${YELLOW}专用用户 '${MINER_USERNAME}' 待创建 (将在安装时自动处理)。${RESET}"
+    fi
+    echo "📌 作者: K2 节点教程分享"
+    echo "------------------------------------------------------"
+    echo ""
+}
+
+# 获取CPU核心数
+function get_num_cores() {
+    nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
+}
+
+# 暂停并返回
+function pause_and_return() {
+    echo ""
+    read -r -p "按任意键返回主菜单..." -s -n 1
+    echo
+}
+
+# 检查 systemd 支持
+function check_systemd() {
+    if [ -d /run/systemd/system ]; then
+        echo "true"
+    else
+        echo "false"
+    fi
 }
 
 # ==============================================================================
-# === SCRIPT ENTRY POINT (脚本入口) ===
+# === 核心功能函数 ===
 # ==============================================================================
-if [ "$(id -u)" -eq 0 ]; then
-    # --- STEP 1: ROOT-MODE ---
-    echo -e "${BLUE}--- 步骤 1: ROOT 系统环境设置 ---${RESET}"
-    if [ -f /etc/os-release ]; then source /etc/os-release; OS_ID=$ID; else echo -e "${RED}错误: 无法识别操作系统。${RESET}"; exit 1; fi
-    if [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]]; then SUDO_GROUP="sudo"; else SUDO_GROUP="wheel"; fi
-    
-    # 清理并创建用户
+
+function install_all() {
+    check_root
+    show_banner
+    echo -e "${YELLOW}[*] 开始全新安装 Nockchain...${RESET}"
+
+    # --- 步骤 1: 清理并创建用户 ---
+    echo -e "${BLUE}--- 步骤 1/5: 准备专用用户 '${MINER_USERNAME}' ---${RESET}"
     if id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "${YELLOW}[!] 检测到旧用户 '${MINER_USERNAME}'，正在清理...${RESET}"
+        # 停止可能由该用户运行的任何进程
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            systemctl stop "$SERVICE_NAME"
+            systemctl disable "$SERVICE_NAME"
+            rm -f "$SERVICE_FILE"
+            systemctl daemon-reload
+        fi
         killall -u "${MINER_USERNAME}" 2>/dev/null || true
         userdel -r "${MINER_USERNAME}" 2>/dev/null || true
+        echo -e "${GREEN}[+] 旧用户及相关服务已清理。${RESET}"
     fi
-    echo -e "${BLUE}--- 正在创建新用户 '${MINER_USERNAME}'... ---${RESET}"
-    if command -v adduser &>/dev/null && [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+    
+    echo -e "${CYAN}正在创建新用户 '${MINER_USERNAME}'...${RESET}"
+    # 兼容各种系统的 useradd
+    if command -v adduser &>/dev/null && grep -q -i "debian\|ubuntu" /etc/os-release; then
         adduser --disabled-password --gecos "" "${MINER_USERNAME}"
     else
         useradd -m -s /bin/bash "${MINER_USERNAME}"
     fi
-    usermod -aG "${SUDO_GROUP}" "${MINER_USERNAME}"
-    echo "${MINER_USERNAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/90-miner-nopasswd"
-    chmod 0440 "/etc/sudoers.d/90-miner-nopasswd"
-    echo -e "${GREEN}[✓] 用户及Sudo配置完成！${RESET}"
+    echo -e "${GREEN}[✓] 用户创建成功！${RESET}"
+
+    # --- 步骤 2: 安装系统依赖 (以 root 身份) ---
+    echo -e "${BLUE}--- 步骤 2/5: 安装系统依赖 ---${RESET}"
+    (
+        set -e
+        # 尝试用各种包管理器安装
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y >/dev/null 2>&1
+            apt-get install -y clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix
+        elif command -v dnf &>/dev/null; then
+            dnf install -y clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix
+            dnf groupinstall -y 'Development Tools'
+        elif command -v pacman &>/dev/null; then
+            pacman -Syu --noconfirm --needed clang llvm libclang pkg-config openssl cmake git make curl dos2unix base-devel
+        else
+            echo -e "${RED}错误: 未知的包管理器。请手动安装所需依赖。${RESET}"
+            exit 1
+        fi
+    )
+    echo -e "${GREEN}[✓] 系统依赖安装完成。${RESET}"
+
+    # --- 步骤 3 & 4: 克隆、编译 (切换到 miner 用户执行) ---
+    echo -e "${BLUE}--- 步骤 3/5: 安装 Rust (以 '${MINER_USERNAME}' 用户身份) ---${RESET}"
+    echo -e "${BLUE}--- 步骤 4/5: 克隆和编译 Nockchain (以 '${MINER_USERNAME}' 用户身份) ---${RESET}"
+    echo -e "${YELLOW}这部分可能需要一些时间，请耐心等待...${RESET}"
     
-    # 复制脚本到新用户目录
-    SCRIPT_PATH_IN_MINER_HOME="/home/${MINER_USERNAME}/$(basename "$0")"
-    cp "$0" "${SCRIPT_PATH_IN_MINER_HOME}"
-    chown "${MINER_USERNAME}:${MINER_USERNAME}" "${SCRIPT_PATH_IN_MINER_HOME}"
-    chmod +x "${SCRIPT_PATH_IN_MINER_HOME}"
+    # 使用 su 和 heredoc 在 miner 用户环境中执行一长串命令
+    su - "${MINER_USERNAME}" -c bash <<'EOF'
+    set -euo pipefail # 在子 shell 中也需要设置
     
-    # 显示最终指令
-    echo -e "\n${BOLD}${PURPLE}======================================================================${RESET}"
-    echo -e "${BOLD}${GREEN}[✓] 步骤 1 (ROOT 设置) 已完成!${RESET}"
-    echo -e "${BOLD}${PURPLE}======================================================================${RESET}"
-    echo ""
-    echo -e "${YELLOW}系统环境已准备就绪。请手动切换到 '${MINER_USERNAME}' 用户以继续安装。${RESET}"
-    echo ""
-    echo -e "${CYAN}请立即运行以下命令:${RESET}"
-    echo ""
-    echo -e "${BOLD}    su - ${MINER_USERNAME}${RESET}"
-    echo ""
-    echo -e "${CYAN}切换成功后，您将位于 /home/${MINER_USERNAME} 目录中。${RESET}"
-    echo -e "${CYAN}然后，请运行脚本以启动菜单:${RESET}"
-    echo ""
-    echo -e "${BOLD}    ./$(basename "$0")${RESET}"
-    echo ""
-    echo -e "${BOLD}${PURPLE}======================================================================${RESET}"
-    
-    exit 0
-else
-    # --- STEP 2: MINER-MODE ---
-    if [ "$(whoami)" != "${MINER_USERNAME}" ]; then
-        echo -e "${RED}错误: 此脚本的第二步必须由 '${MINER_USERNAME}' 用户运行。${RESET}"
-        echo -e "${RED}当前用户是 '$(whoami)'。请先用 root 身份运行脚本完成第一步设置。${RESET}"
-        exit 1
+    # 安装 Rust
+    if ! command -v cargo &>/dev/null; then
+        echo "正在安装 Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     fi
-    run_as_miner
-fi
-exit 0
+    source "$HOME/.cargo/env"
+    
+    # 定义变量
+    NCK_DIR_SUB="$HOME/nockchain"
+    
+    # 克隆和编译
+    echo "正在克隆 Nockchain 仓库..."
+    rm -rf "$NCK_DIR_SUB" # 确保是全新的
+    git clone https://github.com/zorp-corp/nockchain "$NCK_DIR_SUB"
+    cd "$NCK_DIR_SUB"
+    
+    echo "正在注入增强版内核..."
+    echo -n "$HOON_KERNEL_CONTENT" > "$NCK_DIR_SUB/pkg/sys/hoon"
+    echo "内核注入成功！"
+    
+    echo "正在编译，这将花费几分钟时间..."
+    # 编译 hoonc 和其他组件
+    cargo build --release -p hoonc
+    mkdir -p assets
+    "$NCK_DIR_SUB/target/release/hoonc" pkg/miner.hoon > assets/miner.jam
+    "$NCK_DIR_SUB/target/release/hoonc" pkg/dumb.hoon > assets/dumb.jam
+    "$NCK_DIR_SUB/target/release/hoonc" pkg/wal.hoon > assets/wal.jam
+    
+    # 优化编译
+    export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+    export CARGO_PROFILE_RELEASE_LTO="true"
+    cargo build --release --workspace --exclude hoonc -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+    
+    # 复制二进制文件到 PATH
+    cp "$NCK_DIR_SUB/target/release/nockchain" "$HOME/.cargo/bin/"
+    echo "编译完成！"
+EOF
+
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        echo -e "\n${RED}安装失败！请检查上面的错误信息。${RESET}"
+    else
+        echo -e "\n${GREEN}[✓] Nockchain 安装成功！${RESET}"
+        echo -e "${YELLOW}--- 步骤 5/5: 完成 ---${RESET}"
+        echo -e "${CYAN}接下来，请使用菜单选项 '2' 来设置您的挖矿公钥。${RESET}"
+    fi
+    pause_and_return
+}
+
+function set_pubkey() {
+    check_root
+    show_banner
+    if [ ! -d "$NCK_DIR" ]; then
+        echo -e "${RED}错误: Nockchain 尚未安装。请先选择 '1' 进行安装。${RESET}"
+        pause_and_return
+        return
+    fi
+    
+    local pubkey
+    read -r -p "请输入您的128位挖矿公钥: " pubkey
+    
+    # 验证公钥格式 (128个十六进制字符)
+    if ! [[ "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
+        echo -e "\n${RED}错误: 公钥格式无效。它应该是128个十六进制字符（0-9, a-f）。${RESET}"
+        pause_and_return
+        return
+    fi
+    
+    # 创建并写入 .env 文件
+    touch "$ENV_FILE"
+    # 确保文件归属正确
+    chown "${MINER_USERNAME}:${MINER_USERNAME}" "$ENV_FILE"
+    
+    # 删除旧条目并添加新条目
+    sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
+    sed -i '/^MINER_THREADS=/d' "$ENV_FILE"
+    echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
+    echo "MINER_THREADS=$(get_num_cores)" >> "$ENV_FILE"
+    
+    echo -e "\n${GREEN}[✓] 配置已成功保存到: ${ENV_FILE}${RESET}"
+    echo -e "${CYAN}公钥设置为: ${pubkey:0:10}...${pubkey: -10}${RESET}"
+    echo -e "${CYAN}挖矿线程数设置为: $(get_num_cores)${RESET}"
+    pause_and_return
+}
+
+function start_node() {
+    check_root
+    show_banner
+    if [[ "$(check_systemd)" != "true" ]]; then
+        echo -e "${RED}错误: 系统不支持 Systemd，无法创建服务。${RESET}"
+        pause_and_return
+        return
+    fi
+    if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE"; then
+        echo -e "${RED}错误: 尚未设置公钥。请先选择 '2' 进行设置。${RESET}"
+        pause_and_return
+        return
+    fi
+    
+    echo -e "${YELLOW}[*] 正在创建并启动 systemd 服务...${RESET}"
+    
+    # 创建 systemd service 文件
+    cat <<EOF > "$SERVICE_FILE"
+[Unit]
+Description=$SERVICE_NAME service
+After=network-online.target
+
+[Service]
+User=${MINER_USERNAME}
+Group=$(id -gn "${MINER_USERNAME}")
+WorkingDirectory=${NCK_DIR}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${MINER_HOME}/.cargo/bin/nockchain
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 重新加载、启用并启动服务
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME"
+    
+    echo -e "\n${GREEN}[✓] 服务 '${SERVICE_NAME}' 已成功启动并设置为开机自启！${RESET}"
+    echo -e "${CYAN}您可以使用菜单选项 '5' 来查看实时日志。${RESET}"
+    pause_and_return
+}
+
+function stop_node() {
+    check_root
+    show_banner
+    if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+        echo -e "${YELLOW}提示: 服务未安装或未曾运行过，无需停止。${RESET}"
+        pause_and_return
+        return
+    fi
+    
+    echo -e "${YELLOW}[*] 正在停止 systemd 服务...${RESET}"
+    systemctl stop "$SERVICE_NAME"
+    echo -e "\n${GREEN}[✓] 服务 '${SERVICE_NAME}' 已停止。${RESET}"
+    pause_and_return
+}
+
+function view_logs() {
+    check_root
+    show_banner
+    if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+        echo -e "${YELLOW}提示: 服务未安装，无法查看日志。${RESET}"
+        pause_and_return
+        return
+    fi
+    
+    echo -e "${YELLOW}正在显示实时日志... 按 Ctrl+C 退出日志并返回菜单。${RESET}"
+    echo "------------------------------------------------------"
+    journalctl -u "$SERVICE_NAME" -f --no-pager
+    pause_and_return
+}
+
+# ==============================================================================
+# === 主菜单和循环 ===
+# ==============================================================================
+
+function main_menu() {
+    show_banner
+    echo -e "${BOLD}${GREEN}--- 主菜单 ---${RESET}"
+    echo "请选择要执行的操作:"
+    echo ""
+    echo -e "  ${CYAN}1)${RESET} 全新安装 Nockchain (会清空旧数据)"
+    echo -e "  ${CYAN}2)${RESET} 设置/更新挖矿公钥"
+    echo ""
+    if [[ "$(check_systemd)" == "true" ]]; then
+        # 检查服务状态
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            SERVICE_STATUS="${GREEN}(运行中)${RESET}"
+        else
+            SERVICE_STATUS="${RED}(已停止)${RESET}"
+        fi
+        echo -e "  ${CYAN}3)${RESET} ${BOLD}启动${RESET}挖矿服务 ${SERVICE_STATUS}"
+        echo -e "  ${CYAN}4)${RESET} ${BOLD}停止${RESET}挖矿服务"
+        echo -e "  ${CYAN}5)${RESET} 查看实时日志"
+    else
+        echo -e "  ${RED}3-5) (不可用) 您的系统不支持 Systemd${RESET}"
+    fi
+    echo ""
+    echo -e "  ${YELLOW}0) 退出脚本${RESET}"
+    echo ""
+    
+    read -r -p "请输入选项编号: " choice
+    
+    case "$choice" in
+        1) install_all ;;
+        2) set_pubkey ;;
+        3) start_node ;;
+        4) stop_node ;;
+        5) view_logs ;;
+        0) echo -e "${BLUE}感谢使用！再见。${RESET}"; exit 0 ;;
+        *) echo -e "${RED}无效选项，请重新输入。${RESET}"; sleep 1 ;;
+    esac
+}
+
+# --- 脚本入口 ---
+# 检查root权限，然后直接进入主循环
+check_root
+while true; do
+    main_menu
+done
