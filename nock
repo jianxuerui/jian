@@ -1,19 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v6.4 - 最终执行模型)
-# ==============================================================================
-# HOW TO RUN THIS SCRIPT (重要运行说明):
-# 1. 以 root 用户身份运行: `bash nock.sh`
-# 2. 脚本会自动完成 root 设置，然后通过 'exec' 重新执行自身以切换到 'miner' 用户。
+# Nockchain 挖矿助手 (K2 增强融合版 v7.0 - 终极手动切换模型)
 # ==============================================================================
 # 作者: K2 节点教程分享 (AI 终极离线内核版)
 #
-# v6.4 更新日志:
-# - [架构] 采用全新的“自重新执行”模型，以解决顽固的系统环境下的用户切换失败问题。
+# v7.0 更新日志:
+# - [架构重构] 采用“两步手动切换”模型，以适应最严格的系统安全策略。
+#   - 步骤1 (root): 运行脚本以准备系统环境。
+#   - 步骤2 (用户): 手动切换到 'miner' 用户，然后再次运行脚本以启动菜单。
 # ==============================================================================
-
 set -e
-# --- 全局常量 ---
 MINER_USERNAME="miner"
 
 # --- 颜色定义 ---
@@ -29,7 +25,8 @@ fi
 # ==============================================================================
 function run_as_miner() {
     set -euo pipefail
-    HAS_SYSTEMD=${HAS_SYSTEMD:-false}
+    # 由于是手动切换，systemd 支持情况需要重新检测
+    HAS_SYSTEMD=$(if [ -d /run/systemd/system ]; then echo true; else echo false; fi)
 
     NCK_DIR="$HOME/nockchain"
     ENV_FILE="$NCK_DIR/.env"
@@ -62,13 +59,12 @@ function run_as_miner() {
   ++  hoon-version   139
   --
 EOF
-    # ... [所有菜单函数 install_all, set_pubkey, etc. 保持不变] ...
-    # 为了简洁，这里省略了所有菜单函数的具体实现代码，它们和之前版本完全一样。
-    # 您只需将 v6.3 版本中的 run_as_miner 函数完整内容粘贴到这里即可。
-    # --- Start of functions from previous version ---
+    # --- 所有菜单函数 (install_all, set_pubkey, etc.) 与之前版本完全相同 ---
+    # 此处为简洁省略，实际代码与 v6.3 版本中的函数一致
+    # 粘贴 v6.3 中完整的 run_as_miner 函数内容到这里即可
     function show_banner() {
-      clear; echo -e "${BOLD}${BLUE}"; echo "======================================================"; echo " Nockchain 挖矿助手 (K2 增强融合版 v6.4)"; echo "======================================================"; echo -e "${RESET}"
-      echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"; echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"; echo -e "🛡️ ${BOLD}${RED}终极修复: 采用自重新执行模型！${RESET}"
+      clear; echo -e "${BOLD}${BLUE}"; echo "======================================================"; echo " Nockchain 挖矿助手 (K2 增强融合版 v7.0)"; echo "======================================================"; echo -e "${RESET}"
+      echo -e "🔧 ${BOLD}${CYAN}当前用户: $(whoami)${RESET}"; echo -e "✨ ${BOLD}${PURPLE}内核增强: 使用内置 v139 内核！${RESET}"; echo -e "🛡️ ${BOLD}${RED}终极修复: 采用手动切换模型！${RESET}"
       echo -e "🚀 ${BOLD}使用 Systemd 服务管理。${RESET}"; echo "📌 作者: K2 节点教程分享"; echo "------------------------------------------------------"; echo ""
     }
     function get_num_cores() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4; }
@@ -76,7 +72,7 @@ EOF
     function install_all() {
         show_banner; echo -e "${YELLOW}[*] 清理旧目录...${RESET}"; if [ -d "$NCK_DIR" ]; then if [[ "$HAS_SYSTEMD" == "true" ]] && systemctl is-active --quiet "$SERVICE_NAME"; then sudo systemctl stop "$SERVICE_NAME"; fi; rm -rf "$NCK_DIR"; echo -e "${GREEN}[+] 旧目录已清理。${RESET}"; fi
         ( set -e
-        echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 ---${RESET}"; sudo bash -c "apt-get update && apt-get install -y clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix || dnf install -y clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix && dnf groupinstall -y 'Development Tools' || pacman -Syu --noconfirm --needed clang llvm libclang pkg-config openssl cmake git make curl dos2unix base-devel";
+        echo -e "${BLUE}--- 步骤 1/4: 安装系统依赖 ---${RESET}"; sudo bash -c "apt-get update >/dev/null 2>&1 && apt-get install -y clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix || dnf install -y clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix && dnf groupinstall -y 'Development Tools' || pacman -Syu --noconfirm --needed clang llvm libclang pkg-config openssl cmake git make curl dos2unix base-devel";
         echo -e "${BLUE}--- 步骤 2/4: 安装 Rust ---${RESET}"; if ! command -v cargo &>/dev/null; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; else echo -e "${YELLOW}[!] Rust 已安装，跳过。${RESET}"; fi; source "$HOME/.cargo/env";
         echo -e "${BLUE}--- 步骤 3/4: 克隆仓库并注入内核 ---${RESET}"; git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"; cd "$NCK_DIR";
         echo -e "${PURPLE}--- [增强] 注入内核 ---${RESET}"; echo -n "$HOON_KERNEL_CONTENT" > "$NCK_DIR/pkg/sys/hoon"; echo -e "${GREEN}[+] 内核已注入！${RESET}";
@@ -114,8 +110,6 @@ EOF"
         1) install_all ;; 2) set_pubkey ;; 3) start_node ;; 4) stop_node ;; 5) view_logs ;; 0) exit 0 ;; *) echo -e "${RED}无效选项。${RESET}"; pause_and_return ;;
       esac
     }
-    # --- End of functions from previous version ---
-    
     while true; do main_menu; done
 }
 
@@ -123,18 +117,17 @@ EOF"
 # === SCRIPT ENTRY POINT (脚本入口) ===
 # ==============================================================================
 if [ "$(id -u)" -eq 0 ]; then
-    # --- ROOT-MODE: 执行系统级设置 ---
-    echo -e "${BLUE}--- ROOT 模式: 正在执行系统级设置... ---${RESET}"
+    # --- STEP 1: ROOT-MODE ---
+    echo -e "${BLUE}--- 步骤 1: ROOT 系统环境设置 ---${RESET}"
     if [ -f /etc/os-release ]; then source /etc/os-release; OS_ID=$ID; else echo -e "${RED}错误: 无法识别操作系统。${RESET}"; exit 1; fi
     if [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]]; then SUDO_GROUP="sudo"; else SUDO_GROUP="wheel"; fi
     
+    # 清理并创建用户
     if id "${MINER_USERNAME}" &>/dev/null; then
         echo -e "${YELLOW}[!] 检测到旧用户 '${MINER_USERNAME}'，正在清理...${RESET}"
         killall -u "${MINER_USERNAME}" 2>/dev/null || true
         userdel -r "${MINER_USERNAME}" 2>/dev/null || true
-        echo -e "${GREEN}[✓] 清理完成。${RESET}"
     fi
-
     echo -e "${BLUE}--- 正在创建新用户 '${MINER_USERNAME}'... ---${RESET}"
     if command -v adduser &>/dev/null && [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
         adduser --disabled-password --gecos "" "${MINER_USERNAME}"
@@ -146,28 +139,38 @@ if [ "$(id -u)" -eq 0 ]; then
     chmod 0440 "/etc/sudoers.d/90-miner-nopasswd"
     echo -e "${GREEN}[✓] 用户及Sudo配置完成！${RESET}"
     
+    # 复制脚本到新用户目录
     SCRIPT_PATH_IN_MINER_HOME="/home/${MINER_USERNAME}/$(basename "$0")"
     cp "$0" "${SCRIPT_PATH_IN_MINER_HOME}"
     chown "${MINER_USERNAME}:${MINER_USERNAME}" "${SCRIPT_PATH_IN_MINER_HOME}"
     chmod +x "${SCRIPT_PATH_IN_MINER_HOME}"
     
-    echo -e "\n${BOLD}${PURPLE}=== ROOT 设置完成。正在重新执行脚本以切换到 '${MINER_USERNAME}' 用户... ===${RESET}\n"
-    sleep 3
+    # 显示最终指令
+    echo -e "\n${BOLD}${PURPLE}======================================================================${RESET}"
+    echo -e "${BOLD}${GREEN}[✓] 步骤 1 (ROOT 设置) 已完成!${RESET}"
+    echo -e "${BOLD}${PURPLE}======================================================================${RESET}"
+    echo ""
+    echo -e "${YELLOW}系统环境已准备就绪。请手动切换到 '${MINER_USERNAME}' 用户以继续安装。${RESET}"
+    echo ""
+    echo -e "${CYAN}请立即运行以下命令:${RESET}"
+    echo ""
+    echo -e "${BOLD}    su - ${MINER_USERNAME}${RESET}"
+    echo ""
+    echo -e "${CYAN}切换成功后，您将位于 /home/${MINER_USERNAME} 目录中。${RESET}"
+    echo -e "${CYAN}然后，请运行脚本以启动菜单:${RESET}"
+    echo ""
+    echo -e "${BOLD}    ./$(basename "$0")${RESET}"
+    echo ""
+    echo -e "${BOLD}${PURPLE}======================================================================${RESET}"
     
-    # 终极修复: 使用 exec + sudo -u 来替换当前进程，而不是尝试在子进程中切换
-    HAS_SYSTEMD=$(if [ -d /run/systemd/system ]; then echo true; else echo false; fi)
-    exec sudo -u "${MINER_USERNAME}" \
-         HOME="/home/${MINER_USERNAME}" \
-         bash -c "HAS_SYSTEMD=${HAS_SYSTEMD} ${SCRIPT_PATH_IN_MINER_HOME}"
-
+    exit 0
 else
-    # --- MINER-MODE: 已经是普通用户，直接运行主程序 ---
+    # --- STEP 2: MINER-MODE ---
     if [ "$(whoami)" != "${MINER_USERNAME}" ]; then
-        echo -e "${RED}错误: 此脚本设计为由 root 用户首次启动，或由 '${MINER_USERNAME}' 用户运行。${RESET}"
-        echo -e "${RED}当前用户是 '$(whoami)'。请切换到 root 后再运行。${RESET}"
+        echo -e "${RED}错误: 此脚本的第二步必须由 '${MINER_USERNAME}' 用户运行。${RESET}"
+        echo -e "${RED}当前用户是 '$(whoami)'。请先用 root 身份运行脚本完成第一步设置。${RESET}"
         exit 1
     fi
     run_as_miner
 fi
-
 exit 0
