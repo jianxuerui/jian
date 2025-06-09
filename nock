@@ -65,7 +65,7 @@ check_compatibility() {
     case $distro in
         Ubuntu) [[ $version =~ ^(20\.04|22\.04|24\.04)$ ]] || { ColorRed "不支持的 Ubuntu 版本: $version. 需要: 20.04, 22.04, 24.04\n"; exit 1; };;
         Debian) [[ ${version%%.*} -ge 10 ]] || { ColorRed "需要 Debian >= 10, 当前版本 $version\n"; exit 1; };;
-        CentOS|AlmaLinux|Rocky) [[ ${version%%.*} -ge 8 ]] || { ColorRed "需要 RHEL/CentOS >= 8, 当前版本 $version\n"; exit 1; };;
+        CentOS|AlmaLinux|Rocky|OracleLinux) [[ ${version%%.*} -ge 8 ]] || { ColorRed "需要 RHEL/CentOS >= 8, 当前版本 $version\n"; exit 1; };;
         *) ColorRed "不支持的发行版: $distro\n"; exit 1;;
     esac
     if [[ $SKIP_CPU_CHECK -ne 1 ]]; then
@@ -90,16 +90,26 @@ install_dependencies() {
             build-essential clang-15 llvm-15-dev libclang-15-dev cmake libssl-dev pkg-config \
             uuid-dev git cgroup-tools screen htop ntpdate jq python3-venv curl ufw tor
     elif command -v dnf &>/dev/null; then
-        # <<< MODIFIED BLOCK HERE / 已修改部分 >>>
-        # This block now tries to enable 'powertools' and falls back to 'crb' if it fails,
-        # making it compatible with CentOS 8, AlmaLinux, Rocky Linux etc.
-        ColorYellow "检测到 RHEL/CentOS 系统，正在启用 Powertools/CRB 仓库...\n"
-        sudo dnf install -y 'dnf-command(config-manager)'
-        if ! sudo dnf config-manager --set-enabled powertools &>/dev/null; then
-            ColorYellow "未找到 'powertools' 仓库, 正在尝试 'crb' (适用于 Alma/Rocky 8+)...\n"
-            sudo dnf config-manager --set-enabled crb
+        # <<< ROBUSTLY MODIFIED BLOCK HERE / 最终修复部分 >>>
+        # This block now automatically finds the correct name for the developer repository
+        # (e.g., 'powertools', 'crb', 'ol8_codeready_builder') and enables it.
+        ColorYellow "检测到 RHEL/CentOS 系统，正在自动查找并启用开发工具仓库...\n"
+        sudo dnf install -y -q 'dnf-command(config-manager)'
+
+        local BUILDER_REPO_ID
+        # Search for the repo ID using common keywords, case-insensitively
+        BUILDER_REPO_ID=$(sudo dnf repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1)
+
+        if [[ -n "$BUILDER_REPO_ID" ]]; then
+            ColorGreen "成功找到开发工具仓库: '$BUILDER_REPO_ID'. 正在启用...\n"
+            sudo dnf config-manager --set-enabled "$BUILDER_REPO_ID"
+        else
+            ColorRed "致命错误: 无法自动找到所需的开发工具仓库 (如 Powertools, CRB, CodeReady Builder)。\n"
+            ColorRed "请手动运行 'sudo dnf repolist all' 找到它，然后使用 'sudo dnf config-manager --set-enabled <仓库ID>' 来启用它，最后重新运行本脚本。\n"
+            exit 1
         fi
         # <<< END OF MODIFIED BLOCK >>>
+        
         sudo dnf install -y \
             gcc-toolset-12 clang llvm-devel libasan libclang-devel cmake openssl-devel pkgconfig \
             libuuid-devel git libcgroup-tools screen htop ntpdate jq python3-venv curl firewalld tor
