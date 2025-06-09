@@ -1,3 +1,8 @@
+# 先删除旧文件，避免混淆
+rm -f nock.sh
+
+# 将下面的完整代码保存为 nock.sh
+cat > nock.sh << 'EOF'
 #!/bin/bash
 # Nockchain 编排器 v5.2.3 "亥伯龙" (中文交互版 / 终极兼容性 / 语法修正)
 #
@@ -81,14 +86,14 @@ load_or_create_config() {
     if [ ! -f "$CONFIG_FILE" ]; {
         log_warn "配置文件不存在，将创建一份默认配置。"
         $SUDO_CMD mkdir -p /etc/nockchain
-        $SUDO_CMD tee "$CONFIG_FILE" >/dev/null <<'EOF'
+        $SUDO_CMD tee "$CONFIG_FILE" >/dev/null <<'EON'
 # Nockchain Orchestrator 配置文件
 USER="nockchain"
 DATA_DIR="/var/lib/nockchain"
 SOURCE_DIR="/opt/nockchain_src"
 BACKUP_DIR="/var/backups/nockchain"
 NOCKCHAIN_REPO_URL="https://github.com/zorp-corp/nockchain.git"
-EOF
+EON
         $SUDO_CMD chmod 644 "$CONFIG_FILE"
     }
     
@@ -143,7 +148,7 @@ setup_daemon() {
     if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
         log_info "检测到 systemd，正在配置 systemd 服务..."
         local full_exec_cmd="bash -c '$COMPILER_ENV_CMD exec $exec_cmd'"
-        $SUDO_CMD tee /etc/systemd/system/nockchain-node.service >/dev/null <<EOF
+        $SUDO_CMD tee /etc/systemd/system/nockchain-node.service >/dev/null <<EON
 [Unit]
 Description=Nockchain Node
 After=network-online.target
@@ -153,26 +158,25 @@ Restart=always
 User=${CONFIG[USER]}
 [Install]
 WantedBy=multi-user.target
-EOF
+EON
         $SUDO_CMD systemctl daemon-reload
         $SUDO_CMD systemctl enable nockchain-node.service
     else
         log_warn "未检测到 systemd。将创建一个基于 'screen' 的启动脚本。"
         local start_script_path="/usr/local/bin/start-nockchain.sh"
-        $SUDO_CMD tee "$start_script_path" > /dev/null <<EOF
+        $SUDO_CMD tee "$start_script_path" > /dev/null <<EON
 #!/bin/bash
 cd /
 screen -dmS nockchain bash -c '$COMPILER_ENV_CMD exec $exec_cmd'
 echo "Nockchain 节点已在名为 'nockchain' 的 screen 会话中启动。"
 echo "使用 'screen -r nockchain' 连接到会话。"
-EOF
+EON
         $SUDO_CMD chmod +x "$start_script_path"
         log_info "要启动节点，请运行: sudo start-nockchain.sh"
     fi
 }
 
 manage_node() {
-    # <<< FIX: Corrected case statement syntax for better compatibility >>>
     PS3="$(ColorYellow '请选择节点操作: ')"
     select action in "启动节点" "停止节点" "重启节点" "查看状态" "返回主菜单"; do
         case $action in
@@ -322,3 +326,4 @@ while true; do
     main_menu
     read -p $'\n按回车键返回主菜单...'
 done
+EOF
