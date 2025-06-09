@@ -75,7 +75,7 @@ check_compatibility() {
     ColorGreen "系统兼容性检查通过。\n"
 }
 
-# (MODIFIED) Dependency installation with distro detection and LLVM PPA for Debian/Ubuntu
+# Dependency installation with robust repo handling and correct package names
 install_dependencies() {
     ColorBlue ">> [2/8] 正在安装核心依赖...\n"
     if command -v apt-get &>/dev/null; then
@@ -90,10 +90,8 @@ install_dependencies() {
             build-essential clang-15 llvm-15-dev libclang-15-dev cmake libssl-dev pkg-config \
             uuid-dev git cgroup-tools screen htop ntpdate jq python3-venv curl ufw tor
     elif command -v dnf &>/dev/null; then
-        # <<< ULTIMATE FIX BLOCK HERE / 最终修复部分 >>>
         ColorYellow "检测到 RHEL/CentOS 系统，正在处理仓库和依赖...\n"
         
-        # Step 1: Install EPEL repository, which is essential for many packages
         if ! rpm -q epel-release &>/dev/null; then
             ColorYellow "正在安装 EPEL 仓库...\n"
             sudo dnf install -y epel-release
@@ -101,7 +99,6 @@ install_dependencies() {
             ColorGreen "EPEL 仓库已安装。\n"
         fi
 
-        # Step 2: Enable the PowerTools/CRB repository robustly
         ColorYellow "正在启用 PowerTools/CRB 仓库...\n"
         sudo dnf install -y -q 'dnf-command(config-manager)'
         local BUILDER_REPO_ID
@@ -115,33 +112,32 @@ install_dependencies() {
             exit 1
         fi
 
-        # Step 3: Install dependencies with corrected package names for CentOS 8
-        ColorYellow "正在安装核心软件包...\n"
+        ColorYellow "正在安装核心软件包 (已为 CentOS 8 适配)...\n"
         sudo dnf install -y \
             gcc-toolset-11 clang llvm-devel libasan clang-devel cmake openssl-devel pkgconfig \
             libuuid-devel git libcgroup-tools screen htop chrony jq python3-devel curl firewalld tor
-        # <<< END OF MODIFIED BLOCK >>>
     else
         ColorRed "不支持的包管理器。无法安装依赖。\n"; exit 1
     fi
     ColorGreen "依赖安装成功。\n"
 }
 
-# Hoon Compiler Build
+# (FIXED) Hoon Compiler Build with correct tag
 build_hoonc() {
     ColorBlue ">> [3/8] 正在构建 Hoon 编译器 (hoonc)...\n"
     if [ -f /usr/local/bin/hoonc ]; then ColorGreen "Hoon 编译器已存在，跳过此步。\n"; return; fi
     git clone https://github.com/urbit/hoon.git /tmp/hoon
-    (cd /tmp/hoon && git checkout tags/hoonk-v1.0.2 && make HOON_ARCH="$(uname -m)-linux" && sudo make install)
+    # <<< FIX: Changed non-existent tag 'hoonk-v1.0.2' to a real tag 'hoon-v1.0'
+    (cd /tmp/hoon && git checkout tags/hoon-v1.0 && make HOON_ARCH="$(uname -m)-linux" && sudo make install)
     sudo rm -rf /tmp/hoon
     ColorGreen "Hoon 编译器构建并安装成功。\n"
 }
 
-# Build the Nockchain Suite
+# (FIXED) Build the Nockchain Suite, enabling gcc-toolset-11
 build_nockchain_suite() {
     local node_type=$1
     ColorBlue ">> [4/8] 正在构建 Nockchain 套件 (类型: $node_type)...\n"
-    # Enable gcc-toolset-11 for this build session if on a dnf system
+    # <<< FIX: Enable gcc-toolset-11 for this build session if on a dnf system
     if command -v dnf &>/dev/null && [ -f /opt/rh/gcc-toolset-11/enable ]; then
       ColorYellow "正在启用 gcc-toolset-11 以进行编译...\n"
       source /opt/rh/gcc-toolset-11/enable
@@ -173,7 +169,7 @@ setup_environment() {
     ColorGreen "环境设置完成。助记词已保存至 ${CONFIG[DATA_DIR]}/wallet/seed.txt\n"
 }
 
-# Advanced Systemd and Firewall setup
+# (FIXED) Advanced Systemd and Firewall setup for gcc-toolset-11 compatibility
 setup_daemon_and_security() {
     local node_type=$1
     ColorBlue ">> [6/8] 正在配置 Systemd 服务和防火墙...\n"
@@ -183,6 +179,7 @@ setup_daemon_and_security() {
         archive) exec_start_args+=" --pruning archive";;
         light) exec_start_args="light ${exec_start_args}";;
     esac
+    # <<< FIX: Added a bash wrapper to source the gcc-toolset-11 environment for the service
     cat <<EOF | sudo tee /etc/systemd/system/nockchain-node.service
 [Unit]
 Description=Nockchain Node ($node_type)
@@ -192,7 +189,7 @@ Wants=network-online.target
 User=${CONFIG[USER]}
 Group=${CONFIG[USER]}
 Type=simple
-ExecStart=/bin/bash -c 'if [ -f /opt/rh/gcc-toolset-11/enable ]; then source /opt/rh/gcc-toolset-11/enable; fi; /usr/local/bin/nockchain $exec_start_args'
+ExecStart=/bin/bash -c 'if [ -f /opt/rh/gcc-toolset-11/enable ]; then source /opt/rh/gcc-toolset-11/enable; fi; exec /usr/local/bin/nockchain $exec_start_args'
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=1048576
