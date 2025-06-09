@@ -1,15 +1,15 @@
 #!/bin/bash
-# Nockchain 编排器 v5.2.1 "亥伯龙" (中文交互版 / 终极兼容性 / 语法修正)
+# Nockchain 编排器 v5.2.2 "亥伯龙" (中文交互版 / 终极兼容性 / 语法修正)
 #
 # 更新日志:
-# v5.2.1: 修正了因函数体省略导致的 Bash 语法错误。恢复所有函数的完整实现。
-# v5.2:   终极兼容性优化。实现 sudo/root 无缝切换，增加前置环境检查，
-#         编译器版本预警，更健壮的依赖安装与验证，并引入动态加载光标。
+# v5.2.2: 彻底修复了 load_or_create_config 函数中因使用不稳定的 eval 命令导致的致命语法错误。
+#         改用更健壮、安全的 while read 循环来解析配置文件。
+# v5.2.1: 修正了因函数体省略导致的 Bash 语法错误。
 #
 set -euo pipefail
 
 # --- 脚本元数据 ---
-SCRIPT_VERSION="5.2.1"
+SCRIPT_VERSION="5.2.2"
 
 # --- 配置与日志 ---
 CONFIG_FILE="/etc/nockchain/nockchain.conf"
@@ -91,9 +91,16 @@ NOCKCHAIN_REPO_URL="https://github.com/zorp-corp/nockchain.git"
 EOF
         $SUDO_CMD chmod 644 "$CONFIG_FILE"
     }
+    
+    # <<< FIX: Replaced buggy eval with a robust while-read loop for parsing >>>
     declare -g -A CONFIG
-    # Source the config file safely
-    eval "$($SUDO_CMD cat "$CONFIG_FILE" | grep -v '^\s*#' | sed 's/^/CONFIG[&/g;s/=/]=/g;s/$/&/g;s/=/\"/2;s/$/\"/g' )"
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        # skip comments and empty lines
+        [[ "$key" =~ ^\s*# || -z "$key" ]] && continue
+        # remove quotes and trim whitespace
+        value=$(echo "$value" | sed -e 's/^["]*//' -e 's/["]*$//' -e 's/^[ \t]*//;s/[ \t]*$//')
+        CONFIG["$key"]="$value"
+    done < <($SUDO_CMD cat "$CONFIG_FILE")
 }
 
 detect_distro() {
@@ -217,7 +224,7 @@ show_banner() {
   /  |/ /  / _ \  | |/ /  / _ \  / __| | __| |  __| | |/ __| / __|
  / /|  /  | (_) | |   <  | (_) | \__ \ | |_  | |    | | (__  \__ \
 /_/ |_/    \___/  |_|\_\  \___/  |___/  \__| |_|    |_| \___| |___/
-           编排器 v5.2.1 "亥伯龙" (中文版)
+           编排器 v5.2.2 "亥伯龙" (中文版)
 '
 }
 
@@ -243,7 +250,7 @@ main_menu() {
         case $opt in
             "安装与组件管理") install_dependencies; PS3="选择节点类型: "; select type in "验证者" "全节点"; do install_nockchain_node "$type"; setup_daemon "$type"; break; done;;
             "节点管理 (启动/停止/状态)") manage_node ;;
-            "添加挖_矿/验证者公钥") add_mining_key ;;
+            "添加挖矿/验证者公钥") add_mining_key ;;
             "查看实时日志") $SUDO_CMD journalctl -u nockchain-node -n 100 -f ;;
             "退出脚本") exit 0 ;;
             *) echo "无效选项 $REPLY" ;;
