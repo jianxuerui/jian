@@ -90,29 +90,37 @@ install_dependencies() {
             build-essential clang-15 llvm-15-dev libclang-15-dev cmake libssl-dev pkg-config \
             uuid-dev git cgroup-tools screen htop ntpdate jq python3-venv curl ufw tor
     elif command -v dnf &>/dev/null; then
-        # <<< ROBUSTLY MODIFIED BLOCK HERE / 最终修复部分 >>>
-        # This block now automatically finds the correct name for the developer repository
-        # (e.g., 'powertools', 'crb', 'ol8_codeready_builder') and enables it.
-        ColorYellow "检测到 RHEL/CentOS 系统，正在自动查找并启用开发工具仓库...\n"
-        sudo dnf install -y -q 'dnf-command(config-manager)'
+        # <<< ULTIMATE FIX BLOCK HERE / 最终修复部分 >>>
+        ColorYellow "检测到 RHEL/CentOS 系统，正在处理仓库和依赖...\n"
+        
+        # Step 1: Install EPEL repository, which is essential for many packages
+        if ! rpm -q epel-release &>/dev/null; then
+            ColorYellow "正在安装 EPEL 仓库...\n"
+            sudo dnf install -y epel-release
+        else
+            ColorGreen "EPEL 仓库已安装。\n"
+        fi
 
+        # Step 2: Enable the PowerTools/CRB repository robustly
+        ColorYellow "正在启用 PowerTools/CRB 仓库...\n"
+        sudo dnf install -y -q 'dnf-command(config-manager)'
         local BUILDER_REPO_ID
-        # Search for the repo ID using common keywords, case-insensitively. This is much more reliable.
         BUILDER_REPO_ID=$(sudo dnf repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1)
 
         if [[ -n "$BUILDER_REPO_ID" ]]; then
             ColorGreen "成功找到开发工具仓库: '$BUILDER_REPO_ID'. 正在启用...\n"
             sudo dnf config-manager --set-enabled "$BUILDER_REPO_ID"
         else
-            ColorRed "致命错误: 无法自动找到所需的开发工具仓库 (如 Powertools, CRB, CodeReady Builder)。\n"
-            ColorRed "请手动运行 'sudo dnf repolist all' 找到它，然后使用 'sudo dnf config-manager --set-enabled <仓库ID>' 来启用它，最后重新运行本脚本。\n"
+            ColorRed "致命错误: 无法自动找到所需的开发工具仓库 (如 Powertools, CRB)。请先手动修复系统仓库配置。\n"
             exit 1
         fi
-        # <<< END OF MODIFIED BLOCK >>>
-        
+
+        # Step 3: Install dependencies with corrected package names for CentOS 8
+        ColorYellow "正在安装核心软件包...\n"
         sudo dnf install -y \
-            gcc-toolset-12 clang llvm-devel libasan libclang-devel cmake openssl-devel pkgconfig \
-            libuuid-devel git libcgroup-tools screen htop ntpdate jq python3-venv curl firewalld tor
+            gcc-toolset-11 clang llvm-devel libasan clang-devel cmake openssl-devel pkgconfig \
+            libuuid-devel git libcgroup-tools screen htop chrony jq python3-devel curl firewalld tor
+        # <<< END OF MODIFIED BLOCK >>>
     else
         ColorRed "不支持的包管理器。无法安装依赖。\n"; exit 1
     fi
@@ -133,6 +141,11 @@ build_hoonc() {
 build_nockchain_suite() {
     local node_type=$1
     ColorBlue ">> [4/8] 正在构建 Nockchain 套件 (类型: $node_type)...\n"
+    # Enable gcc-toolset-11 for this build session if on a dnf system
+    if command -v dnf &>/dev/null && [ -f /opt/rh/gcc-toolset-11/enable ]; then
+      ColorYellow "正在启用 gcc-toolset-11 以进行编译...\n"
+      source /opt/rh/gcc-toolset-11/enable
+    fi
     git clone https://github.com/zorp-corp/nockchain "${CONFIG[SOURCE_DIR]}"
     pushd "${CONFIG[SOURCE_DIR]}" >/dev/null
       local build_features="zkpow,metrics"
@@ -179,7 +192,7 @@ Wants=network-online.target
 User=${CONFIG[USER]}
 Group=${CONFIG[USER]}
 Type=simple
-ExecStart=/usr/local/bin/nockchain $exec_start_args
+ExecStart=/bin/bash -c 'if [ -f /opt/rh/gcc-toolset-11/enable ]; then source /opt/rh/gcc-toolset-11/enable; fi; /usr/local/bin/nockchain $exec_start_args'
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=1048576
