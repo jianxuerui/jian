@@ -1,7 +1,7 @@
 #!/bin/bash
-# Nockchain Ecosystem Builder v2.2
+# Nockchain Ecosystem Builder v2.3
 # 集成内核代码构建、节点部署、动态资源调度和生态监控功能
-set -euo pipefail
+set -xeuo pipefail
 exec > >(tee /var/log/nockchain-builder.log) 2>&1
 
 # 初始化环境配置
@@ -27,6 +27,22 @@ handle_error() {
     exit $exit_code
 }
 
+# 确保 lsb_release 可用
+ensure_lsb_release() {
+    if ! command -v lsb_release &>/dev/null; then
+        echo ">> 安装 lsb_release…" >&2
+        if command -v apt-get &>/dev/null; then
+            apt-get update
+            apt-get install -y lsb-release
+        elif command -v yum &>/dev/null; then
+            yum install -y redhat-lsb-core
+        else
+            echo "无支持的包管理器，无法安装 lsb_release" >&2
+            exit 1
+        fi
+    fi
+}
+
 # 动态资源调速器配置
 declare -A RESOURCE_PROFILES=(
     ["beast"]="100 0 0"
@@ -36,14 +52,17 @@ declare -A RESOURCE_PROFILES=(
 
 # 系统兼容性检查（支持 Ubuntu, Debian, CentOS/RHEL, Fedora）
 check_compatibility() {
-    local distro=$(lsb_release -si)
-    local version=$(lsb_release -sr)
+    echo ">> Running compatibility check…" >&2
+    local distro version
+    distro=$(lsb_release -si) || return 1
+    version=$(lsb_release -sr)
     case $distro in
-        Ubuntu) [[ $version =~ "18.04|20.04|22.04" ]] || return 1 ;;
-        Debian) [[ ${version%%.*} -ge 9 ]] || return 1 ;;
-        CentOS|RedHatEnterpriseServer|Fedora) [[ ${version%%.*} -ge 7 ]] || return 1 ;;
+        Ubuntu) [[ $version =~ ^(18\.04|20\.04|22\.04)$ ]] || { echo "不支持的Ubuntu版本：$version"; return 1; } ;;
+        Debian) [[ ${version%%.*} -ge 9 ]] || { echo "Debian版本需>=9，当前：$version"; return 1; } ;;
+        CentOS|RedHatEnterpriseServer|Fedora) [[ ${version%%.*} -ge 7 ]] || { echo "RedHat系版本需>=7，当前：$version"; return 1; } ;;
         *) echo "Unsupported distro: $distro"; return 1 ;;
     esac
+    echo "OK: distro=$distro version=$version" >&2
 
     if lspci | grep -qi 'NVIDIA'; then
         echo "Detected NVIDIA GPU"
@@ -60,13 +79,24 @@ check_compatibility() {
         || { echo "SSE4.2指令集缺失"; return 1; }
 }
 
-# 核心依赖安装
+# 跨发行版依赖安装
 install_dependencies() {
-    apt-get update
-    apt-get install -y --no-install-recommends \
-        build-essential clang-15 llvm-15-dev libclang-15-dev \
-        cmake libssl-dev pkg-config uuid-dev cgroup-tools \
-        screen htop ntpdate jq python3-venv curl
+    if command -v apt-get &>/dev/null; then
+        apt-get update
+        apt-get install -y --no-install-recommends \
+            build-essential clang-15 llvm-15-dev libclang-15-dev \
+            cmake libssl-dev pkg-config uuid-dev cgroup-tools \
+            screen htop ntpdate jq python3-venv curl lsb-release
+    elif command -v yum &>/dev/null; then
+        yum install -y epel-release
+        yum install -y \
+            gcc gcc-c++ make clang llvm15 llvm15-devel libclang15-devel \
+            cmake openssl-devel pkgconfig libuuid-devel \
+            libcgroup-tools screen htop ntpdate jq python3-venv curl redhat-lsb-core
+    else
+        echo "Error: 无支持的包管理器" >&2
+        exit 1
+    fi
 }
 
 # Hoon 编译器构建
@@ -84,7 +114,7 @@ resource_scheduler() {
     local mode=${1:-balanced}
     IFS=' ' read -r cpu_pct mem_high mem_max <<< "${RESOURCE_PROFILES[$mode]}"
     cgcreate -g cpu,memory:/nockchain
-    cgset -r cpu.max=$((cpu_pct * 10000)) nockchain
+    cgset -r cpu.max=$((cpu_pct * 10000)) nockchain      # cgroup v1 单位为 microseconds
     cgset -r memory.high="${mem_high}%" nockchain
     cgset -r memory.max="${mem_max}%" nockchain
 
@@ -118,6 +148,7 @@ EOF
 
 # 自动化部署流程
 deploy_ecosystem() {
+    ensure_lsb_release
     check_compatibility || handle_error 1 $LINENO
 
     # 阶段1：依赖安装与 Hoon 构建
@@ -133,6 +164,7 @@ deploy_ecosystem() {
     # 阶段3：节点编译
     git clone https://github.com/zorp-corp/nockchain /opt/nockchain
     pushd /opt/nockchain >/dev/null
+      cargo clean
       cargo build --release --features "zkpow"
       cp target/release/nockchain /usr/local/bin/
     popd >/dev/null
@@ -188,7 +220,7 @@ view_logs() {
 # 交互式菜单
 menu() {
     echo -e "
-$(ColorBlue 'Nockchain Ecosystem Builder v2.2 菜单')
+$(ColorBlue 'Nockchain Ecosystem Builder v2.3 菜单')
 $(ColorGreen '1)') 安装并构建
 $(ColorGreen '2)') 添加挖矿公钥
 $(ColorGreen '3)') 启动节点
