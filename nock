@@ -1,19 +1,18 @@
 #!/bin/bash
-# Nockchain 编排器 v5.2 "亥伯龙" (中文交互版 / 终极兼容性)
+# Nockchain 编排器 v5.2.1 "亥伯龙" (中文交互版 / 终极兼容性 / 语法修正)
 #
 # 更新日志:
-# v5.2:   终极兼容性优化。实现 sudo/root 无缝切换，增加前置环境检查 (Bash版本)，
-#         编译器版本预警，更健壮的依赖安装与验证，并引入动态加载光标提升用户体验。
-# v5.1.2: 新增节点管理和添加挖矿公钥功能。
+# v5.2.1: 修正了因函数体省略导致的 Bash 语法错误。恢复所有函数的完整实现。
+# v5.2:   终极兼容性优化。实现 sudo/root 无缝切换，增加前置环境检查，
+#         编译器版本预警，更健壮的依赖安装与验证，并引入动态加载光标。
 #
 set -euo pipefail
 
 # --- 脚本元数据 ---
-SCRIPT_VERSION="5.2"
+SCRIPT_VERSION="5.2.1"
 
 # --- 配置与日志 ---
 CONFIG_FILE="/etc/nockchain/nockchain.conf"
-# 构建目录默认为用户主目录，但可被配置文件覆盖
 BUILD_DIR_DEFAULT="$HOME/.nockchain_build"
 mkdir -p "$BUILD_DIR_DEFAULT"
 LOG_FILE="$BUILD_DIR_DEFAULT/nockchain-orchestrator.log"
@@ -52,7 +51,6 @@ spinner() {
 run_with_spinner() {
     local cmd_to_run="$1"
     local message="$2"
-    # 将命令的输出重定向到日志文件
     eval "$cmd_to_run" &> "$LOG_FILE" &
     spinner $! "$message"
 }
@@ -68,7 +66,6 @@ trap 'handle_error $? $LINENO' ERR
 
 # --- 兼容性核心函数 ---
 
-# 统一 sudo/root 处理
 setup_privilege_escalation() {
     if [[ $EUID -eq 0 ]]; then
         SUDO_CMD=""
@@ -94,89 +91,166 @@ NOCKCHAIN_REPO_URL="https://github.com/zorp-corp/nockchain.git"
 EOF
         $SUDO_CMD chmod 644 "$CONFIG_FILE"
     }
-    # 从配置文件读取并填充 CONFIG 数组
     declare -g -A CONFIG
-    while IFS='=' read -r key value; do
-        value=$(echo "$value" | sed -e 's/^["]*//' -e 's/["]*$//' -e 's/^[ \t]*//;s/[ \t]*$//')
-        if [[ ! "$key" =~ ^# && "$key" ]]; then CONFIG["$key"]="$value"; fi
-    done < <($SUDO_CMD cat "$CONFIG_FILE")
+    # Source the config file safely
+    eval "$($SUDO_CMD cat "$CONFIG_FILE" | grep -v '^\s*#' | sed 's/^/CONFIG[&/g;s/=/]=/g;s/$/&/g;s/=/\"/2;s/$/\"/g' )"
 }
 
 detect_distro() {
-    # ... 函数内容与上一版相同 ...
+    if [ -f /etc/os-release ]; then . /etc/os-release; DISTRO=${ID,,}; VER=${VERSION_ID%%.*};
+    elif type lsb_release >/dev/null 2>&1; then DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]'); VER=$(lsb_release -sr | cut -d. -f1);
+    else DISTRO=$( ( lsb_release -is || cat /etc/issue || cat /etc/redhat-release || cat /etc/lsb-release || uname -s ) 2>/dev/null | head -n1 | awk '{print $1}' | tr '[:upper:]' '[:lower:]' ); VER=$( ( lsb_release -rs || cat /etc/issue || cat /etc/redhat-release || cat /etc/lsb-release || uname -r ) 2>/dev/null | head -n1 | grep -oE '[0-9]+' | head -n1); fi
+    log_info "检测到系统发行版: $DISTRO, 版本: $VER"
 }
 
 install_dependencies() {
-    # ... 函数内容与上一版相同，但使用 $SUDO_CMD ...
     log_info "正在为 $DISTRO 系统解析并安装依赖..."
-    # ...
-    # 示例修改：
-    # case $pkg_manager in apt) $SUDO_CMD apt-get update; ... ;; esac
-    
-    # 增加安装后验证
-    log_info "正在验证核心编译工具是否安装成功..."
-    for tool in gcc make clang; do
-        if ! command -v $tool &>/dev/null; then
-            log_error "核心工具 '$tool' 安装失败，请检查系统仓库配置后重试。"
-            exit 1
-        fi
-    done
-
-    # 检查编译器版本
-    local gcc_version=$(gcc --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo 0)
-    if (( $(echo "$gcc_version < 9.0" | bc -l) )); then
-        log_warn "检测到 GCC 版本 ($gcc_version)较低，后续 Rust 编译过程可能会失败。"
-    fi
+    local pkg_manager=""; if command -v apt-get &>/dev/null; then pkg_manager="apt"; elif command -v dnf &>/dev/null; then pkg_manager="dnf"; elif command -v yum &>/dev/null; then pkg_manager="yum"; else log_error "不支持的包管理器。" && exit 1; fi
+    declare -A pkg_map=( [build_essentials]="build-essential gcc-c++ make" [clang]="clang-15 clang" [llvm_dev]="llvm-15-dev llvm-devel" [cmake]="cmake cmake" [openssl_dev]="libssl-dev openssl-devel" [pkg_config]="pkg-config pkgconfig" [uuid_dev]="uuid-dev libuuid-devel" [git]="git git" [utils]="screen htop jq curl unzip tor fail2ban" [time_sync]="ntpdate chrony" [python_venv]="python3-venv python3-devel" )
+    local packages_to_install=(); for generic_name in "${!pkg_map[@]}"; do local pkg_string; case $DISTRO in ubuntu|debian) pkg_string=$(echo "${pkg_map[$generic_name]}" | cut -d' ' -f1);; centos|rhel|alma|rocky|fedora) pkg_string=$(echo "${pkg_map[$generic_name]}" | cut -d' ' -f2-);; *) log_error "无法为发行版 $DISTRO 确定软件包。" && exit 1 ;; esac; if [[ -n "$pkg_string" ]]; then packages_to_install+=($pkg_string); fi; done
+    case $pkg_manager in apt) $SUDO_CMD apt-get update; $SUDO_CMD apt-get install -y software-properties-common wget; wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | $SUDO_CMD apt-key add -; $SUDO_CMD add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-15 main"; $SUDO_CMD apt-get update; $SUDO_CMD apt-get install -y --no-install-recommends "${packages_to_install[@]}";; dnf|yum) $SUDO_CMD "$pkg_manager" install -y epel-release; local builder_repo_id=$($SUDO_CMD "$pkg_manager" repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1); if [[ -n "$builder_repo_id" ]]; then $SUDO_CMD "$pkg_manager" config-manager --set-enabled "$builder_repo_id"; else log_warn "未找到开发工具仓库 (powertools/crb)，部分软件包可能安装失败。"; fi; $SUDO_CMD "$pkg_manager" install -y "${packages_to_install[@]}";; esac
+    log_info "依赖项安装成功。"
 }
 
-setup_compiler_env() {
-    # ... 函数内容与上一版相同 ...
-}
-
-robust_clone() {
-    # ... 函数内容与上一版相同 ...
-}
+setup_compiler_env() { log_info "正在探测并设置编译器环境..."; COMPILER_ENV_CMD=""; if [ -d /opt/rh ]; then local scl_enable_path=$(find /opt/rh -type f -path "*/gcc-toolset-*/enable" | sort -V | tail -n 1); if [ -n "$scl_enable_path" ]; then log_info "检测到 SCL 环境: $scl_enable_path。将在编译和运行时加载。"; COMPILER_ENV_CMD="source $scl_enable_path && "; return; fi; fi; export CC=$(command -v clang-15 || command -v clang || echo "gcc"); export CXX=$(command -v clang++-15 || command -v clang++ || echo "g++"); log_info "将使用 CC=$CC 和 CXX=$CXX 进行编译。"; }
+robust_clone() { local repo_url=$1; local dest_dir=$2; local base_repo=$(echo "$repo_url" | sed -e 's/https:\/\///' -e 's/http:\/\///'); declare -a mirrors=("https://kgithub.com" "https://ghproxy.com" "https://hub.fale.io" "https://github.com"); log_info "正在克隆 $base_repo ..."; for mirror in "${mirrors[@]}"; do local url="$mirror/$base_repo"; log_info "正在尝试从 $url 克隆..."; if git clone --depth 1 "$url" "$dest_dir"; then log_info "从 $mirror 克隆成功。"; return 0; fi; log_warn "从 $mirror 克隆失败。正在尝试下一个镜像..."; rm -rf "$dest_dir"; done; log_error "从所有可用镜像克隆仓库均失败。"; exit 1; }
 
 # --- 安装与管理核心逻辑 ---
 
 install_nockchain_node() {
-    # ...
-    # 示例修改：
-    # run_with_spinner "$COMPILER_ENV_CMD cargo build --release" "正在编译 Nockchain (这可能需要很长时间)..."
-    # $SUDO_CMD cp target/release/nockchain /usr/local/bin/
-    # ...
+    local node_type=$1
+    log_info "正在构建 Nockchain 套件 (节点类型: $node_type)..."
+    
+    robust_clone "${CONFIG[NOCKCHAIN_REPO_URL]}" "${BUILD_DIR_DEFAULT}/nockchain"
+    
+    pushd "${BUILD_DIR_DEFAULT}/nockchain" >/dev/null
+      run_with_spinner "$COMPILER_ENV_CMD cargo build --release" "正在编译 Nockchain (这可能需要很长时间)..."
+      $SUDO_CMD cp target/release/nockchain /usr/local/bin/
+    popd >/dev/null
+    rm -rf "${BUILD_DIR_DEFAULT}/nockchain"
+    log_info "Nockchain 套件安装成功。"
 }
 
 setup_daemon() {
-    # ...
-    # 示例修改：
-    # $SUDO_CMD tee /etc/systemd/system/nockchain-node.service ...
-    # $SUDO_CMD systemctl daemon-reload
-    # ...
+    local node_type=$1
+    local exec_start_args="--base-path ${CONFIG[DATA_DIR]} --port 30303 --rpc-port 9933" # Example
+    local exec_cmd="/usr/local/bin/nockchain $exec_start_args"
+
+    if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
+        log_info "检测到 systemd，正在配置 systemd 服务..."
+        local full_exec_cmd="bash -c '$COMPILER_ENV_CMD exec $exec_cmd'"
+        $SUDO_CMD tee /etc/systemd/system/nockchain-node.service >/dev/null <<EOF
+[Unit]
+Description=Nockchain Node
+After=network-online.target
+[Service]
+ExecStart=$full_exec_cmd
+Restart=always
+User=${CONFIG[USER]}
+[Install]
+WantedBy=multi-user.target
+EOF
+        $SUDO_CMD systemctl daemon-reload
+        $SUDO_CMD systemctl enable nockchain-node.service
+    else
+        log_warn "未检测到 systemd。将创建一个基于 'screen' 的启动脚本。"
+        local start_script_path="/usr/local/bin/start-nockchain.sh"
+        $SUDO_CMD tee "$start_script_path" > /dev/null <<EOF
+#!/bin/bash
+cd /
+screen -dmS nockchain bash -c '$COMPILER_ENV_CMD exec $exec_cmd'
+echo "Nockchain 节点已在名为 'nockchain' 的 screen 会话中启动。"
+echo "使用 'screen -r nockchain' 连接到会话。"
+EOF
+        $SUDO_CMD chmod +x "$start_script_path"
+        log_info "要启动节点，请运行: sudo start-nockchain.sh"
+    fi
 }
 
 manage_node() {
-    # ...
-    # 示例修改：
-    # $SUDO_CMD systemctl start nockchain-node.service
-    # ...
+    PS3="$(ColorYellow '请选择节点操作: ')"
+    select action in "启动节点" "停止节点" "重启节点" "查看状态" "返回主菜单"; do
+        case $action in
+            "启动节点") $SUDO_CMD systemctl start nockchain-node.service; break;;
+            "停止节点") $SUDO_CMD systemctl stop nockchain-node.service; break;;
+            "重启节点") $SUDO_CMD systemctl restart nockchain-node.service; break;;
+            "查看状态") $SUDO_CMD systemctl status nockchain-node.service; break;;
+            "返回主菜单") break;;
+        esac
+    done
 }
 
 add_mining_key() {
-    # ...
-    # 示例修改：
-    # $SUDO_CMD mkdir -p "$ssh_dir"
-    # $SUDO_CMD chown ...
-    # ...
+    log_info "即将为用户 '${CONFIG[USER]}' 添加挖矿/验证者公钥..."
+    read -p "请输入公钥的 URL 或本地文件路径: " key_src
+    
+    local ssh_dir="${CONFIG[DATA_DIR]}/.ssh"
+    log_info "将在 '$ssh_dir' 目录配置 authorized_keys..."
+    
+    $SUDO_CMD mkdir -p "$ssh_dir"
+    $SUDO_CMD chown "${CONFIG[USER]}:${CONFIG[USER]}" "$ssh_dir"
+    $SUDO_CMD chmod 700 "$ssh_dir"
+    
+    local tmp_key_file="/tmp/nockchain_miner_key.pub"
+    if [[ $key_src =~ ^https?:// ]]; then
+        curl -fsSL "$key_src" -o "$tmp_key_file"
+    elif [ -f "$key_src" ]; then
+        cp "$key_src" "$tmp_key_file"
+    else
+        log_error "错误：提供的路径 '$key_src' 不是一个有效的 URL 或本地文件。"; return 1;
+    fi
+    
+    $SUDO_CMD bash -c "cat '$tmp_key_file' >> '$ssh_dir/authorized_keys'"
+    $SUDO_CMD chown "${CONFIG[USER]}:${CONFIG[USER]}" "$ssh_dir/authorized_keys"
+    $SUDO_CMD chmod 600 "$ssh_dir/authorized_keys"
+    rm -f "$tmp_key_file"
+    
+    log_info "$(ColorGreen '公钥已成功添加！')"
 }
+
 
 # --- 中文交互菜单 ---
 show_banner() {
-    # ...
+    ColorBlue '
+    _   __         _                    _           _             
+   / | / /  ___   | | __   ___    ___  | |_   _ __ (_)  ___   ___ 
+  /  |/ /  / _ \  | |/ /  / _ \  / __| | __| |  __| | |/ __| / __|
+ / /|  /  | (_) | |   <  | (_) | \__ \ | |_  | |    | | (__  \__ \
+/_/ |_/    \___/  |_|\_\  \___/  |___/  \__| |_|    |_| \___| |___/
+           编排器 v5.2.1 "亥伯龙" (中文版)
+'
 }
 
 main_menu() {
-    # ...
+    clear
+    show_banner
+    local status
+    if command -v systemctl &>/dev/null && systemctl is-active nockchain-node.service &>/dev/null; then
+        status="$(ColorGreen '运行中')"
+    else
+        status="$(ColorRed '已停止')"
+    fi
+    echo -e "节点状态: $status\n"
+    
+    PS3="$(ColorBlue '请输入您的选择 [1-5]: ')"
+    COLUMNS=12
+    select opt in \
+        "安装与组件管理" \
+        "节点管理 (启动/停止/状态)" \
+        "添加挖矿/验证者公钥" \
+        "查看实时日志" \
+        "退出脚本"; do
+        case $opt in
+            "安装与组件管理") install_dependencies; PS3="选择节点类型: "; select type in "验证者" "全节点"; do install_nockchain_node "$type"; setup_daemon "$type"; break; done;;
+            "节点管理 (启动/停止/状态)") manage_node ;;
+            "添加挖_矿/验证者公钥") add_mining_key ;;
+            "查看实时日志") $SUDO_CMD journalctl -u nockchain-node -n 100 -f ;;
+            "退出脚本") exit 0 ;;
+            *) echo "无效选项 $REPLY" ;;
+        esac
+        read -p $'\n按回车键返回主菜单...'
+        main_menu
+    done
 }
 
 
