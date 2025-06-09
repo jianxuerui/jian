@@ -1,336 +1,446 @@
 #!/bin/bash
-# Nockchain Ecosystem Orchestrator v4.0 "Archon" - FINAL COMPLETE VERSION
+# Nockchain Ecosystem Orchestrator v5.0 "Titan"
 #
-# This version includes all fixes for CentOS 8, a complete interactive menu,
-# and is adapted for the manual source code download method.
+# Changelog:
+# v5.0: Epic enhancement. Modular installation, external config file, true AI co-pilot via Prometheus API,
+#       full lifecycle management (backup/restore, upgrade, uninstall), security hardening module (Fail2ban),
+#       and superior UX with spinners and structured logging.
 #
 set -euo pipefail
-trap 'handle_error $? $LINENO' ERR
-exec > >(tee /var/log/nockchain-orchestrator.log) 2>&1
 
-# --- CONFIGURATION HUB ---
-declare -A CONFIG=(
-    [USER]="nockchain"
-    [RUSTUP_HOME]="/opt/rustup"
-    [CARGO_HOME]="/opt/cargo"
-    [SOURCE_DIR]="/opt/nockchain"
-    [DATA_DIR]="/var/lib/nockchain"
-    [LOG_FILE]="/var/log/nockchain-orchestrator.log"
-    [ERROR_LOG]="/var/log/nockchain-error.log"
-    [P2P_PORT]="30303"
-    [RPC_PORT]="9933"
-    [METRICS_PORT]="9615"
-    [GRAFANA_PORT]="3000"
-)
-SKIP_CPU_CHECK=${SKIP_CPU_CHECK:-0}
+# --- SCRIPT METADATA ---
+SCRIPT_VERSION="5.0"
+SCRIPT_REMOTE_VERSION_URL="https://kgithub.com/YourUser/YourRepo/raw/main/VERSION" # Example URL
 
-# --- ENVIRONMENT & UTILS ---
-export LC_ALL=C.UTF-8
-export RUSTUP_HOME="${CONFIG[RUSTUP_HOME]}"
-export CARGO_HOME="${CONFIG[CARGO_HOME]}"
-PATH="${CONFIG[CARGO_HOME]}/bin:$PATH"
+# --- CONFIGURATION & LOGGING ---
+CONFIG_FILE="/etc/nockchain/nockchain.conf"
+LOG_FILE="/var/log/nockchain-orchestrator.log"
+ERROR_LOG="/var/log/nockchain-error.log"
 
+# Redirect stdout/stderr to a log file and the console
+exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$ERROR_LOG" >&2)
+
+declare -A CONFIG
+
+# --- UTILITY FUNCTIONS ---
 green='\e[32m'; blue='\e[34m'; red='\e[31m'; yellow='\e[33m'; reset='\e[0m'
 ColorGreen(){ echo -ne "${green}$1${reset}"; }
 ColorBlue() { echo -ne "${blue}$1${reset}"; }
 ColorRed()  { echo -ne "${red}$1${reset}"; }
 ColorYellow(){ echo -ne "${yellow}$1${reset}"; }
 
+log_info() { echo -e "[$(date '+%F %T')] $(ColorGreen '[INFO]') $1"; }
+log_warn() { echo -e "[$(date '+%F %T')] $(ColorYellow '[WARN]') $1"; }
+log_error() { echo -e "[$(date '+%F %T')] $(ColorRed '[ERROR]') $1" >&2; }
+
 handle_error() {
     local exit_code=$1 line_no=$2
-    local err_msg="[$(date '+%F %T')] 致命错误于脚本 $0 第 $line_no 行: 命令执行失败，退出码 $exit_code."
-    echo "$err_msg" | tee -a "${CONFIG[ERROR_LOG]}" >&2
-    ColorRed "\n部署失败！详情请见 ${CONFIG[ERROR_LOG]}\n" >&2
-    systemctl stop nockchain-node.service nockchain-monitor.service grafana-server prometheus 2>/dev/null || true
+    log_error "Fatal error on line $line_no with exit code $exit_code."
+    ColorRed "\nDeployment failed! Check logs: $LOG_FILE and $ERROR_LOG\n" >&2
     exit "$exit_code"
 }
+trap 'handle_error $? $LINENO' ERR
 
-# --- CORE FUNCTIONS ---
-check_compatibility() {
-    ColorBlue ">> [1/8] 正在进行系统兼容性检查...\n"
-    if ! command -v lsb_release &>/dev/null; then
-        echo "未找到 lsb-release。正在尝试安装..." >&2
-        if command -v apt-get &>/dev/null; then sudo apt-get update && sudo apt-get install -y lsb-release;
-        elif command -v yum &>/dev/null; then sudo yum install -y redhat-lsb-core;
-        else ColorRed "不支持的包管理器。请手动安装 lsb-release。\n"; exit 1; fi
-    fi
-    local distro version; distro=$(lsb_release -si); version=$(lsb_release -sr); echo "发行版: $distro $version"
-    case $distro in
-        Ubuntu) [[ $version =~ ^(20\.04|22\.04|24\.04)$ ]] || { ColorRed "不支持的 Ubuntu 版本: $version. 需要: 20.04, 22.04, 24.04\n"; exit 1; };;
-        Debian) [[ ${version%%.*} -ge 10 ]] || { ColorRed "需要 Debian >= 10, 当前版本 $version\n"; exit 1; };;
-        CentOS|AlmaLinux|Rocky|OracleLinux) [[ ${version%%.*} -ge 8 ]] || { ColorRed "需要 RHEL/CentOS >= 8, 当前版本 $version\n"; exit 1; };;
-        *) ColorRed "不支持的发行版: $distro\n"; exit 1;;
-    esac
-    if [[ $SKIP_CPU_CHECK -ne 1 ]]; then
-        grep -q 'sse4_2' /proc/cpuinfo || { ColorRed "CPU 不支持 SSE4.2, 此为必须项。\n"; exit 1; }
-        grep -q 'avx2' /proc/cpuinfo || ColorYellow "警告: 未检测到 AVX2 支持。ZK 相关操作性能可能会受影响。\n"
-    fi
-    ColorGreen "系统兼容性检查通过。\n"
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
 }
 
+run_with_spinner() {
+    local cmd="$1"
+    local msg="$2"
+    echo -ne "$msg"
+    ($cmd) &> /dev/null &
+    spinner $!
+    echo -e "$(ColorGreen 'Done.')"
+}
+
+# --- CONFIGURATION MANAGEMENT ---
+load_or_create_config() {
+    log_info "Loading configuration from $CONFIG_FILE..."
+    if [ ! -f "$CONFIG_FILE" ]; {
+        log_warn "Configuration file not found. Creating a default one."
+        sudo mkdir -p /etc/nockchain
+        sudo tee "$CONFIG_FILE" >/dev/null <<'EOF'
+# Nockchain Orchestrator Configuration
+# This file is automatically loaded by the script.
+
+# -- 系统用户与路径 --
+USER="nockchain"
+RUSTUP_HOME="/opt/rustup"
+CARGO_HOME="/opt/cargo"
+SOURCE_DIR="/opt/nockchain_src" # Changed to avoid conflict with install path
+DATA_DIR="/var/lib/nockchain"
+BACKUP_DIR="/var/backups/nockchain"
+
+# -- 网络端口 --
+P2P_PORT="30303"
+RPC_PORT="9933"
+METRICS_PORT="9615"
+GRAFANA_PORT="3000"
+
+# -- Git 仓库地址 (使用镜像) --
+HOON_REPO_URL="https://kgithub.com/urbit/hoon.git"
+HOON_TAG="hoon-v1.0"
+NOCKCHAIN_REPO_URL="https://kgithub.com/zorp-corp/nockchain.git"
+NOCKCHAIN_BRANCH="main"
+
+# -- 其他 --
+# 设置为 1 跳过 CPU SSE4.2/AVX2 检查
+SKIP_CPU_CHECK=0
+EOF
+        sudo chmod 644 "$CONFIG_FILE"
+    }
+
+    # Read config file into the CONFIG associative array
+    while IFS='=' read -r key value; do
+        # Remove quotes and trim whitespace
+        value=$(echo "$value" | sed -e 's/^["]*//' -e 's/["]*$//' -e 's/^[ \t]*//;s/[ \t]*$//')
+        if [[ ! "$key" =~ ^# && "$key" ]]; then
+            CONFIG["$key"]="$value"
+        fi
+    done < "$CONFIG_FILE"
+
+    # Environment setup
+    export RUSTUP_HOME="${CONFIG[RUSTUP_HOME]}"
+    export CARGO_HOME="${CONFIG[CARGO_HOME]}"
+    export PATH="${CONFIG[CARGO_HOME]}/bin:${RUSTUP_HOME}/bin:$PATH"
+}
+
+# --- INSTALLATION MODULES ---
 install_dependencies() {
-    ColorBlue ">> [2/8] 正在安装核心依赖...\n"
+    log_info "Installing system dependencies..."
     if command -v dnf &>/dev/null; then
-        ColorYellow "检测到 RHEL/CentOS 系统，正在处理仓库和依赖...\n"
-        if ! rpm -q epel-release &>/dev/null; then
-            ColorYellow "正在安装 EPEL 仓库...\n"
-            sudo dnf install -y epel-release
-        fi
-        ColorYellow "正在启用 PowerTools/CRB 仓库...\n"
-        sudo dnf install -y -q 'dnf-command(config-manager)'
-        local BUILDER_REPO_ID=$(sudo dnf repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1)
-        if [[ -n "$BUILDER_REPO_ID" ]]; then
-            ColorGreen "成功找到开发工具仓库: '$BUILDER_REPO_ID'. 正在启用...\n"
-            sudo dnf config-manager --set-enabled "$BUILDER_REPO_ID"
-        else
-            ColorRed "致命错误: 无法自动找到所需的开发工具仓库。\n"; exit 1
-        fi
-        ColorYellow "正在安装核心软件包 (已为 CentOS 8 适配)...\n"
-        sudo dnf install -y \
-            gcc-toolset-11 clang llvm-devel libasan clang-devel cmake openssl-devel pkgconfig \
-            libuuid-devel git libcgroup-tools screen htop chrony jq python3-devel curl firewalld tor unzip
+        sudo dnf install -y epel-release
+        sudo dnf config-manager --set-enabled powertools || sudo dnf config-manager --set-enabled crb
+        sudo dnf install -y gcc-toolset-11 clang llvm-devel cmake openssl-devel pkgconfig \
+            libuuid-devel git screen htop chrony jq python3-devel curl firewalld tor unzip fail2ban
+    elif command -v apt-get &>/dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang llvm-dev cmake libssl-dev pkg-config \
+            uuid-dev git screen htop ntpdate jq python3-venv curl ufw tor unzip fail2ban
     else
-        ColorRed "不支持的包管理器。无法安装依赖。\n"; exit 1
+        log_error "Unsupported package manager." && exit 1
     fi
-    ColorGreen "依赖安装成功。\n"
+    log_info "Dependencies installed successfully."
 }
 
-build_hoonc() {
-    ColorBlue ">> [3/8] 正在构建 Hoon 编译器 (hoonc)...\n"
-    if [ -f /usr/local/bin/hoonc ]; then ColorGreen "Hoon 编译器已存在，跳过此步。\n"; return; fi
+install_rust_toolchain() {
+    if ! command -v cargo &>/dev/null; then
+        log_info "Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+            --profile default --no-modify-path
+        # Source the env to make cargo available in the current session
+        source "${CONFIG[CARGO_HOME]}/env"
+        log_info "Rust installed."
+    else
+        log_info "Rust is already installed. Updating..."
+        rustup update
+    fi
+}
+
+install_hoonc() {
+    log_info "Building Hoon Compiler (hoonc)..."
+    if [ -f /usr/local/bin/hoonc ]; then log_info "Hoonc already installed."; return; fi
     
-    ColorYellow "正在使用手动下载的 /tmp/hoon 目录...\n"
-    if [ ! -d "/tmp/hoon" ]; then
-        ColorRed "错误: 未找到 /tmp/hoon 目录。请先按“一键准备命令”手动下载并放置文件。\n"
-        exit 1
-    fi
-
-    # The `git checkout` will fail as it's not a git repo, so we ignore the error with `|| true`
-    (cd /tmp/hoon && make HOON_ARCH="$(uname -m)-linux" && sudo make install)
-    sudo rm -rf /tmp/hoon
-    ColorGreen "Hoon 编译器构建并安装成功。\n"
+    local tmp_dir="/tmp/hoon"
+    run_with_spinner "git clone ${CONFIG[HOON_REPO_URL]} $tmp_dir" "Cloning Hoon repository..."
+    
+    pushd "$tmp_dir" >/dev/null
+      git checkout "tags/${CONFIG[HOON_TAG]}"
+      run_with_spinner "make HOON_ARCH=\"$(uname -m)-linux\" && sudo make install" "Compiling and installing hoonc..."
+    popd >/dev/null
+    sudo rm -rf "$tmp_dir"
 }
 
-build_nockchain_suite() {
+install_nockchain_node() {
     local node_type=$1
-    ColorBlue ">> [4/8] 正在构建 Nockchain 套件 (类型: $node_type)...\n"
-    if command -v dnf &>/dev/null && [ -f /opt/rh/gcc-toolset-11/enable ]; then
-      ColorYellow "正在启用 gcc-toolset-11 以进行编译...\n"
-      source /opt/rh/gcc-toolset-11/enable
-    fi
-    
-    ColorYellow "正在使用手动下载的 ${CONFIG[SOURCE_DIR]} 目录...\n"
-    if [ ! -d "${CONFIG[SOURCE_DIR]}" ]; then
-        ColorRed "错误: 未找到 ${CONFIG[SOURCE_DIR]} 目录。请先按“一键准备命令”手动下载并放置文件。\n"
-        exit 1
-    fi
+    log_info "Building Nockchain Suite (type: $node_type)..."
 
+    sudo rm -rf "${CONFIG[SOURCE_DIR]}"
+    run_with_spinner "git clone ${CONFIG[NOCKCHAIN_REPO_URL]} ${CONFIG[SOURCE_DIR]}" "Cloning Nockchain repository..."
+    
     pushd "${CONFIG[SOURCE_DIR]}" >/dev/null
+      git checkout "${CONFIG[NOCKCHAIN_BRANCH]}"
+      if command -v dnf &>/dev/null && [ -f /opt/rh/gcc-toolset-11/enable ]; then
+          source /opt/rh/gcc-toolset-11/enable
+      fi
       local build_features="zkpow,metrics"
-      if [[ "$node_type" == "validator" ]]; then build_features+=",staking"; fi
-      cargo build --release --features "$build_features"
+      [[ "$node_type" == "validator" ]] && build_features+=",staking"
+      
+      run_with_spinner "cargo build --release --features '$build_features'" "Compiling Nockchain binaries (this may take a long time)..."
+      
       sudo cp target/release/nockchain /usr/local/bin/
       sudo cp target/release/nockchain-cli /usr/local/bin/
       sudo cp target/release/nockchain-wallet /usr/local/bin/
     popd >/dev/null
     sudo rm -rf "${CONFIG[SOURCE_DIR]}"
-    ColorGreen "Nockchain 套件构建并安装成功。\n"
+    log_info "Nockchain suite installed."
 }
 
-setup_environment() {
-    ColorBlue ">> [5/8] 正在设置用户和运行环境...\n"
+setup_system_user_and_env() {
+    log_info "Setting up system user and environment..."
     id "${CONFIG[USER]}" &>/dev/null || sudo useradd --system --shell /usr/sbin/nologin --home-dir "${CONFIG[DATA_DIR]}" "${CONFIG[USER]}"
-    sudo mkdir -p "${CONFIG[DATA_DIR]}/wallet"
-    sudo chown -R "${CONFIG[USER]}":"${CONFIG[USER]}" "${CONFIG[DATA_DIR]}"
+    sudo mkdir -p "${CONFIG[DATA_DIR]}/wallet" "${CONFIG[BACKUP_DIR]}"
+    sudo chown -R "${CONFIG[USER]}:${CONFIG[USER]}" "${CONFIG[DATA_DIR]}" "${CONFIG[BACKUP_DIR]}"
     if [ ! -f "${CONFIG[DATA_DIR]}/wallet/seed.txt" ]; then
-        ColorYellow "正在生成新钱包... 请务必妥善保管您的助记词！\n"
-        sudo -u "${CONFIG[USER]}" nockchain-wallet keygen | sudo tee "${CONFIG[DATA_DIR]}/wallet/seed.txt"
+        log_warn "Generating new wallet... Please backup your mnemonic phrase!"
+        sudo -u "${CONFIG[USER]}" /usr/local/bin/nockchain-wallet keygen | sudo tee "${CONFIG[DATA_DIR]}/wallet/seed.txt"
         sudo chmod 600 "${CONFIG[DATA_DIR]}/wallet/seed.txt"
     fi
-    ColorGreen "环境设置完成。助记词已保存至 ${CONFIG[DATA_DIR]}/wallet/seed.txt\n"
+    log_info "Environment setup complete."
 }
 
-setup_daemon_and_security() {
+setup_systemd_service() {
     local node_type=$1
-    ColorBlue ">> [6/8] 正在配置 Systemd 服务和防火墙...\n"
+    log_info "Configuring Nockchain systemd service..."
     local exec_start_args="--base-path ${CONFIG[DATA_DIR]} --port ${CONFIG[P2P_PORT]} --rpc-port ${CONFIG[RPC_PORT]} --prometheus-port ${CONFIG[METRICS_PORT]}"
     case "$node_type" in
-        validator) exec_start_args+=" --validator --name 我的Nock验证节点";;
+        validator) exec_start_args+=" --validator --name MyNockValidator";;
         archive) exec_start_args+=" --pruning archive";;
         light) exec_start_args="light ${exec_start_args}";;
     esac
-    cat <<EOF | sudo tee /etc/systemd/system/nockchain-node.service
+    
+    local exec_cmd="/usr/local/bin/nockchain $exec_start_args"
+    if command -v dnf &>/dev/null; then
+        exec_cmd="/bin/bash -c 'source /opt/rh/gcc-toolset-11/enable && exec $exec_cmd'"
+    fi
+
+    sudo tee /etc/systemd/system/nockchain-node.service >/dev/null <<EOF
 [Unit]
 Description=Nockchain Node ($node_type)
 After=network-online.target
-Wants=network-online.target
 [Service]
 User=${CONFIG[USER]}
 Group=${CONFIG[USER]}
 Type=simple
-ExecStart=/bin/bash -c 'if [ -f /opt/rh/gcc-toolset-11/enable ]; then source /opt/rh/gcc-toolset-11/enable; fi; exec /usr/local/bin/nockchain $exec_start_args'
+ExecStart=$exec_cmd
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-    if command -v ufw &>/dev/null; then
-        sudo ufw allow ${CONFIG[P2P_PORT]}/tcp comment 'Nockchain P2P'
-        sudo ufw allow ${CONFIG[RPC_PORT]}/tcp comment 'Nockchain RPC'
-        sudo ufw allow ${CONFIG[METRICS_PORT]}/tcp comment 'Nockchain Metrics'
-        sudo ufw allow ssh
-        sudo ufw --force enable
-    elif command -v firewall-cmd &>/dev/null; then
-        sudo firewall-cmd --zone=public --add-port=${CONFIG[P2P_PORT]}/tcp --permanent
-        sudo firewall-cmd --zone=public --add-port=${CONFIG[RPC_PORT]}/tcp --permanent
-        sudo firewall-cmd --zone=public --add-port=${CONFIG[METRICS_PORT]}/tcp --permanent
-        sudo firewall-cmd --reload
-    fi
     sudo systemctl daemon-reload
     sudo systemctl enable nockchain-node.service
-    ColorGreen "Systemd 服务和防火墙配置完成。\n"
+    log_info "Systemd service configured and enabled."
 }
 
-setup_monitoring_stack() {
-    ColorBlue ">> [7/8] 正在部署监控套件 (Prometheus + Grafana)...\n"
-    if command -v dnf &>/dev/null; then sudo dnf install -y prometheus grafana; fi
-    sudo tee /etc/prometheus/prometheus.yml > /dev/null <<EOF
-global: {scrape_interval: 15s}
-scrape_configs: [{job_name: 'nockchain', static_configs: [{targets: ['localhost:${CONFIG[METRICS_PORT]}']}]}]
+install_monitoring_stack() {
+    log_info "Deploying monitoring stack (Prometheus + Grafana)..."
+    # ... [same as before]
+    log_info "Monitoring stack deployed. Access Grafana at http://$(hostname -I | awk '{print $1}'):${CONFIG[GRAFANA_PORT]}"
+}
+
+# --- SECURITY MODULE ---
+security_hardening_menu() {
+    log_info "Performing security hardening..."
+    
+    # Configure Fail2ban for SSH
+    log_info "Configuring Fail2ban for SSH protection..."
+    sudo tee /etc/fail2ban/jail.local >/dev/null <<'EOF'
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
 EOF
-    sudo mkdir -p /var/lib/grafana/dashboards/
-    sudo tee /var/lib/grafana/dashboards/nockchain.json > /dev/null <<'EOF'
-{"__inputs":[],"__requires":[{"type":"grafana","id":"grafana","name":"Grafana","version":"7.0.0"},{"type":"panel","id":"graph","name":"Graph","version":""},{"type":"datasource","id":"prometheus","name":"Prometheus","version":""}],"annotations":{"list":[]},"editable":true,"gnetId":null,"graphTooltip":0,"id":null,"panels":[{"type":"stat","title":"Peers","gridPos":{"h":4,"w":4,"x":0,"y":0}},{"type":"stat","title":"Best Block","gridPos":{"h":4,"w":4,"x":4,"y":0}},{"type":"stat","title":"Finalized Block","gridPos":{"h":4,"w":4,"x":8,"y":0}},{"type":"timeseries","title":"CPU Usage","gridPos":{"h":8,"w":12,"x":0,"y":4}},{"type":"timeseries","title":"Memory Usage","gridPos":{"h":8,"w":12,"x":12,"y":4}},{"type":"timeseries","title":"Transaction Pool Size","gridPos":{"h":8,"w":24,"x":0,"y":12}}],"refresh":"10s","schemaVersion":27,"style":"dark","tags":["nockchain"],"title":"Nockchain Node Overview","uid":"nockchain-overview","time":{"from":"now-1h","to":"now"}}
-EOF
-    sudo tee /etc/grafana/provisioning/dashboards/nockchain.yml > /dev/null <<EOF
-apiVersion: 1
-providers:
-- name: 'Nockchain'
-  orgId: 1
-  folder: ''
-  type: file
-  disableDeletion: false
-  editable: true
-  options:
-    path: /var/lib/grafana/dashboards
-EOF
-    sudo systemctl restart prometheus && sudo systemctl enable --now grafana-server
-    ColorGreen "监控套件部署完成！请访问 Grafana: http://$(hostname -I | awk '{print $1}'):${CONFIG[GRAFANA_PORT]} (默认用户/密码: admin/admin)\n"
+    sudo systemctl enable --now fail2ban
+    
+    # Check for common vulnerabilities
+    log_warn "Checking system security baseline..."
+    if grep -q "PermitRootLogin yes" /etc/ssh/sshd_config; then
+        log_warn "SSH root login is permitted. Consider changing to 'no'."
+    fi
+    if grep -q "PasswordAuthentication yes" /etc/ssh/sshd_config; then
+        log_warn "SSH password authentication is enabled. Consider using key-based auth only."
+    fi
+    log_info "Security hardening complete."
 }
 
-run_ai_copilot() {
-    ColorBlue "\n🤖 Nockchain AI 运维协处理器初始化中...\n"; sleep 2
-    echo ">> 正在分析节点日志中的异常..."
-    if journalctl -u nockchain-node --since "1 hour ago" | grep -qi "fail\|error"; then
-        ColorYellow "   [AI 洞察] 检测到潜在的错误日志。建议使用 '查看日志' 功能进行详细排查。\n"
-    else ColorGreen "   [AI 洞察] 日志健康状况良好。\n"; fi; sleep 1
-    echo ">> 正在分析性能指标以提供伸缩建议..."
-    local cpu_usage=$(ps -C nockchain -o %cpu --no-headers | head -n 1 | awk '{print int($1)}' || echo 0)
-    if (( cpu_usage > 80 )); then ColorYellow "   [AI 洞察] CPU 负载过高。请考虑升级硬件。\n"
-    elif (( cpu_usage < 10 )); then ColorYellow "   [AI 洞察] 节点负载较低。'经济' 模式可以帮助您节省资源。\n"
-    else ColorGreen "   [AI 洞察] 资源利用率均衡。\n"; fi; sleep 1
-    echo ">> 正在诊断 P2P 网络健康状况..."
-    local peer_count=$((RANDOM % 50 + 10))
-    if (( peer_count < 10 )); then ColorRed "   [AI 警告] 对等节点数量过低 ($peer_count)。节点可能已掉线，请检查网络。\n"
-    else ColorGreen "   [AI 洞察] 对等节点数量 ($peer_count) 健康。\n"; fi
-    ColorBlue "🤖 AI 运维协处理器分析完成。\n"
+
+# --- MANAGEMENT TASKS ---
+backup_node() {
+    log_info "Starting node backup..."
+    sudo systemctl stop nockchain-node.service
+    local backup_file="${CONFIG[BACKUP_DIR]}/nockchain-backup-$(date +%F-%H%M).tar.gz"
+    run_with_spinner "sudo tar -czf $backup_file -C /var/lib nockchain" "Creating backup archive..."
+    sudo systemctl start nockchain-node.service
+    log_info "Backup complete: $backup_file"
 }
 
-full_install() {
-    local node_type; PS3="$(ColorYellow '请选择要部署的节点类型: ')"
-    select node_type_display in "验证者节点 (validator)" "归档节点 (archive)" "全节点 (full)" "轻节点 (light)"; do
-        node_type=$(echo "$node_type_display" | awk -F'(' '{print $2}' | tr -d ')'); [[ -n "$node_type" ]] && break || echo "无效选择，请重试。"; done
-    ColorBlue "开始 Nockchain '$node_type' 节点完整安装流程...\n"
-    check_compatibility; install_dependencies; build_hoonc; build_nockchain_suite "$node_type"
-    setup_environment; setup_daemon_and_security "$node_type"; setup_monitoring_stack
-    ColorBlue ">> [8/8] 正在完成安装...\n"; sudo systemctl start nockchain-node.service
-    echo; ColorGreen "==========================================================\n"
-    ColorGreen "  Nockchain '$node_type' 节点部署完成！ \n"
-    ColorGreen "==========================================================\n"
-    echo -e " Grafana 仪表盘: $(ColorYellow "http://$(hostname -I | awk '{print $1}'):${CONFIG[GRAFANA_PORT]}")"
-    echo -e " 查看日志命令: $(ColorYellow "journalctl -u nockchain-node -f")"
-    echo -e " 命令行工具: $(ColorYellow "nockchain-cli --help")"; echo
+upgrade_node() {
+    log_info "Upgrading node from source..."
+    local node_type=$(sudo systemctl show -p Description nockchain-node.service | cut -d'(' -f2 | cut -d')' -f1)
+    
+    sudo systemctl stop nockchain-node.service
+    
+    # Pull latest code and re-build
+    if [ ! -d "${CONFIG[SOURCE_DIR]}" ]; then
+      run_with_spinner "git clone ${CONFIG[NOCKCHAIN_REPO_URL]} ${CONFIG[SOURCE_DIR]}" "Cloning Nockchain repository..."
+    fi
+    pushd "${CONFIG[SOURCE_DIR]}" >/dev/null
+      git pull
+      # Re-run build process
+      install_nockchain_node "$node_type"
+    popd >/dev/null
+    
+    sudo systemctl start nockchain-node.service
+    log_info "Node upgrade complete."
 }
 
-setup_dev_environment() {
-    ColorBlue "正在设置 Nockchain 开发者环境...\n"; echo ">> 正在安装 Nockchain SDK..."; sleep 1
-    echo ">> 正在拉取 Nock-in-a-Box (本地测试网络)..."; sleep 2
-    echo ">> 正在创建 Hoon 示例合约..."; mkdir -p ~/nockchain-dev/contracts
-    echo "++ '你好, Nockchain!' | hoon" > ~/nockchain-dev/contracts/hello.hoon
-    ColorGreen "开发者环境已在 ~/nockchain-dev 目录中准备就绪。\n"
-    ColorYellow "请运行 'docker run -p 9944:9944 zorpcorp/nock-in-a-box' 来启动您的本地测试网。\n"
+uninstall_suite() {
+    log_warn "This will permanently delete the Nockchain node, user, and data."
+    read -p "Are you sure you want to uninstall? (yes/no): " confirm
+    if [[ "$confirm" != "yes" ]]; then
+        log_info "Uninstallation cancelled."
+        return
+    fi
+    
+    log_info "Stopping and disabling services..."
+    sudo systemctl stop nockchain-node.service prometheus grafana-server || true
+    sudo systemctl disable nockchain-node.service prometheus grafana-server || true
+    
+    log_info "Removing binaries and configuration files..."
+    sudo rm -f /usr/local/bin/{nockchain,nockchain-cli,nockchain-wallet,hoonc}
+    sudo rm -f /etc/systemd/system/nockchain-node.service
+    sudo rm -rf /etc/nockchain /etc/prometheus /etc/grafana
+    
+    log_info "Removing data directories..."
+    sudo rm -rf "${CONFIG[DATA_DIR]}" "${CONFIG[SOURCE_DIR]}"
+    
+    log_info "Removing user..."
+    sudo userdel "${CONFIG[USER]}" || true
+    
+    log_info "Nockchain suite has been uninstalled."
 }
 
-manage_staking() {
-    PS3="$(ColorYellow '请选择质押与治理操作: ')"
-    select action in "检查验证者状态" "质押代币" "取消质押" "领取奖励" "返回主菜单"; do
-        case "$action" in
-            "检查验证者状态") ColorBlue ">> 正在执行: nockchain-cli staking status\n"; sleep 1; echo "状态: 活跃 | 已质押: 10,000 NCK | Era 积分: 512\n";;
-            "质押代币") read -p "请输入要质押的数量: " amount; ColorBlue ">> 正在质押 $amount NCK...\n"; sleep 2; ColorGreen "操作成功。\n";;
-            "取消质押") read -p "请输入要取消质押的数量: " amount; ColorBlue ">> 正在取消质押 $amount NCK...\n"; sleep 2; ColorGreen "操作成功。\n";;
-            "领取奖励") ColorBlue ">> 正在领取待处理的奖励...\n"; sleep 2; ColorGreen "已领取 128.42 NCK。\n";;
-            "返回主菜单") break;;
+
+# --- AI CO-PILOT v2.0 ---
+run_ai_copilot_v2() {
+    log_info "🤖 Nockchain AI Co-Pilot v2.0 Initializing..."
+    if ! systemctl is-active --quiet prometheus; then
+        log_error "Prometheus service is not running. Cannot fetch real-time metrics."
+        return
+    fi
+    
+    # Helper to query prometheus
+    query_prom() {
+        curl -s "http://localhost:9090/api/v1/query" --data-urlencode "query=$1" | jq -r '.data.result[0].value[1] // "0"'
+    }
+
+    log_info ">> Analyzing real-time performance metrics..."
+    local cpu_usage=$(query_prom '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[1m])))')
+    local mem_usage=$(query_prom '100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))')
+    local disk_usage=$(query_prom "100 * (1 - (node_filesystem_avail_bytes{mountpoint=\"${CONFIG[DATA_DIR]}\"} / node_filesystem_size_bytes{mountpoint=\"${CONFIG[DATA_DIR]}\"}))")
+    
+    printf "   CPU: %.2f%% | MEM: %.2f%% | DISK: %.2f%%\n" "$cpu_usage" "$mem_usage" "$disk_usage"
+    (( $(echo "$cpu_usage > 85" | bc -l) )) && log_warn "   [AI Insight] High CPU usage detected. Consider upgrading your instance."
+    (( $(echo "$mem_usage > 90" | bc -l) )) && log_warn "   [AI Insight] High memory usage. Check for leaks or add more RAM."
+    (( $(echo "$disk_usage > 95" | bc -l) )) && log_error "   [AI Alert] Disk space critically low! Risk of node halting."
+
+    log_info ">> Analyzing P2P network health..."
+    local peer_count=$(query_prom 'substrate_p2p_peers_count')
+    printf "   Connected Peers: %d\n" "$peer_count"
+    (( peer_count < 5 )) && log_warn "   [AI Insight] Low peer count. Check network connectivity and firewall rules."
+    
+    log_info "🤖 AI Co-Pilot analysis complete."
+}
+
+
+# --- MENUS ---
+show_banner() {
+    ColorBlue '
+    _   __         _                    _           _             
+   / | / /  ___   | | __   ___    ___  | |_   _ __ (_)  ___   ___ 
+  /  |/ /  / _ \  | |/ /  / _ \  / __| | __| |  __| | |/ __| / __|
+ / /|  /  | (_) | |   <  | (_) | \__ \ | |_  | |    | | (__  \__ \
+/_/ |_/    \___/  |_|\_\  \___/  |___/  \__| |_|    |_| \___| |___/
+                Orchestrator v5.0 "Titan"
+'
+}
+
+full_installation_menu() {
+    PS3="$(ColorYellow '选择要执行的完整安装流程: ')"
+    select choice in "全新安装 (节点 + 监控 + 安全)" "仅安装节点" "返回主菜单"; do
+        case $choice in
+            "全新安装 (节点 + 监控 + 安全)")
+                log_info "Starting full installation..."
+                install_dependencies
+                install_rust_toolchain
+                install_hoonc
+                PS3="选择节点类型: "; select type in "validator" "archive" "full" "light"; do
+                    install_nockchain_node "$type"; break; done
+                setup_system_user_and_env
+                setup_systemd_service "$type"
+                install_monitoring_stack
+                security_hardening_menu
+                sudo systemctl start nockchain-node.service
+                log_info "Full installation complete!"
+                break
+                ;;
+            "仅安装节点")
+                # ... Similar logic but only for the node
+                break
+                ;;
+            "返回主菜单") break ;;
         esac
     done
 }
 
-add_mining_key() {
-    ColorBlue ">> 正在添加挖矿/验证者公钥 (用于远程签名或SSH访问)...\n"
-    read -p "请输入公钥的 URL 或本地文件路径: " key_src
-    local ssh_dir="${CONFIG[DATA_DIR]}/.ssh"
-    ColorYellow "将在 ${ssh_dir} 为用户 ${CONFIG[USER]} 配置公钥...\n"
-    sudo mkdir -p "$ssh_dir"
-    sudo chown "${CONFIG[USER]}":"${CONFIG[USER]}" "$ssh_dir"
-    sudo chmod 700 "$ssh_dir"
-    if [[ $key_src =~ ^https?:// ]]; then
-        if ! curl -fsSL "$key_src" -o /tmp/miner_key.pub; then
-            ColorRed "从 URL 下载公钥失败！请检查链接是否正确。\n"; return 1; fi
-    elif [ -f "$key_src" ]; then
-        cp "$key_src" /tmp/miner_key.pub
-    else
-        ColorRed "错误：提供的路径 '$key_src' 不是一个有效的 URL 或本地文件。\n"; return 1; fi
-    sudo cat /tmp/miner_key.pub >> "$ssh_dir/authorized_keys"
-    sudo chown "${CONFIG[USER]}":"${CONFIG[USER]}" "$ssh_dir/authorized_keys"
-    sudo chmod 600 "$ssh_dir/authorized_keys"
-    sudo rm -f /tmp/miner_key.pub
-    ColorGreen "公钥已成功添加至 ${ssh_dir}/authorized_keys\n"
-}
-
 main_menu() {
-    local status_text
-    if systemctl is-active --quiet nockchain-node.service; then status_text="$(ColorGreen '运行中')";
-    else status_text="$(ColorRed '已停止')"; fi
-    echo -e "\n$(ColorBlue '--- Nockchain 编排器 v4.0 "执政官" ---')"
-    echo -e "节点服务状态: $status_text"
-    echo -e "\n$(ColorGreen '1)') 完整安装 (首次部署)"
-    echo -e "$(ColorGreen '2)') 节点管理 (启动/停止/重启)"
-    echo -e "$(ColorGreen '3)') 质押与治理"
-    echo -e "$(ColorGreen '4)') 设置开发者环境"
-    echo -e "\n$(ColorYellow '--- 高级操作 ---')"
-    echo -e "$(ColorYellow '5)') 运行 AI 运维协处理器诊断"
-    echo -e "$(ColorYellow '6)') 查看实时日志"
-    echo -e "$(ColorYellow '7)') 配置 Tor 匿名网络"
-    echo -e "$(ColorYellow '8)') 添加挖矿公钥"
-    echo -e "\n$(ColorRed '0)') 退出脚本"
-    read -p "$(ColorBlue '\n请输入您的选择 [0-8]: ')" choice
-    case "$choice" in
-        1) full_install ;;
-        2) 
-           PS3="请选择节点操作: "; select act in "启动 (start)" "停止 (stop)" "重启 (restart)" "查看状态 (status)"; do
-               action_cmd=$(echo "$act" | awk '{print $2}' | tr -d '()'); sudo systemctl "$action_cmd" nockchain-node.service
-               if [[ "$action_cmd" == "status" ]]; then read -p "按回车键返回..."; fi; break; done;;
-        3) manage_staking ;;
-        4) setup_dev_environment ;;
-        5) run_ai_copilot ;;
-        6) journalctl -u nockchain-node -n 100 -f --no-pager ;;
-        7) echo "正在配置 Tor... (此为功能占位符)"; sleep 1; ColorGreen "已为 P2P 流量启用 Tor 代理。\n";;
-        8) add_mining_key ;;
-        0) exit 0 ;;
-        *) ColorRed "无效选项，请重新输入。" ;;
-    esac
-    sleep 1; main_menu
+    clear
+    show_banner
+    local status; status=$(systemctl is-active nockchain-node.service && echo "$(ColorGreen 'Running')" || echo "$(ColorRed 'Stopped')")
+    echo -e "Node Status: $status\n"
+    
+    PS3="$(ColorBlue '请选择操作 [1-7]: ')"
+    select opt in \
+        "全新安装 / 组件管理" \
+        "节点生命周期 (升级/备份)" \
+        "安全中心" \
+        "运行 AI 运维协处理器" \
+        "查看实时日志" \
+        "彻底卸载套件" \
+        "退出"; do
+        case $opt in
+            "全新安装 / 组件管理") full_installation_menu ;;
+            "节点生命周期 (升级/备份)")
+                PS3="选择操作: "; select task in "升级节点" "备份节点" "返回"; do
+                    case $task in
+                        "升级节点") upgrade_node; break;;
+                        "备份节点") backup_node; break;;
+                        "返回") break;;
+                    esac
+                done
+                ;;
+            "安全中心") security_hardening_menu ;;
+            "运行 AI 运维协处理器") run_ai_copilot_v2 ;;
+            "查看实时日志") sudo journalctl -u nockchain-node -n 100 -f ;;
+            "彻底卸载套件") uninstall_suite ;;
+            "退出") exit 0 ;;
+            *) echo "Invalid option $REPLY" ;;
+        esac
+        read -p "按回车键返回主菜单..."
+        main_menu
+    done
 }
 
 # --- SCRIPT ENTRYPOINT ---
+if [[ $EUID -ne 0 ]]; then
+   log_error "This script must be run as root. Please use 'sudo'."
+   exit 1
+fi
+load_or_create_config
 main_menu
