@@ -1,7 +1,6 @@
 #!/bin/bash
 # Nockchain Ecosystem Builder v2.1
 # 集成内核代码构建、节点部署、动态资源调度和生态监控功能
-
 set -euo pipefail
 exec > >(tee /var/log/nockchain-builder.log) 2>&1
 
@@ -11,12 +10,19 @@ export RUSTUP_HOME=/opt/rustup
 export CARGO_HOME=/opt/cargo
 PATH="$CARGO_HOME/bin:$PATH"
 
+# Color Variables
+green='\e[32m'; blue='\e[34m'; red='\e[31m'; reset='\e[0m'
+ColorGreen(){ echo -ne "${green}$1${reset}"; }
+ColorBlue() { echo -ne "${blue}$1${reset}"; }
+ColorRed()  { echo -ne "${red}$1${reset}"; }
+
 # 声明式错误处理
 trap 'handle_error $? $LINENO' ERR
 handle_error() {
     local exit_code=$1
     local line_no=$2
-    echo "[$(date '+%F %T')] ERROR in $0 line $line_no: Exit code $exit_code" >> /var/log/nockchain-error.log
+    echo "[$(date '+%F %T')] ERROR in $0 line $line_no: Exit code $exit_code" \
+        >> /var/log/nockchain-error.log
     systemctl stop nockchain-monitor 2>/dev/null || true
     exit $exit_code
 }
@@ -32,15 +38,14 @@ declare -A RESOURCE_PROFILES=(
 check_compatibility() {
     local distro=$(lsb_release -si)
     local version=$(lsb_release -sr)
-    
     case $distro in
         Ubuntu) [[ $version =~ "20.04|22.04" ]] || return 1 ;;
-        Debian) [[ $version -ge 10 ]] || return 1 ;;
+        Debian) [[ ${version%%.*} -ge 10 ]] || return 1 ;;
         *) return 1 ;;
     esac
-
     lspci | grep -qi 'NVIDIA' && echo "Detected NVIDIA GPU" || true
-    grep -q 'avx2' /proc/cpuinfo || { echo "AVX2指令集缺失"; return 1; }
+    grep -q 'avx2' /proc/cpuinfo \
+        || { echo "AVX2指令集缺失"; return 1; }
 }
 
 # 核心依赖安装
@@ -49,32 +54,28 @@ install_dependencies() {
     apt-get install -y --no-install-recommends \
         clang-15 llvm-15-dev libclang-15-dev \
         cmake libssl-dev pkg-config screen htop \
-        ntpdate jq python3-venv
+        ntpdate jq python3-venv curl
 }
 
 # Hoon编译器构建
 build_hoonc() {
     local commit_hash="v1.0.2"
     git clone https://github.com/urbit/hoon.git /tmp/hoon
-    pushd /tmp/hoon
-    git checkout $commit_hash
-    make HOON_ARCH=$(uname -m)-linux install
-    popd
+    pushd /tmp/hoon >/dev/null
+      git checkout $commit_hash
+      make HOON_ARCH=$(uname -m)-linux install
+    popd >/dev/null
 }
 
 # 动态资源调度算法
 resource_scheduler() {
     local mode=${1:-balanced}
     local params=(${RESOURCE_PROFILES[$mode]})
-    
-    # 使用cgroups v2实现资源隔离
     cgcreate -g cpu,memory:/nockchain
     cgset -r cpu.max="${params[0]}" nockchain
     cgset -r memory.high="${params[1]}" nockchain
     cgset -r memory.max="${params[2]}" nockchain
-    
-    # 实时调整ZKP证明线程
-    local zk_threads=$(($(nproc) * ${params[0]%\%}/100))
+    local zk_threads=$(($(nproc) * ${params[0]%\%} / 100))
     sed -i "s/zk_threads = .*/zk_threads = $zk_threads/" /etc/nockchain.conf
 }
 
@@ -99,51 +100,93 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
 }
 
 # 自动化部署流程
 deploy_ecosystem() {
     check_compatibility || handle_error 1 $LINENO
-    
+
     # 阶段1：依赖安装
     install_dependencies
     build_hoonc
-    
-    # 阶段2：密钥管理
+
+    # 阶段2：密钥管理（生成钱包）
     local wallet_dir="/var/lib/nockchain/wallet"
-    mkdir -p $wallet_dir
-    nockchain-wallet keygen | tee $wallet_dir/seed.txt
-    chmod 600 $wallet_dir/*
-    
+    mkdir -p "$wallet_dir"
+    nockchain-wallet keygen | tee "$wallet_dir/seed.txt"
+    chmod 600 "$wallet_dir"/*
+
     # 阶段3：节点编译
     git clone https://github.com/zorp-corp/nockchain /opt/nockchain
-    pushd /opt/nockchain
-    cargo build --release --features "zkpow"
-    cp target/release/nockchain /usr/local/bin/
-    popd
-    
+    pushd /opt/nockchain >/dev/null
+      cargo build --release --features "zkpow"
+      cp target/release/nockchain /usr/local/bin/
+    popd >/dev/null
+
     # 阶段4：服务配置
-    useradd -r -s /usr/sbin/nologin nockchain
+    useradd -r -s /usr/sbin/nologin nockchain || true
     setup_daemon
     systemctl enable --now nockchain-node
-    
+
     # 阶段5：动态优化
     resource_scheduler balanced
     systemctl start nockchain-monitor
+    ColorGreen "部署完成！\n"
 }
 
-# 主执行流程
-case "$1" in
-    deploy)
-        deploy_ecosystem
-        ;;
-    optimize)
-        resource_scheduler ${2:-balanced}
-        ;;
-    *)
-        echo "Usage: $0 {deploy|optimize}"
-        exit 1
-        ;;
-esac
+# 添加挖矿公钥
+add_mining_key() {
+    read -p "请输入挖矿公钥 URL 或本地路径: " key_src
+    mkdir -p /home/nockchain/.ssh
+    chown nockchain:nockchain /home/nockchain/.ssh
+    if [[ $key_src =~ ^https?:// ]]; then
+      curl -fsSL "$key_src" -o /tmp/miner.pub
+    else
+      cp "$key_src" /tmp/miner.pub
+    fi
+    cat /tmp/miner.pub >> /home/nockchain/.ssh/authorized_keys
+    chown nockchain:nockchain /home/nockchain/.ssh/authorized_keys
+    chmod 600 /home/nockchain/.ssh/authorized_keys
+    rm -f /tmp/miner.pub
+    ColorGreen "挖矿公钥已添加\n"
+}
+
+# 启动节点服务
+start_node_service() {
+    systemctl start nockchain-node
+    ColorGreen "节点服务已启动\n"
+}
+
+# 查看日志
+view_logs() {
+    ColorBlue "== Systemd 日志 (last 100 lines) ==\n"
+    journalctl -u nockchain-node -n 100 --no-pager
+    echo
+    ColorBlue "== 构建日志 (last 50 lines) ==\n"
+    tail -n 50 /var/log/nockchain-builder.log
+}
+
+# 交互式菜单
+menu() {
+    echo -e "
+$(ColorBlue 'Nockchain Ecosystem Builder v2.1 菜单')
+$(ColorGreen '1)') 安装并构建
+$(ColorGreen '2)') 添加挖矿公钥
+$(ColorGreen '3)') 启动节点
+$(ColorGreen '4)') 查看日志
+$(ColorGreen '0)') 退出
+"
+    read -p "$(ColorBlue '请选择操作 [0-4]: ')" choice
+    case $choice in
+      1) deploy_ecosystem   ; menu ;;
+      2) add_mining_key     ; menu ;;
+      3) start_node_service ; menu ;;
+      4) view_logs          ; menu ;;
+      0) exit 0 ;;
+      *) ColorRed "无效选项，请重试\n"; menu ;;
+    esac
+}
+
+# 脚本入口：启动交互式菜单
+menu
