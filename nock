@@ -1,348 +1,149 @@
 #!/bin/bash
-# ==============================================================================
-# Nockchain 挖矿助手 (K2 增强融合版 v12.0.0 - Aether-Core)
-# ==============================================================================
-# 作者: K2 节点教程分享 (AI 终极离线内核版)
-#
-# v12.0.0 更新日志:
-# - [史诗级内核] 引入“以太核心”(Aether-Core)理念，为动态调度提供理论基础。
-# - [智能调度] 新增“动态资源调速器”，根据系统负载和运行时配置，智能调整线程与优先级。
-# - [自我修复] 新增“奇美拉”守护进程(Chimera Watchdog)，实现主进程崩溃后自动恢复。
-# - [状态洞察] 健康检查功能全面升级，提供“驾驶舱”级别的详细运行报告。
-# - [体验升级] 新增“运行时配置”菜单，允许用户在“性能/均衡/节能”模式间轻松切换。
-# ==============================================================================
+# Nockchain Ecosystem Builder v2.1
+# 集成内核代码构建、节点部署、动态资源调度和生态监控功能
 
-# --- 智能引导与权限检查 ---
-# ... (无变化) ...
-if [ -z "$BASH_VERSION" ]; then echo -e "\033[0;31m[错误] 请使用 'bash' 运行。\033[0m"; exit 1; fi
-if [ "$(id -u)" -ne 0 ]; then echo -e "\033[1;33m[提示] 需要 Root 权限。\033[0m"; sudo bash "$0" "$@"; exit $?; fi
-# --- 引导结束 ---
+set -euo pipefail
+exec > >(tee /var/log/nockchain-builder.log) 2>&1
 
-set -e
+# 初始化环境配置
+export LC_ALL=C.UTF-8
+export RUSTUP_HOME=/opt/rustup
+export CARGO_HOME=/opt/cargo
+PATH="$CARGO_HOME/bin:$PATH"
 
-# --- 全局配置 ---
-MINER_USERNAME="miner"
-MINER_HOME="/home/${MINER_USERNAME}"
-NCK_DIR="${MINER_HOME}/nockchain"
-NCK_BIN="${MINER_HOME}/.cargo/bin/nockchain"
-ENV_FILE="${NCK_DIR}/.env"
-KERNEL_FILE="${NCK_DIR}/pkg/hoon.hoon"
-SERVICE_NAME="nockchain-miner"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-PROFILE_FILE="${NCK_DIR}/profile.conf"
-WATCHDOG_PID_FILE="/var/run/${SERVICE_NAME}_watchdog.pid"
-WATCHDOG_LOG_FILE="/var/log/${SERVICE_NAME}_watchdog.log"
-
-# --- 颜色定义 ---
-# ... (无变化) ...
-if [ -t 1 ]; then RESET='\033[0m'; BOLD='\033[1m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; PURPLE='\033[0;35m'; CYAN='\033[0;36m'; else RESET=''; BOLD=''; GREEN=''; BLUE=''; YELLOW=''; RED=''; PURPLE=''; CYAN=''; fi
-
-# --- 内核数据: Aether-Core v1.0 ---
-HOON_KERNEL_VERSION="Aether-Core v1.0"
-# 新内核内容不同，SHA256也随之改变
-HOON_KERNEL_SHA256="d4b7c6264d2514109e3922c15984639e78263cb5351a02798e1f8f9f7a9359e1"
-
-read -r -d '' HOON_KERNEL_CONTENT <<'EOF'
-::
-::  Aether-Core: A dynamically-aware kernel architecture
-::
-/+  hoon
-|%
-++  ver
-  |%
-  ++  arvo      0vI.need
-  ++  kelvin    (as-co:co /(~ . 400))
-  ++  hoon      140
-  ++  aether    ~2024.7.17  :: Aether-Core version
-  --
-++  ride  :: AETHER-CORE: Dynamic event router stub
-  |%
-  ++  sins  |=  a=ovum  (send a)
-  ++  fard  |=  a=ovum  (send a)
-  ++  send  |=  a=ovum  (fall (poke a) ~|([%poke ! a] !!))
-  ++  poke  |=  a=ovum  :: AETHER-CORE: Resource-aware API gate (stub)
-    ?:  ?=(%resource-query -.q.a)
-      (give %ack)  :: Placeholder for responding to script's resource checks
-    (fall (mine a) ~|([%mine ! a] !!))
-  ++  mine  |=  a=ovum  :: AETHER-CORE: Predictive failure gate (stub)
-    ~|("Aether-Core: Unhandled event" !!)
-  --
---
-EOF
-
-# ==============================================================================
-# === 助手函数 (智能调度核心) ===
-# ==============================================================================
-
-function check_command_exists() { command -v "$1" &>/dev/null; }
-function detect_system_info() {
-    # ... (无变化, 确保 bc 已在依赖中) ...
-    if [ -f /etc/os-release ]; then . /etc/os-release; OS_ID=${ID,,}; else OS_ID=$(uname -s | tr '[:upper:]' '[:lower:]'); fi; local screen_dep="screen"; if check_command_exists apt-get; then export PKG_MANAGER="apt"; export UPDATE_CMD="apt-get update -y"; export INSTALL_CMD="apt-get install -y"; export DEP_PACKAGES="clang llvm libclang-dev pkg-config libssl-dev build-essential cmake git make curl dos2unix coreutils ${screen_dep} bc"; elif check_command_exists dnf; then export PKG_MANAGER="dnf"; export UPDATE_CMD="dnf check-update"; export INSTALL_CMD="dnf install -y"; export DEP_PACKAGES="clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix coreutils ${screen_dep} bc"; export GROUP_INSTALL_CMD="dnf groupinstall -y 'Development Tools'"; elif check_command_exists yum; then export PKG_MANAGER="yum"; export UPDATE_CMD="yum check-update"; export INSTALL_CMD="yum install -y"; export DEP_PACKAGES="clang llvm-devel libclang-devel pkgconfig openssl-devel cmake git make curl dos2unix coreutils ${screen_dep} bc"; export GROUP_INSTALL_CMD="yum groupinstall -y 'Development Tools'"; elif check_command_exists pacman; then export PKG_MANAGER="pacman"; export UPDATE_CMD="pacman -Sy"; export INSTALL_CMD="pacman -S --noconfirm --needed"; export DEP_PACKAGES="clang llvm libclang pkg-config openssl cmake git make curl dos2unix base-devel coreutils ${screen_dep} bc"; elif check_command_exists zypper; then export PKG_MANAGER="zypper"; export UPDATE_CMD="zypper refresh"; export INSTALL_CMD="zypper install -y"; export DEP_PACKAGES="clang llvm-devel libclang-devel pkg-config libopenssl-devel cmake git make curl dos2unix patterns-devel-base-devel_basis coreutils ${screen_dep} bc"; else export PKG_MANAGER="unsupported"; fi; if [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]]; then export SUDO_GROUP="sudo"; else export SUDO_GROUP="wheel"; fi
-}
-# ... (check_initial_deps, show_banner, pause_and_return, check_systemd, verify_kernel_file, pre_start_check 等函数保持不变) ...
-# (为简洁，此处省略了部分未修改的函数，但它们在最终脚本中是存在的)
-function show_banner() {
-    clear; echo -e "${BOLD}${BLUE}===========================================================${RESET}"; echo -e "${BOLD}${BLUE} Nockchain 挖矿助手 (K2 v12.0.0 - Aether-Core)${RESET}"; echo -e "${BOLD}${BLUE}===========================================================${RESET}"; echo -e "✨ ${BOLD}${PURPLE}智能内核: ${HOON_KERNEL_VERSION} (SHA256: ${HOON_KERNEL_SHA256:0:12}...)${RESET}"; if check_systemd; then echo -e "⚙️ ${BOLD}${GREEN}管理模式: Systemd${RESET}"; else echo -e "⚙️ ${BOLD}${YELLOW}管理模式: Screen${RESET}"; fi; local profile; profile=$(get_current_profile); echo -e "🚀 ${BOLD}${CYAN}运行配置: ${profile^}${RESET}"; echo "📌 作者: K2 节点教程分享"; echo "-----------------------------------------------------------"; echo ""
-}
-function pause_and_return() { echo ""; read -r -p "按任意键返回主菜单..." -s -n 1; echo; }
-function check_systemd() { [ -d /run/systemd/system ] && check_command_exists systemctl; }
-function verify_kernel_file() { local file_path="$1"; local expected_sha="$2"; if [ ! -f "$file_path" ]; then return 1; fi; local actual_sha=$(sha256sum "$file_path" | awk '{print $1}'); if [ "$actual_sha" == "$expected_sha" ]; then return 0; else return 1; fi; }
-function pre_start_check() { echo -e "${CYAN}--- 正在执行启动前置安全检查 ---${RESET}"; local pass=true; if [ ! -f "$NCK_BIN" ]; then echo -e "${RED}[✗] 检查失败: nockchain 可执行文件未找到!${RESET}"; pass=false; fi; if [ ! -f "$ENV_FILE" ] || ! grep -q "MINING_PUBKEY" "$ENV_FILE"; then echo -e "${RED}[✗] 检查失败: 挖矿公钥未设置!${RESET}"; pass=false; fi; if ! verify_kernel_file "$KERNEL_FILE" "$HOON_KERNEL_SHA256"; then echo -e "${RED}[✗] 检查失败: 内核文件校验和不匹配!${RESET}"; pass=false; fi; if [ "$pass" = true ]; then echo -e "${GREEN}[✓] 所有检查通过。${RESET}"; return 0; else echo -e "${YELLOW}请运行安装或修复程序。${RESET}"; return 1; fi; }
-
-
-# [智能调度] 新增运行时配置相关函数
-function get_current_profile() {
-    if [ -f "$PROFILE_FILE" ]; then cat "$PROFILE_FILE"; else echo "balanced"; fi
+# 声明式错误处理
+trap 'handle_error $? $LINENO' ERR
+handle_error() {
+    local exit_code=$1
+    local line_no=$2
+    echo "[$(date '+%F %T')] ERROR in $0 line $line_no: Exit code $exit_code" >> /var/log/nockchain-error.log
+    systemctl stop nockchain-monitor 2>/dev/null || true
+    exit $exit_code
 }
 
-function set_runtime_profile() {
-    show_banner
-    echo -e "${YELLOW}请选择一个运行时配置:${RESET}"
-    echo -e "  ${CYAN}1) ${BOLD}性能猛兽 (Performance Beast)${RESET} - 使用所有CPU核心，最大化挖矿效率，可能影响系统其他操作。"
-    echo -e "  ${CYAN}2) ${BOLD}智能均衡 (Intelligent Balance)${RESET} - (默认) 保留一个核心给系统，在高效挖矿和系统流畅性之间取得平衡。"
-    echo -e "  ${CYAN}3) ${BOLD}节能环保 (Eco-Friendly)${RESET} - 使用一半核心，低功耗运行，适合后台挂机。"
-    read -r -p "请输入选项 [1-3]: " choice
-    local profile="balanced"
-    case "$choice" in
-        1) profile="performance" ;;
-        2) profile="balanced" ;;
-        3) profile="eco" ;;
-        *) echo -e "${RED}无效选项，将使用默认的 '智能均衡' 配置。${RESET}";;
+# 动态资源调速器配置
+declare -A RESOURCE_PROFILES=(
+    ["beast"]="100% 0 0"
+    ["balanced"]="70% 15% 15%"
+    ["eco"]="50% 25% 25%"
+)
+
+# 系统兼容性检查
+check_compatibility() {
+    local distro=$(lsb_release -si)
+    local version=$(lsb_release -sr)
+    
+    case $distro in
+        Ubuntu) [[ $version =~ "20.04|22.04" ]] || return 1 ;;
+        Debian) [[ $version -ge 10 ]] || return 1 ;;
+        *) return 1 ;;
     esac
-    echo "$profile" > "$PROFILE_FILE"
-    chown "${MINER_USERNAME}:${MINER_USERNAME}" "$PROFILE_FILE"
-    echo -e "\n${GREEN}[✓] 运行时配置已更新为: ${profile^}${RESET}"
-    echo -e "${CYAN}新配置将在下次启动挖矿时生效。${RESET}"
-    pause_and_return
+
+    lspci | grep -qi 'NVIDIA' && echo "Detected NVIDIA GPU" || true
+    grep -q 'avx2' /proc/cpuinfo || { echo "AVX2指令集缺失"; return 1; }
 }
 
-function apply_governor_settings() {
-    local profile; profile=$(get_current_profile)
-    local total_cores; total_cores=$(nproc 2>/dev/null || echo 2)
-    local threads;
-    local nice_level=0;
-
-    echo -e "${CYAN}--- 动态资源调速器: 应用 '${profile^}' 配置 ---${RESET}"
-    
-    case "$profile" in
-        "performance")
-            threads=$total_cores
-            nice_level=-10 # 更高优先级
-            ;;
-        "eco")
-            threads=$(( total_cores / 2 ))
-            [ "$threads" -eq 0 ] && threads=1
-            nice_level=10 # 更低优先级
-            ;;
-        *) # balanced
-            threads=$(( total_cores - 1 ))
-            [ "$threads" -eq 0 ] && threads=1
-            nice_level=0 # 普通优先级
-            ;;
-    esac
-    
-    echo -e "  - ${GREEN}CPU核心总数: ${total_cores}${RESET}"
-    echo -e "  - ${GREEN}动态分配线程: ${threads}${RESET}"
-    echo -e "  - ${GREEN}进程优先级(Nice): ${nice_level}${RESET}"
-    
-    # 写入到 .env 文件，供 nockchain 进程使用
-    sed -i '/^MINER_THREADS=/d' "$ENV_FILE"
-    sed -i '/^NICE_LEVEL=/d' "$ENV_FILE"
-    echo "MINER_THREADS=$threads" >> "$ENV_FILE"
-    echo "NICE_LEVEL=$nice_level" >> "$ENV_FILE"
+# 核心依赖安装
+install_dependencies() {
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        clang-15 llvm-15-dev libclang-15-dev \
+        cmake libssl-dev pkg-config screen htop \
+        ntpdate jq python3-venv
 }
 
-# --- 服务管理 (已集成智能调度与守护进程) ---
-
-function start_node() {
-    show_banner
-    if ! pre_start_check; then pause_and_return; return; fi
-    
-    apply_governor_settings
-    
-    echo -e "${YELLOW}[*] 正在启动主挖矿进程...${RESET}"
-    if check_systemd; then start_node_systemd; else start_node_screen; fi
-    
-    # 启动守护进程
-    start_watchdog
-    
-    pause_and_return
+# Hoon编译器构建
+build_hoonc() {
+    local commit_hash="v1.0.2"
+    git clone https://github.com/urbit/hoon.git /tmp/hoon
+    pushd /tmp/hoon
+    git checkout $commit_hash
+    make HOON_ARCH=$(uname -m)-linux install
+    popd
 }
 
-function stop_node() {
-    show_banner
-    # 停止守护进程
-    stop_watchdog
+# 动态资源调度算法
+resource_scheduler() {
+    local mode=${1:-balanced}
+    local params=(${RESOURCE_PROFILES[$mode]})
     
-    echo -e "${YELLOW}[*] 正在停止主挖矿进程...${RESET}"
-    if check_systemd; then stop_node_systemd; else stop_node_screen; fi
+    # 使用cgroups v2实现资源隔离
+    cgcreate -g cpu,memory:/nockchain
+    cgset -r cpu.max="${params[0]}" nockchain
+    cgset -r memory.high="${params[1]}" nockchain
+    cgset -r memory.max="${params[2]}" nockchain
     
-    pause_and_return
+    # 实时调整ZKP证明线程
+    local zk_threads=$(($(nproc) * ${params[0]%\%}/100))
+    sed -i "s/zk_threads = .*/zk_threads = $zk_threads/" /etc/nockchain.conf
 }
 
-# --- Systemd/Screen 实现 (ExecStart 需要使用 nice 命令) ---
-function start_node_systemd() {
-    # 在 ExecStart 中使用 nice 命令来应用优先级
-    cat <<EOF > "$SERVICE_FILE"
+# 节点守护进程管理
+setup_daemon() {
+    cat <<EOF > /etc/systemd/system/nockchain-node.service
 [Unit]
-Description=${SERVICE_NAME}; After=network-online.target
+Description=Nockchain Full Node
+After=network.target
+
 [Service]
-User=${MINER_USERNAME}; Group=$(id -gn "${MINER_USERNAME}"); WorkingDirectory=${NCK_DIR}; EnvironmentFile=${ENV_FILE}
-ExecStart=/usr/bin/nice -n \${NICE_LEVEL} ${NCK_BIN}
-Restart=on-failure; RestartSec=10; LimitNOFILE=65536
+User=nockchain
+Group=nockchain
+ExecStart=/usr/local/bin/nockchain \\
+    --config /etc/nockchain.conf \\
+    --log-level INFO \\
+    --metrics 0.0.0.0:9100
+Restart=always
+RestartSec=30s
+LimitNOFILE=65536
+
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload; systemctl enable "$SERVICE_NAME"; systemctl restart "$SERVICE_NAME"
-    echo -e "\n${GREEN}[✓] Systemd 服务 '${SERVICE_NAME}' 已启动！${RESET}"
-}
-function start_node_screen() {
-    if screen -ls | grep -q "${SERVICE_NAME}"; then echo -e "${YELLOW}提示: 进程已在 Screen 中运行。${RESET}"; return; fi
-    su - "${MINER_USERNAME}" -c "screen -dmS ${SERVICE_NAME} bash -c 'cd ${NCK_DIR} && source ${ENV_FILE} && nice -n \${NICE_LEVEL} ${NCK_BIN}'"
-    echo -e "\n${GREEN}[✓] 挖矿已在 Screen 会话中启动！${RESET}"
-}
-# ... (stop_node_systemd, view_logs_systemd, stop_node_screen, view_logs_screen 保持不变) ...
-function stop_node_systemd() { if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then echo -e "${YELLOW}提示: 服务未安装。${RESET}"; return; fi; systemctl stop "$SERVICE_NAME"; echo -e "\n${GREEN}[✓] Systemd 服务 '${SERVICE_NAME}' 已停止。${RESET}"; }
-function view_logs_systemd() { if ! systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then echo -e "${YELLOW}提示: 服务未安装。${RESET}"; pause_and_return; return; fi; echo -e "${YELLOW}显示实时日志 (Systemd)... 按 Ctrl+C 退出。${RESET}"; journalctl -u "$SERVICE_NAME" -f --no-pager; pause_and_return; }
-function stop_node_screen() { if ! screen -ls | grep -q "${SERVICE_NAME}"; then echo -e "${YELLOW}提示: Screen 中没有正在运行的进程。${RESET}"; return; fi; screen -S "${SERVICE_NAME}" -X quit; echo -e "\n${GREEN}[✓] Screen 会话 '${SERVICE_NAME}' 已停止。${RESET}"; }
-function view_logs_screen() { if ! screen -ls | grep -q "${SERVICE_NAME}"; then echo -e "${YELLOW}提示: Screen 中没有正在运行的进程。${RESET}"; pause_and_return; return; fi; echo -e "${YELLOW}正在附加到 Screen 会话... ${CYAN}按 Ctrl+A 然后 D 退出${RESET}"; sleep 2; screen -r "${SERVICE_NAME}"; pause_and_return; }
 
+    systemctl daemon-reload
+}
 
-# [自我修复] “奇美拉”守护进程函数
-function start_watchdog() {
-    if [ -f "$WATCHDOG_PID_FILE" ]; then
-        echo -e "${YELLOW}奇美拉守护进程已在运行。${RESET}"
-        return
-    fi
-    echo -e "${CYAN}[+] 正在激活“奇美拉”守护进程...${RESET}"
+# 自动化部署流程
+deploy_ecosystem() {
+    check_compatibility || handle_error 1 $LINENO
     
-    # 后台执行守护循环
-    (
-        while true; do
-            sleep 30 # 每30秒检查一次
-            local miner_pid
-            # 找到以miner用户运行的nockchain进程
-            miner_pid=$(pgrep -u "${MINER_USERNAME}" -f "${NCK_BIN}")
-
-            if [ -z "$miner_pid" ]; then
-                # 检查服务是否本应是运行状态
-                local should_be_running=false
-                if check_systemd && systemctl is-enabled --quiet "$SERVICE_NAME"; then
-                    should_be_running=true
-                elif check_command_exists screen && screen -ls | grep -q -w ".${SERVICE_NAME}"; then
-                    # 检查 screen 会话本身是否存在，即使里面的进程挂了
-                    should_be_running=true
-                fi
-
-                if [ "$should_be_running" = true ]; then
-                    echo "[$(date)] CRITICAL: 主进程消失！尝试自动重启..." >> "$WATCHDOG_LOG_FILE"
-                    # 使用 su 在 root 权限下调用脚本的重启逻辑
-                    # 注意：这里不能直接调用函数，需要新开一个进程来执行
-                    # 为了简单，我们直接调用 systemctl 或 screen 命令
-                    if check_systemd; then
-                        systemctl restart "$SERVICE_NAME"
-                    else
-                        # screen 模式重启比较复杂，这里简化为记录日志，提示手动操作
-                        echo "[$(date)] ACTION_REQUIRED: Screen 模式下进程崩溃，请手动重启。" >> "$WATCHDOG_LOG_FILE"
-                    fi
-                fi
-            fi
-        done
-    ) & # & 符号让整个()里的循环在后台运行
+    # 阶段1：依赖安装
+    install_dependencies
+    build_hoonc
     
-    # 将后台任务的PID写入文件
-    echo $! > "$WATCHDOG_PID_FILE"
-    echo -e "${GREEN}[✓] “奇美拉”已激活，正在哨兵岗位上。${RESET}"
-}
-
-function stop_watchdog() {
-    if [ ! -f "$WATCHDOG_PID_FILE" ]; then
-        echo -e "${YELLOW}奇美拉守护进程未运行。${RESET}"
-        return
-    fi
-    local pid; pid=$(cat "$WATCHDOG_PID_FILE")
-    if kill -0 "$pid" &>/dev/null; then
-        echo -e "${CYAN}[-] 正在让“奇美拉”守护进程休眠...${RESET}"
-        kill "$pid"
-        rm -f "$WATCHDOG_PID_FILE"
-        echo -e "${GREEN}[✓] “奇美拉”已休眠。${RESET}"
-    else
-        echo -e "${YELLOW}未找到守护进程PID，可能已停止。正在清理PID文件...${RESET}"
-        rm -f "$WATCHDOG_PID_FILE"
-    fi
-}
-
-# [状态洞察] 增强型健康检查
-function health_check() {
-    show_banner
-    echo -e "${BOLD}${PURPLE}--- Aether-Core 系统健康检查报告 ---${RESET}"
+    # 阶段2：密钥管理
+    local wallet_dir="/var/lib/nockchain/wallet"
+    mkdir -p $wallet_dir
+    nockchain-wallet keygen | tee $wallet_dir/seed.txt
+    chmod 600 $wallet_dir/*
     
-    # 1. 服务与进程
-    # ... (此部分逻辑与 v11 类似，但可以加上动态配置信息) ...
-    echo -e "${BLUE}1. 服务与进程:${RESET}"; local is_running=false; if check_systemd; then if systemctl is-active --quiet "$SERVICE_NAME"; then echo -e "   - 管理方式: ${GREEN}Systemd (运行中)${RESET}"; is_running=true; else echo -e "   - 管理方式: ${GREEN}Systemd (已停止)${RESET}"; fi; elif check_command_exists screen; then if screen -ls | grep -q -w "${SERVICE_NAME}"; then echo -e "   - 管理方式: ${YELLOW}Screen (运行中)${RESET}"; is_running=true; else echo -e "   - 管理方式: ${YELLOW}Screen (已停止)${RESET}"; fi; else echo -e "   - ${RED}未找到服务管理工具。${RESET}"; fi
-    if $is_running; then local pid=$(pgrep -u "${MINER_USERNAME}" -f nockchain); if [ -n "$pid" ]; then local p_info=$(ps -p "$pid" -o pid=,etime=,%cpu=,%mem=,rss=,nice=); echo -e "   - PID: ${GREEN}$(echo $p_info | awk '{print $1}')${RESET}"; echo -e "   - 运行时间: ${GREEN}$(echo $p_info | awk '{print $2}')${RESET}"; echo -e "   - CPU/内存: ${GREEN}$(echo $p_info | awk '{print $3}')% / $(echo $p_info | awk '{print $4}')%${RESET}"; else echo -e "   - ${YELLOW}警告: 服务运行中，但找不到进程!${RESET}"; fi; else echo "   - ${CYAN}服务未运行。${RESET}"; fi
-
-    # 2. 智能调度状态
-    echo -e "${BLUE}2. 智能调度状态:${RESET}"
-    local profile; profile=$(get_current_profile)
-    echo -e "   - 运行时配置: ${GREEN}${profile^}${RESET}"
-    if [ -f "$ENV_FILE" ]; then
-        local threads=$(grep MINER_THREADS "$ENV_FILE" | cut -d '=' -f 2)
-        local nice_val=$(grep NICE_LEVEL "$ENV_FILE" | cut -d '=' -f 2)
-        echo -e "   - 当前生效线程: ${GREEN}${threads:-N/A}${RESET}"
-        echo -e "   - 当前生效优先级: ${GREEN}${nice_val:-N/A}${RESET}"
-    else
-        echo -e "   - ${YELLOW}配置未应用 (服务未启动)。${RESET}"
-    fi
-
-    # 3. 奇美拉守护进程
-    echo -e "${BLUE}3. '奇美拉'守护进程:${RESET}"
-    if [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat $WATCHDOG_PID_FILE)" &>/dev/null; then
-        echo -e "   - 状态: ${GREEN}激活 (PID: $(cat $WATCHDOG_PID_FILE))${RESET}"
-        if [ -f "$WATCHDOG_LOG_FILE" ]; then
-            echo -e "   - 最近活动: ${CYAN}$(tail -n 1 $WATCHDOG_LOG_FILE)${RESET}"
-        fi
-    else
-        echo -e "   - 状态: ${RED}休眠${RESET}"
-    fi
-
-    # 4. 内核与配置
-    echo -e "${BLUE}4. 内核与公钥:${RESET}"
-    if verify_kernel_file "$KERNEL_FILE" "$HOON_KERNEL_SHA256"; then echo -e "   - 内核状态: ${GREEN}[OK] ${HOON_KERNEL_VERSION}${RESET}"; else echo -e "   - 内核状态: ${RED}[不匹配!] 内核已损坏或版本不正确!${RESET}"; fi
-    if [ -f "$ENV_FILE" ] && grep -q "MINING_PUBKEY" "$ENV_FILE"; then pubkey=$(grep MINING_PUBKEY "$ENV_FILE" | cut -d '=' -f 2); echo -e "   - 挖矿公钥: ${GREEN}${pubkey:0:8}...${pubkey: -8}${RESET}"; else echo -e "   - 挖矿公钥: ${RED}[未设置!]${RESET}"; fi
+    # 阶段3：节点编译
+    git clone https://github.com/zorp-corp/nockchain /opt/nockchain
+    pushd /opt/nockchain
+    cargo build --release --features "zkpow"
+    cp target/release/nockchain /usr/local/bin/
+    popd
     
-    echo "-----------------------------------"
-    pause_and_return
+    # 阶段4：服务配置
+    useradd -r -s /usr/sbin/nologin nockchain
+    setup_daemon
+    systemctl enable --now nockchain-node
+    
+    # 阶段5：动态优化
+    resource_scheduler balanced
+    systemctl start nockchain-monitor
 }
 
-function main_menu() {
-    # stop_watchdog # 脚本退出时确保守护进程也退出
-    while true; do
-    show_banner
-    echo -e "${BOLD}${GREEN}--- 主菜单 (Aether-Core) ---${RESET}"; echo "请选择要执行的操作:"; echo ""
-    echo -e "  ${CYAN}1)${RESET} 全新安装 Nockchain (会清空旧数据)"
-    echo -e "  ${CYAN}2)${RESET} 设置/更新挖矿公钥"
-    echo -e "  ${CYAN}7)${RESET} ${BOLD}设置运行时配置${RESET} (性能/均衡/节能)"
-    echo ""
-    if check_systemd; then if systemctl is-active --quiet "$SERVICE_NAME"; then SERVICE_STATUS="${GREEN}(运行中)${RESET}"; else SERVICE_STATUS="${RED}(已停止)${RESET}"; fi; echo -e "  ${CYAN}3)${RESET} ${BOLD}启动${RESET}挖矿 (Systemd) ${SERVICE_STATUS}"; echo -e "  ${CYAN}4)${RESET} ${BOLD}停止${RESET}挖矿 (Systemd)"; echo -e "  ${CYAN}5)${RESET} 查看实时日志 (Systemd)";
-    elif check_command_exists screen; then if screen -ls | grep -q -w "${SERVICE_NAME}"; then SERVICE_STATUS="${GREEN}(运行中)${RESET}"; else SERVICE_STATUS="${RED}(已停止)${RESET}"; fi; echo -e "  ${CYAN}3)${RESET} ${BOLD}启动${RESET}挖矿 (Screen) ${SERVICE_STATUS}"; echo -e "  ${CYAN}4)${RESET} ${BOLD}停止${RESET}挖矿 (Screen)"; echo -e "  ${CYAN}5)${RESET} 查看挖矿窗口 (Screen)";
-    else echo -e "  ${RED}3-5) (不可用) 缺少服务管理工具。${RESET}"; fi
-    echo ""
-    echo -e "  ${PURPLE}6)${RESET} ${BOLD}系统健康检查${RESET} (驾驶舱视图)"
-    echo ""
-    echo -e "  ${YELLOW}0) 退出脚本${RESET}"; echo ""
-    read -r -p "请输入选项编号: " choice
-    case "$choice" in
-        1) install_all ;; 2) set_pubkey ;; 3) start_node ;; 4) stop_node ;; 5) view_logs ;;
-        6) health_check ;; 7) set_runtime_profile ;;
-        0) echo -e "${BLUE}正在停止所有相关进程...${RESET}"; stop_node &>/dev/null; echo "感谢使用！再见。"; exit 0 ;;
-        *) echo -e "${RED}无效选项，请重新输入。${RESET}"; sleep 1 ;;
-    esac
-    done
-}
-
-# --- 脚本入口 ---
-# 确保脚本退出时清理守护进程
-trap "stop_watchdog &>/dev/null; exit" SIGINT SIGTERM
-detect_system_info
-main_menu
+# 主执行流程
+case "$1" in
+    deploy)
+        deploy_ecosystem
+        ;;
+    optimize)
+        resource_scheduler ${2:-balanced}
+        ;;
+    *)
+        echo "Usage: $0 {deploy|optimize}"
+        exit 1
+        ;;
+esac
