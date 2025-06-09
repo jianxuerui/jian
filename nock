@@ -1,8 +1,11 @@
 #!/bin/bash
-# Nockchain Ecosystem Builder v2.3
+# Nockchain Ecosystem Builder v2.4
 # 集成内核代码构建、节点部署、动态资源调度和生态监控功能
 set -xeuo pipefail
 exec > >(tee /var/log/nockchain-builder.log) 2>&1
+
+# 若要跳过 CPU 特性检查，运行前设置： export SKIP_CPU_CHECK=1
+SKIP_CPU_CHECK=${SKIP_CPU_CHECK:-0}
 
 # 初始化环境配置
 export LC_ALL=C.UTF-8
@@ -16,11 +19,10 @@ ColorGreen(){ echo -ne "${green}$1${reset}"; }
 ColorBlue() { echo -ne "${blue}$1${reset}"; }
 ColorRed()  { echo -ne "${red}$1${reset}"; }
 
-# 声明式错误处理
+# 错误处理
 trap 'handle_error $? $LINENO' ERR
 handle_error() {
-    local exit_code=$1
-    local line_no=$2
+    local exit_code=$1 line_no=$2
     echo "[$(date '+%F %T')] ERROR in $0 line $line_no: Exit code $exit_code" \
         >> /var/log/nockchain-error.log
     systemctl stop nockchain-monitor 2>/dev/null || true
@@ -30,53 +32,69 @@ handle_error() {
 # 确保 lsb_release 可用
 ensure_lsb_release() {
     if ! command -v lsb_release &>/dev/null; then
-        echo ">> 安装 lsb_release…" >&2
+        echo ">> installing lsb_release…" >&2
         if command -v apt-get &>/dev/null; then
             apt-get update
             apt-get install -y lsb-release
         elif command -v yum &>/dev/null; then
             yum install -y redhat-lsb-core
         else
-            echo "无支持的包管理器，无法安装 lsb_release" >&2
+            echo "No supported package manager for lsb_release" >&2
             exit 1
         fi
     fi
 }
 
-# 动态资源调速器配置
+# 资源配置
 declare -A RESOURCE_PROFILES=(
     ["beast"]="100 0 0"
     ["balanced"]="70 15 15"
     ["eco"]="50 25 25"
 )
 
-# 系统兼容性检查（支持 Ubuntu, Debian, CentOS/RHEL, Fedora）
+# 系统兼容性检查
 check_compatibility() {
     echo ">> Running compatibility check…" >&2
+    ensure_lsb_release
     local distro version
-    distro=$(lsb_release -si) || return 1
+    distro=$(lsb_release -si)
     version=$(lsb_release -sr)
+
     case $distro in
-        Ubuntu) [[ $version =~ ^(18\.04|20\.04|22\.04)$ ]] || { echo "不支持的Ubuntu版本：$version"; return 1; } ;;
-        Debian) [[ ${version%%.*} -ge 9 ]] || { echo "Debian版本需>=9，当前：$version"; return 1; } ;;
-        CentOS|RedHatEnterpriseServer|Fedora) [[ ${version%%.*} -ge 7 ]] || { echo "RedHat系版本需>=7，当前：$version"; return 1; } ;;
+        Ubuntu) [[ $version =~ ^(18\.04|20\.04|22\.04)$ ]] \
+            || { echo "Unsupported Ubuntu: $version"; return 1; } ;;
+        Debian) [[ ${version%%.*} -ge 9 ]] \
+            || { echo "Debian>=9 required, found $version"; return 1; } ;;
+        CentOS|RedHatEnterpriseServer|Fedora) [[ ${version%%.*} -ge 7 ]] \
+            || { echo "RedHat/CentOS>=7 required, found $version"; return 1; } ;;
         *) echo "Unsupported distro: $distro"; return 1 ;;
     esac
-    echo "OK: distro=$distro version=$version" >&2
+    echo "OK: $distro $version"
 
-    if lspci | grep -qi 'NVIDIA'; then
+    # GPU 检测
+    if lspci | grep -qi NVIDIA; then
         echo "Detected NVIDIA GPU"
     else
         echo "No NVIDIA GPU detected"
     fi
 
-    grep -q 'avx2' /proc/cpuinfo \
-        && echo "支持 AVX2 指令集" \
-        || { echo "AVX2指令集缺失"; return 1; }
-
-    grep -q 'sse4_2' /proc/cpuinfo \
-        && echo "支持 SSE4.2 指令集" \
-        || { echo "SSE4.2指令集缺失"; return 1; }
+    # CPU 指令集检测
+    if [[ $SKIP_CPU_CHECK -eq 1 ]]; then
+        echo "Skipped CPU feature check (SKIP_CPU_CHECK=1)"
+    else
+        # SSE4.2 为必须
+        if grep -q 'sse4_2' /proc/cpuinfo; then
+            echo "Supports SSE4.2"
+        else
+            echo "ERROR: SSE4.2 missing"; return 1
+        fi
+        # AVX2 可选，仅警告
+        if grep -q 'avx2' /proc/cpuinfo; then
+            echo "Supports AVX2"
+        else
+            echo "WARN: AVX2 missing, performance may degrade"
+        fi
+    fi
 }
 
 # 跨发行版依赖安装
@@ -94,7 +112,7 @@ install_dependencies() {
             cmake openssl-devel pkgconfig libuuid-devel \
             libcgroup-tools screen htop ntpdate jq python3-venv curl redhat-lsb-core
     else
-        echo "Error: 无支持的包管理器" >&2
+        echo "Error: no supported package manager" >&2
         exit 1
     fi
 }
@@ -109,22 +127,21 @@ build_hoonc() {
     popd >/dev/null
 }
 
-# 动态资源调度算法
+# 资源调度
 resource_scheduler() {
     local mode=${1:-balanced}
     IFS=' ' read -r cpu_pct mem_high mem_max <<< "${RESOURCE_PROFILES[$mode]}"
     cgcreate -g cpu,memory:/nockchain
-    cgset -r cpu.max=$((cpu_pct * 10000)) nockchain      # cgroup v1 单位为 microseconds
+    cgset -r cpu.max=$((cpu_pct * 10000)) nockchain
     cgset -r memory.high="${mem_high}%" nockchain
     cgset -r memory.max="${mem_max}%" nockchain
-
     local zk_threads=$(( $(nproc) * cpu_pct / 100 ))
     sed -i "s/^zk_threads = .*/zk_threads = $zk_threads/" /etc/nockchain.conf
 }
 
-# 系统服务单元
+# Systemd 服务单元
 setup_daemon() {
-    cat <<EOF > /etc/systemd/system/nockchain-node.service
+    cat <<EOF >/etc/systemd/system/nockchain-node.service
 [Unit]
 Description=Nockchain Full Node
 After=network.target
@@ -146,22 +163,20 @@ EOF
     systemctl daemon-reload
 }
 
-# 自动化部署流程
+# 自动化部署
 deploy_ecosystem() {
-    ensure_lsb_release
     check_compatibility || handle_error 1 $LINENO
 
-    # 阶段1：依赖安装与 Hoon 构建
     install_dependencies
     build_hoonc
 
-    # 阶段2：密钥管理
+    # 钱包密钥
     local wallet_dir="/var/lib/nockchain/wallet"
     mkdir -p "$wallet_dir"
     nockchain-wallet keygen | tee "$wallet_dir/seed.txt"
     chmod 600 "$wallet_dir"/*
 
-    # 阶段3：节点编译
+    # 节点源码编译
     git clone https://github.com/zorp-corp/nockchain /opt/nockchain
     pushd /opt/nockchain >/dev/null
       cargo clean
@@ -169,12 +184,11 @@ deploy_ecosystem() {
       cp target/release/nockchain /usr/local/bin/
     popd >/dev/null
 
-    # 阶段4：服务配置
+    # 服务配置
     id nockchain &>/dev/null || useradd -r -s /usr/sbin/nologin nockchain
     setup_daemon
     systemctl enable --now nockchain-node
 
-    # 阶段5：动态优化
     resource_scheduler balanced
     systemctl start nockchain-monitor
 
@@ -185,20 +199,16 @@ deploy_ecosystem() {
 add_mining_key() {
     read -p "请输入挖矿公钥 URL 或本地路径: " key_src
     local ssh_dir="/home/nockchain/.ssh"
-    mkdir -p "$ssh_dir"
-    chown nockchain:nockchain "$ssh_dir"
-
+    mkdir -p "$ssh_dir" && chown nockchain:nockchain "$ssh_dir"
     if [[ $key_src =~ ^https?:// ]]; then
-      curl -fsSL "$key_src" -o /tmp/miner.pub
+        curl -fsSL "$key_src" -o /tmp/miner.pub
     else
-      cp "$key_src" /tmp/miner.pub
+        cp "$key_src" /tmp/miner.pub
     fi
-
     cat /tmp/miner.pub >> "$ssh_dir/authorized_keys"
     chown nockchain:nockchain "$ssh_dir/authorized_keys"
     chmod 600 "$ssh_dir/authorized_keys"
     rm -f /tmp/miner.pub
-
     ColorGreen "挖矿公钥已添加\n"
 }
 
@@ -210,33 +220,32 @@ start_node_service() {
 
 # 查看日志
 view_logs() {
-    ColorBlue "== Systemd 日志 (last 100 lines) ==\n"
+    ColorBlue "== Systemd 日志 (last 100) ==\n"
     journalctl -u nockchain-node -n 100 --no-pager
     echo
-    ColorBlue "== 构建日志 (last 50 lines) ==\n"
+    ColorBlue "== 构建日志 (last 50) ==\n"
     tail -n 50 /var/log/nockchain-builder.log
 }
 
-# 交互式菜单
+# 交互菜单
 menu() {
     echo -e "
-$(ColorBlue 'Nockchain Ecosystem Builder v2.3 菜单')
+$(ColorBlue 'Nockchain Builder v2.4 菜单')
 $(ColorGreen '1)') 安装并构建
 $(ColorGreen '2)') 添加挖矿公钥
 $(ColorGreen '3)') 启动节点
 $(ColorGreen '4)') 查看日志
 $(ColorGreen '0)') 退出
 "
-    read -p "$(ColorBlue '请选择操作 [0-4]: ')" choice
-    case $choice in
-      1) deploy_ecosystem   ; menu ;;
-      2) add_mining_key     ; menu ;;
-      3) start_node_service ; menu ;;
-      4) view_logs          ; menu ;;
-      0) exit 0 ;;
-      *) ColorRed "无效选项，请重试\n"; menu ;;
+    read -p "$(ColorBlue '请选择 [0-4]: ')" c
+    case $c in
+        1) deploy_ecosystem;; 2) add_mining_key;;
+        3) start_node_service;; 4) view_logs;;
+        0) exit 0;;
+        *) ColorRed "无效选项\n";;
     esac
+    menu
 }
 
-# 脚本入口
+# 启动
 menu
