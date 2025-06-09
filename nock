@@ -1,329 +1,1721 @@
-# 先删除旧文件，避免混淆
-rm -f nock.sh
-
-# 将下面的完整代码保存为 nock.sh
-cat > nock.sh << 'EOF'
 #!/bin/bash
-# Nockchain 编排器 v5.2.3 "亥伯龙" (中文交互版 / 终极兼容性 / 语法修正)
-#
-# 更新日志:
-# v5.2.3: 修正了 manage_node 函数中 case 语句不规范导致的语法错误。
-#         统一了所有 select...case 结构的语法，增强了健壮性。
-# v5.2.2: 修复了 load_or_create_config 函数中不稳定的 eval 命令。
-#
-set -euo pipefail
 
-# --- 脚本元数据 ---
-SCRIPT_VERSION="5.2.3"
+# ========= 色彩定义 =========
+RESET='\033[0m'
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 
-# --- 配置与日志 ---
-CONFIG_FILE="/etc/nockchain/nockchain.conf"
-BUILD_DIR_DEFAULT="$HOME/.nockchain_build"
-mkdir -p "$BUILD_DIR_DEFAULT"
-LOG_FILE="$BUILD_DIR_DEFAULT/nockchain-orchestrator.log"
-ERROR_LOG="$BUILD_DIR_DEFAULT/nockchain-error.log"
+# ========= 项目路径 =========
+NCK_DIR="$HOME/nockchain"
+ENV_FILE="$NCK_DIR/.env"
+BACKUP_DIR="$HOME/nockchain_backups"
+LOG_FILE="$NCK_DIR/nockchain.log"
 
-# --- 设置日志记录 ---
-exec 3>&1
-exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$ERROR_LOG" >&2)
-
-# --- 工具与颜色函数 ---
-green='\e[32m'; blue='\e[34m'; red='\e[31m'; yellow='\e[33m'; reset='\e[0m'
-ColorGreen(){ echo -ne "${green}$1${reset}"; }
-ColorBlue() { echo -ne "${blue}$1${reset}"; }
-ColorRed()  { echo -ne "${red}$1${reset}"; }
-ColorYellow(){ echo -ne "${yellow}$1${reset}"; }
-
-log_info() { echo -e "[$(date '+%F %T')] $(ColorGreen '[信息]') $1" | tee -a /dev/fd/3; }
-log_warn() { echo -e "[$(date '+%F %T')] $(ColorYellow '[警告]') $1" | tee -a /dev/fd/3; }
-log_error() { echo -e "[$(date '+%F %T')] $(ColorRed '[错误]') $1" | tee -a /dev/fd/3 >&2; }
-
-spinner() {
-    local pid=$1 msg="$2"
-    local delay=0.1
-    local spinstr='|/-\'
-    echo -n "$msg "
-    while ps -p $pid > /dev/null; do
-        local temp=${spinstr#?}
-        printf "[%c]" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b"
-    done
-    printf " %b\n" "$(ColorGreen '完成')"
-}
-
-run_with_spinner() {
-    local cmd_to_run="$1"
-    local message="$2"
-    eval "$cmd_to_run" &> "$LOG_FILE" &
-    spinner $! "$message"
-}
-
-handle_error() {
-    local exit_code=$1 line_no=$2
-    log_error "在脚本第 $line_no 行发生致命错误，退出码 $exit_code."
-    ColorRed "\n部署失败！详情请见日志: $LOG_FILE 和 $ERROR_LOG\n" >&2
-    exit "$exit_code"
-}
-trap 'handle_error $? $LINENO' ERR
-
-
-# --- 兼容性核心函数 ---
-
-setup_privilege_escalation() {
-    if [[ $EUID -eq 0 ]]; then
-        SUDO_CMD=""
-        log_info "以 root 用户身份运行，将直接执行需要权限的命令。"
+# ========= 系统兼容性检测 =========
+function detect_system() {
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    if [ -f /etc/debian_version ]; then
+      SYSTEM="debian"
+      PKG_MANAGER="apt"
+    elif [ -f /etc/redhat-release ]; then
+      SYSTEM="redhat"
+      PKG_MANAGER="yum"
     else
-        SUDO_CMD="sudo"
-        log_info "以普通用户身份运行，将在需要时使用 'sudo' 获取权限。"
+      SYSTEM="linux"
+      PKG_MANAGER="apt"
     fi
+  else
+    echo -e "${RED}[-] 不支持的操作系统: $OSTYPE${RESET}"
+    exit 1
+  fi
 }
 
-load_or_create_config() {
-    log_info "加载配置文件: $CONFIG_FILE..."
-    if [ ! -f "$CONFIG_FILE" ]; {
-        log_warn "配置文件不存在，将创建一份默认配置。"
-        $SUDO_CMD mkdir -p /etc/nockchain
-        $SUDO_CMD tee "$CONFIG_FILE" >/dev/null <<'EON'
-# Nockchain Orchestrator 配置文件
-USER="nockchain"
-DATA_DIR="/var/lib/nockchain"
-SOURCE_DIR="/opt/nockchain_src"
-BACKUP_DIR="/var/backups/nockchain"
-NOCKCHAIN_REPO_URL="https://github.com/zorp-corp/nockchain.git"
-EON
-        $SUDO_CMD chmod 644 "$CONFIG_FILE"
-    }
-    
-    declare -g -A CONFIG
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        [[ "$key" =~ ^\s*# || -z "$key" ]] && continue
-        value=$(echo "$value" | sed -e 's/^["]*//' -e 's/["]*$//' -e 's/^[ \t]*//;s/[ \t]*$//')
-        CONFIG["$key"]="$value"
-    done < <($SUDO_CMD cat "$CONFIG_FILE")
+# ========= 横幅 =========
+function show_banner() {
+  clear
+  echo -e "${BOLD}${BLUE}"
+  echo "==============================================="
+  echo "      Nockchain 高级管理助手 v2.0"
+  echo "      Advanced Setup & Management Tool"
+  echo "==============================================="
+  echo -e "${RESET}"
+  echo "📌 作者: K2 节点教程分享"
+  echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
+  echo "🐦 Twitter:  https://x.com/BtcK241918"
+  echo "💻 增强版本: 史诗级功能集成"
+  echo "-----------------------------------------------"
+  echo ""
 }
 
-detect_distro() {
-    if [ -f /etc/os-release ]; then . /etc/os-release; DISTRO=${ID,,}; VER=${VERSION_ID%%.*};
-    elif type lsb_release >/dev/null 2>&1; then DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]'); VER=$(lsb_release -sr | cut -d. -f1);
-    else DISTRO=$( ( lsb_release -is || cat /etc/issue || cat /etc/redhat-release || cat /etc/lsb-release || uname -s ) 2>/dev/null | head -n1 | awk '{print $1}' | tr '[:upper:]' '[:lower:]' ); VER=$( ( lsb_release -rs || cat /etc/issue || cat /etc/redhat-release || cat /etc/lsb-release || uname -r ) 2>/dev/null | head -n1 | grep -oE '[0-9]+' | head -n1); fi
-    log_info "检测到系统发行版: $DISTRO, 版本: $VER"
+function cd_nck_dir() {
+  if [ -d "$NCK_DIR" ]; then
+    cd "$NCK_DIR" || exit 1
+  else
+    echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
+    exit 1
+  fi
 }
 
-install_dependencies() {
-    log_info "正在为 $DISTRO 系统解析并安装依赖..."
-    local pkg_manager=""; if command -v apt-get &>/dev/null; then pkg_manager="apt"; elif command -v dnf &>/dev/null; then pkg_manager="dnf"; elif command -v yum &>/dev/null; then pkg_manager="yum"; else log_error "不支持的包管理器。" && exit 1; fi
-    declare -A pkg_map=( [build_essentials]="build-essential gcc-c++ make" [clang]="clang-15 clang" [llvm_dev]="llvm-15-dev llvm-devel" [cmake]="cmake cmake" [openssl_dev]="libssl-dev openssl-devel" [pkg_config]="pkg-config pkgconfig" [uuid_dev]="uuid-dev libuuid-devel" [git]="git git" [utils]="screen htop jq curl unzip tor fail2ban" [time_sync]="ntpdate chrony" [python_venv]="python3-venv python3-devel" )
-    local packages_to_install=(); for generic_name in "${!pkg_map[@]}"; do local pkg_string; case $DISTRO in ubuntu|debian) pkg_string=$(echo "${pkg_map[$generic_name]}" | cut -d' ' -f1);; centos|rhel|alma|rocky|fedora) pkg_string=$(echo "${pkg_map[$generic_name]}" | cut -d' ' -f2-);; *) log_error "无法为发行版 $DISTRO 确定软件包。" && exit 1 ;; esac; if [[ -n "$pkg_string" ]]; then packages_to_install+=($pkg_string); fi; done
-    case $pkg_manager in apt) $SUDO_CMD apt-get update; $SUDO_CMD apt-get install -y software-properties-common wget; wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | $SUDO_CMD apt-key add -; $SUDO_CMD add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-15 main"; $SUDO_CMD apt-get update; $SUDO_CMD apt-get install -y --no-install-recommends "${packages_to_install[@]}";; dnf|yum) $SUDO_CMD "$pkg_manager" install -y epel-release; local builder_repo_id=$($SUDO_CMD "$pkg_manager" repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1); if [[ -n "$builder_repo_id" ]]; then $SUDO_CMD "$pkg_manager" config-manager --set-enabled "$builder_repo_id"; else log_warn "未找到开发工具仓库 (powertools/crb)，部分软件包可能安装失败。"; fi; $SUDO_CMD "$pkg_manager" install -y "${packages_to_install[@]}";; esac
-    log_info "依赖项安装成功。"
-}
-
-setup_compiler_env() { log_info "正在探测并设置编译器环境..."; COMPILER_ENV_CMD=""; if [ -d /opt/rh ]; then local scl_enable_path=$(find /opt/rh -type f -path "*/gcc-toolset-*/enable" | sort -V | tail -n 1); if [ -n "$scl_enable_path" ]; then log_info "检测到 SCL 环境: $scl_enable_path。将在编译和运行时加载。"; COMPILER_ENV_CMD="source $scl_enable_path && "; return; fi; fi; export CC=$(command -v clang-15 || command -v clang || echo "gcc"); export CXX=$(command -v clang++-15 || command -v clang++ || echo "g++"); log_info "将使用 CC=$CC 和 CXX=$CXX 进行编译。"; }
-robust_clone() { local repo_url=$1; local dest_dir=$2; local base_repo=$(echo "$repo_url" | sed -e 's/https:\/\///' -e 's/http:\/\///'); declare -a mirrors=("https://kgithub.com" "https://ghproxy.com" "https://hub.fale.io" "https://github.com"); log_info "正在克隆 $base_repo ..."; for mirror in "${mirrors[@]}"; do local url="$mirror/$base_repo"; log_info "正在尝试从 $url 克隆..."; if git clone --depth 1 "$url" "$dest_dir"; then log_info "从 $mirror 克隆成功。"; return 0; fi; log_warn "从 $mirror 克隆失败。正在尝试下一个镜像..."; rm -rf "$dest_dir"; done; log_error "从所有可用镜像克隆仓库均失败。"; exit 1; }
-
-# --- 安装与管理核心逻辑 ---
-
-install_nockchain_node() {
-    local node_type=$1
-    log_info "正在构建 Nockchain 套件 (节点类型: $node_type)..."
-    
-    robust_clone "${CONFIG[NOCKCHAIN_REPO_URL]}" "${BUILD_DIR_DEFAULT}/nockchain"
-    
-    pushd "${BUILD_DIR_DEFAULT}/nockchain" >/dev/null
-      run_with_spinner "$COMPILER_ENV_CMD cargo build --release" "正在编译 Nockchain (这可能需要很长时间)..."
-      $SUDO_CMD cp target/release/nockchain /usr/local/bin/
-    popd >/dev/null
-    rm -rf "${BUILD_DIR_DEFAULT}/nockchain"
-    log_info "Nockchain 套件安装成功。"
-}
-
-setup_daemon() {
-    local node_type=$1
-    local exec_start_args="--base-path ${CONFIG[DATA_DIR]} --port 30303 --rpc-port 9933"
-    local exec_cmd="/usr/local/bin/nockchain $exec_start_args"
-
-    if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
-        log_info "检测到 systemd，正在配置 systemd 服务..."
-        local full_exec_cmd="bash -c '$COMPILER_ENV_CMD exec $exec_cmd'"
-        $SUDO_CMD tee /etc/systemd/system/nockchain-node.service >/dev/null <<EON
-[Unit]
-Description=Nockchain Node
-After=network-online.target
-[Service]
-ExecStart=$full_exec_cmd
-Restart=always
-User=${CONFIG[USER]}
-[Install]
-WantedBy=multi-user.target
-EON
-        $SUDO_CMD systemctl daemon-reload
-        $SUDO_CMD systemctl enable nockchain-node.service
-    else
-        log_warn "未检测到 systemd。将创建一个基于 'screen' 的启动脚本。"
-        local start_script_path="/usr/local/bin/start-nockchain.sh"
-        $SUDO_CMD tee "$start_script_path" > /dev/null <<EON
-#!/bin/bash
-cd /
-screen -dmS nockchain bash -c '$COMPILER_ENV_CMD exec $exec_cmd'
-echo "Nockchain 节点已在名为 'nockchain' 的 screen 会话中启动。"
-echo "使用 'screen -r nockchain' 连接到会话。"
-EON
-        $SUDO_CMD chmod +x "$start_script_path"
-        log_info "要启动节点，请运行: sudo start-nockchain.sh"
+# ========= 依赖检查增强 =========
+function check_dependencies() {
+  echo -e "${BLUE}[*] 检查系统依赖...${RESET}"
+  
+  local missing_deps=()
+  local deps=("curl" "git" "make" "gcc" "cmake")
+  
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing_deps+=("$dep")
     fi
+  done
+  
+  if [ ${#missing_deps[@]} -ne 0 ]; then
+    echo -e "${YELLOW}[!] 缺少依赖: ${missing_deps[*]}${RESET}"
+    return 1
+  else
+    echo -e "${GREEN}[+] 所有依赖已满足${RESET}"
+    return 0
+  fi
 }
 
-manage_node() {
-    PS3="$(ColorYellow '请选择节点操作: ')"
-    select action in "启动节点" "停止节点" "重启节点" "查看状态" "返回主菜单"; do
-        case $action in
-            "启动节点")
-                $SUDO_CMD systemctl start nockchain-node.service
-                break
-                ;;
-            "停止节点")
-                $SUDO_CMD systemctl stop nockchain-node.service
-                break
-                ;;
-            "重启节点")
-                $SUDO_CMD systemctl restart nockchain-node.service
-                break
-                ;;
-            "查看状态")
-                $SUDO_CMD systemctl status nockchain-node.service
-                break
-                ;;
-            "返回主菜单")
-                break
-                ;;
-        esac
-    done
+function check_rust_installation() {
+  echo -e "${BLUE}[*] 检查 Rust 安装...${RESET}"
+  
+  if command -v cargo &>/dev/null; then
+    local rust_version=$(rustc --version 2>/dev/null || echo "未知")
+    echo -e "${GREEN}[+] Rust 已安装: $rust_version${RESET}"
+    return 0
+  else
+    echo -e "${YELLOW}[!] Rust 未安装${RESET}"
+    return 1
+  fi
 }
 
-add_mining_key() {
-    log_info "即将为用户 '${CONFIG[USER]}' 添加挖矿/验证者公钥..."
-    read -p "请输入公钥的 URL 或本地文件路径: " key_src
-    
-    local ssh_dir="${CONFIG[DATA_DIR]}/.ssh"
-    log_info "将在 '$ssh_dir' 目录配置 authorized_keys..."
-    
-    $SUDO_CMD mkdir -p "$ssh_dir"
-    $SUDO_CMD chown "${CONFIG[USER]}:${CONFIG[USER]}" "$ssh_dir"
-    $SUDO_CMD chmod 700 "$ssh_dir"
-    
-    local tmp_key_file="/tmp/nockchain_miner_key.pub"
-    if [[ $key_src =~ ^https?:// ]]; then
-        curl -fsSL "$key_src" -o "$tmp_key_file"
-    elif [ -f "$key_src" ]; then
-        cp "$key_src" "$tmp_key_file"
-    else
-        log_error "错误：提供的路径 '$key_src' 不是一个有效的 URL 或本地文件。"; return 1;
+function check_disk_space() {
+  local available_gb=$(df "$HOME" | awk 'NR==2 {printf "%.1f", $4/1024/1024}')
+  local required_gb=10
+  
+  if (( $(echo "$available_gb > $required_gb" | bc -l) )); then
+    echo -e "${GREEN}[+] 磁盘空间充足: ${available_gb}GB 可用${RESET}"
+    return 0
+  else
+    echo -e "${RED}[-] 磁盘空间不足: 需要至少 ${required_gb}GB，当前可用 ${available_gb}GB${RESET}"
+    return 1
+  fi
+}
+
+function check_memory_usage() {
+  local mem_usage=$(free | awk '/^Mem:/ {printf "%.1f", ($3/$2)*100}')
+  local mem_available=$(free -h | awk '/^Mem:/ {print $7}')
+  
+  echo "内存使用率: ${mem_usage}% (可用: ${mem_available})"
+  
+  if (( $(echo "$mem_usage > 90" | bc -l) )); then
+    echo -e "${YELLOW}[!] 内存使用率过高: ${mem_usage}%${RESET}"
+    return 1
+  else
+    echo -e "${GREEN}[+] 内存使用正常${RESET}"
+    return 0
+  fi
+}
+
+function check_port_conflicts() {
+  local ports=("8545" "30303")
+  local conflicts=()
+  
+  for port in "${ports[@]}"; do
+    if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+      conflicts+=("$port")
     fi
-    
-    $SUDO_CMD bash -c "cat '$tmp_key_file' >> '$ssh_dir/authorized_keys'"
-    $SUDO_CMD chown "${CONFIG[USER]}:${CONFIG[USER]}" "$ssh_dir/authorized_keys"
-    $SUDO_CMD chmod 600 "$ssh_dir/authorized_keys"
-    rm -f "$tmp_key_file"
-    
-    log_info "$(ColorGreen '公钥已成功添加！')"
+  done
+  
+  if [ ${#conflicts[@]} -ne 0 ]; then
+    echo -e "${YELLOW}[!] 端口冲突: ${conflicts[*]}${RESET}"
+    return 1
+  else
+    echo -e "${GREEN}[+] 端口可用${RESET}"
+    return 0
+  fi
 }
 
-
-# --- 中文交互菜单 ---
-show_banner() {
-    ColorBlue '
-    _   __         _                    _           _             
-   / | / /  ___   | | __   ___    ___  | |_   _ __ (_)  ___   ___ 
-  /  |/ /  / _ \  | |/ /  / _ \  / __| | __| |  __| | |/ __| / __|
- / /|  /  | (_) | |   <  | (_) | \__ \ | |_  | |    | | (__  \__ \
-/_/ |_/    \___/  |_|\_\  \___/  |___/  \__| |_|    |_| \___| |___/
-           编排器 v5.2.3 "亥伯龙" (中文版)
-'
+# ========= 系统监控模块 =========
+function system_health_check() {
+  echo -e "${CYAN}========== 系统健康检查 ==========${RESET}"
+  
+  echo -e "${BOLD}系统信息:${RESET}"
+  echo "主机名: $(hostname)"
+  echo "内核: $(uname -r)"
+  echo "发行版: $(lsb_release -d 2>/dev/null | cut -f2 || cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+  
+  # CPU信息（兼容性处理）
+  if command -v lscpu &>/dev/null; then
+    echo "CPU: $(lscpu | grep 'Model name' | awk -F: '{print $2}' | xargs)"
+  else
+    echo "CPU: $(cat /proc/cpuinfo | grep 'model name' | head -1 | awk -F: '{print $2}' | xargs)"
+  fi
+  
+  echo "内存: $(free -h | awk '/^Mem:/ {printf "%s / %s (%.1f%%)", $3, $2, ($3/$2)*100}')"
+  echo "磁盘: $(df -h / | awk '/^\// {printf "%s / %s (%s)", $3, $2, $5}')"
+  echo "负载: $(uptime | awk -F'load average:' '{print $2}')"
+  
+  echo -e "\n${BOLD}服务状态:${RESET}"
+  check_node_status
+  check_dependencies
+  check_disk_space
+  check_memory_usage
+  check_port_conflicts
 }
 
-main_menu() {
+function check_node_status() {
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点服务: 运行中${RESET}"
+    
+    # 检查进程详情
+    local pid=$(screen -list | grep nockchain | awk '{print $1}' | cut -d. -f1)
+    if [ -n "$pid" ]; then
+      local mem_usage=$(ps -p "$pid" -o %mem --no-headers 2>/dev/null | xargs)
+      local cpu_usage=$(ps -p "$pid" -o %cpu --no-headers 2>/dev/null | xargs)
+      echo "  进程ID: $pid, CPU: ${cpu_usage}%, 内存: ${mem_usage}%"
+    fi
+  else
+    echo -e "${RED}[-] 节点服务: 未运行${RESET}"
+  fi
+}
+
+function performance_dashboard() {
+  echo -e "${CYAN}[*] 启动实时性能监控 (按 Ctrl+C 退出)...${RESET}"
+  
+  trap 'echo -e "\n${YELLOW}[!] 退出监控${RESET}"; return' INT
+  
+  while true; do
     clear
     show_banner
-    local status
-    if command -v systemctl &>/dev/null && systemctl is-active nockchain-node.service &>/dev/null; then
-        status="$(ColorGreen '运行中')"
-    else
-        status="$(ColorRed '已停止')"
-    fi
-    echo -e "节点状态: $status\n"
+    echo -e "${CYAN}========== 实时性能监控 ==========${RESET}"
+    echo "刷新时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "运行时间: $(uptime | awk '{print $3,$4}' | sed 's/,//')"
     
-    PS3="$(ColorBlue '请输入您的选择 [1-5]: ')"
-    COLUMNS=12
-    select opt in \
-        "安装与组件管理" \
-        "节点管理 (启动/停止/状态)" \
-        "添加挖矿/验证者公钥" \
-        "查看实时日志" \
-        "退出脚本"; do
-        case $opt in
-            "安装与组件管理")
-                install_dependencies
-                PS3="选择节点类型: "
-                select type in "验证者" "全节点"; do
-                    install_nockchain_node "$type"
-                    setup_daemon "$type"
-                    break
-                done
-                break
-                ;;
-            "节点管理 (启动/停止/状态)")
-                manage_node
-                break
-                ;;
-            "添加挖矿/验证者公钥")
-                add_mining_key
-                break
-                ;;
-            "查看实时日志")
-                $SUDO_CMD journalctl -u nockchain-node -n 100 -f
-                break
-                ;;
-            "退出脚本")
-                exit 0
-                ;;
-            *)
-                echo "无效选项 $REPLY"
-                ;;
-        esac
-    done
+    # CPU信息
+    if command -v top &>/dev/null; then
+      local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | sed 's/%us,//' 2>/dev/null || echo "N/A")
+      echo "CPU使用: $cpu_usage"
+    fi
+    
+    # 内存信息
+    echo "内存使用: $(free | awk '/^Mem:/ {printf "%.1f%% (%s/%s)", ($3/$2)*100, $3, $2}')"
+    
+    # 磁盘IO（兼容性处理）
+    if command -v iostat &>/dev/null; then
+      echo "磁盘I/O: $(iostat -d 1 1 2>/dev/null | tail -1 | awk '{print "读:"$3"KB/s 写:"$4"KB/s"}' || echo "N/A")"
+    else
+      echo "磁盘I/O: 需要安装 sysstat 包"
+    fi
+    
+    # 网络连接
+    local connections=$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l || echo "0")
+    echo "网络连接: $connections 个活跃连接"
+    
+    # 节点状态
+    if screen -list | grep -qw "nockchain"; then
+      echo -e "节点状态: ${GREEN}运行中${RESET}"
+    else
+      echo -e "节点状态: ${RED}已停止${RESET}"
+    fi
+    
+    echo ""
+    echo "下次刷新: 5秒后..."
+    sleep 5
+  done
 }
 
-
-# --- 脚本入口 ---
-
-# 1. 前置环境检查
-if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
-    echo "错误: 此脚本需要 Bash 4.0 或更高版本以支持关联数组。请升级您的 shell。" >&2
-    exit 1
-fi
-for cmd in git curl jq unzip bc; do
-    if ! command -v $cmd &> /dev/null; then
-        echo "错误: 必需命令 '$cmd' 未找到。请先安装它 (例如: sudo apt install $cmd 或 sudo dnf install $cmd)。" >&2
-        exit 1
+# ========= 日志分析工具 =========
+function advanced_log_analysis() {
+  echo -e "${CYAN}========== 高级日志分析 ==========${RESET}"
+  
+  if [ ! -f "$LOG_FILE" ]; then
+    echo -e "${YELLOW}[!] 日志文件不存在，尝试查找其他日志...${RESET}"
+    
+    # 尝试在screen会话中查找日志
+    if screen -list | grep -qw "nockchain"; then
+      echo "检测到运行中的节点，日志可能在screen会话中"
     fi
-done
+    pause_and_return
+    return
+  fi
+  
+  echo -e "${BOLD}日志文件信息:${RESET}"
+  echo "文件大小: $(du -h "$LOG_FILE" | cut -f1)"
+  echo "最后修改: $(stat -c %y "$LOG_FILE" 2>/dev/null || stat -f %Sm "$LOG_FILE")"
+  echo ""
+  
+  echo -e "${BOLD}错误统计 (最近10条):${RESET}"
+  grep -i "error\|fail\|panic\|fatal" "$LOG_FILE" 2>/dev/null | tail -10 || echo "未发现错误"
+  echo ""
+  
+  echo -e "${BOLD}警告统计:${RESET}"
+  local warning_count=$(grep -ic "warn" "$LOG_FILE" 2>/dev/null || echo "0")
+  echo "警告总数: $warning_count"
+  echo ""
+  
+  echo -e "${BOLD}连接统计:${RESET}"
+  local peer_connections=$(grep -c "peer\|connection" "$LOG_FILE" 2>/dev/null || echo "0")
+  echo "连接事件: $peer_connections 次"
+  echo ""
+  
+  echo -e "${BOLD}最近活动 (最后20行):${RESET}"
+  tail -20 "$LOG_FILE" 2>/dev/null || echo "无法读取日志"
+  
+  pause_and_return
+}
 
-# 2. 设置权限提升命令
-setup_privilege_escalation
+function log_rotation() {
+  echo -e "${BLUE}[*] 执行日志轮转...${RESET}"
+  
+  if [ ! -f "$LOG_FILE" ]; then
+    echo -e "${YELLOW}[!] 日志文件不存在${RESET}"
+    return
+  fi
+  
+  # 检查文件大小（100MB = 104857600 bytes）
+  local file_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null || echo "0")
+  
+  if [ "$file_size" -gt 104857600 ]; then
+    echo "日志文件过大 ($(($file_size/1024/1024))MB)，执行轮转..."
+    
+    # 备份当前日志
+    mv "$LOG_FILE" "${LOG_FILE}.$(date +%Y%m%d_%H%M%S)"
+    
+    # 压缩旧日志
+    gzip "${LOG_FILE}.$(date +%Y%m%d_%H%M%S)" &
+    
+    # 创建新日志文件
+    touch "$LOG_FILE"
+    
+    echo -e "${GREEN}[+] 日志轮转完成${RESET}"
+  else
+    echo -e "${GREEN}[+] 日志文件大小正常 ($(($file_size/1024/1024))MB)${RESET}"
+  fi
+}
 
-# 3. 加载配置
-load_or_create_config
+# ========= 备份与恢复系统 =========
+function backup_management() {
+  echo -e "${CYAN}========== 备份管理 ==========${RESET}"
+  echo "1) 创建完整备份"
+  echo "2) 创建配置备份"
+  echo "3) 列出备份文件"
+  echo "4) 恢复备份"
+  echo "5) 设置自动备份"
+  echo "6) 清理旧备份"
+  echo "0) 返回主菜单"
+  echo ""
+  read -p "请选择: " backup_choice
+  
+  case "$backup_choice" in
+    1) create_full_backup ;;
+    2) create_config_backup ;;
+    3) list_backups ;;
+    4) restore_backup ;;
+    5) setup_auto_backup ;;
+    6) cleanup_old_backups ;;
+    0) main_menu ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
 
-# 4. 探测系统环境
-detect_distro
-setup_compiler_env
-
-# 5. 循环进入主菜单
-while true; do
-    main_menu
-    read -p $'\n按回车键返回主菜单...'
-done
+function create_full_backup() {
+  echo -e "${BLUE}[*] 创建完整备份...${RESET}"
+  
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_path="$BACKUP_DIR/full_backup_$timestamp"
+  
+  mkdir -p "$backup_path"
+  
+  # 备份项目目录
+  if [ -d "$NCK_DIR" ]; then
+    echo "备份项目文件..."
+    cp -r "$NCK_DIR" "$backup_path/nockchain" 2>/dev/null || true
+  fi
+  
+  # 备份钱包数据
+  if [ -d "$HOME/.nockchain" ]; then
+    echo "备份钱包数据..."
+    cp -r "$HOME/.nockchain" "$backup_path/wallet_data" 2>/dev/null || true
+  fi
+  
+  # 创建备份信息文件
+  cat > "$backup_path/backup_info.txt" << EOF
+备份类型: 完整备份
+备份时间: $(date)
+节点版本: $(cd "$NCK_DIR" && git rev-parse HEAD 2>/dev/null || echo "未知")
+系统信息: $(uname -a)
+备份大小: $(du -sh "$backup_path" | cut -f1)
 EOF
+  
+  # 压缩备份
+  echo "压缩备份文件..."
+  tar -czf "${backup_path}.tar.gz" -C "$BACKUP_DIR" "$(basename "$backup_path")" 2>/dev/null
+  rm -rf "$backup_path"
+  
+  if [ -f "${backup_path}.tar.gz" ]; then
+    echo -e "${GREEN}[+] 完整备份已创建: ${backup_path}.tar.gz${RESET}"
+    echo "备份大小: $(du -sh "${backup_path}.tar.gz" | cut -f1)"
+  else
+    echo -e "${RED}[-] 备份创建失败${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function create_config_backup() {
+  echo -e "${BLUE}[*] 创建配置备份...${RESET}"
+  
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_path="$BACKUP_DIR/config_backup_$timestamp"
+  
+  mkdir -p "$backup_path"
+  
+  # 备份配置文件
+  [ -f "$ENV_FILE" ] && cp "$ENV_FILE" "$backup_path/"
+  [ -f "$NCK_DIR/Cargo.toml" ] && cp "$NCK_DIR/Cargo.toml" "$backup_path/"
+  
+  # 创建备份清单
+  cat > "$backup_path/backup_info.txt" << EOF
+备份类型: 配置备份
+备份时间: $(date)
+包含文件: .env, Cargo.toml
+EOF
+  
+  tar -czf "${backup_path}.tar.gz" -C "$BACKUP_DIR" "$(basename "$backup_path")"
+  rm -rf "$backup_path"
+  
+  echo -e "${GREEN}[+] 配置备份已创建: ${backup_path}.tar.gz${RESET}"
+  pause_and_return
+}
+
+function list_backups() {
+  echo -e "${CYAN}========== 备份列表 ==========${RESET}"
+  
+  if [ ! -d "$BACKUP_DIR" ]; then
+    echo -e "${YELLOW}[!] 备份目录不存在${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  local backups=($(find "$BACKUP_DIR" -name "*.tar.gz" -type f 2>/dev/null | sort -r))
+  
+  if [ ${#backups[@]} -eq 0 ]; then
+    echo -e "${YELLOW}[!] 没有找到备份文件${RESET}"
+  else
+    echo "找到 ${#backups[@]} 个备份文件:"
+    echo ""
+    for i in "${!backups[@]}"; do
+      local backup="${backups[$i]}"
+      local size=$(du -sh "$backup" | cut -f1)
+      local date=$(stat -c %y "$backup" 2>/dev/null | cut -d' ' -f1 || stat -f %Sm "$backup" | cut -d' ' -f1)
+      echo "$((i+1)). $(basename "$backup")"
+      echo "   大小: $size, 日期: $date"
+      echo ""
+    done
+  fi
+  
+  pause_and_return
+}
+
+function setup_auto_backup() {
+  echo -e "${BLUE}[*] 设置自动备份...${RESET}"
+  
+  # 创建备份脚本
+  cat > "$NCK_DIR/auto_backup.sh" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+cd "$SCRIPT_DIR"
+./nockchain_manager.sh auto_backup_task
+EOF
+  
+  chmod +x "$NCK_DIR/auto_backup.sh"
+  
+  echo "选择备份频率:"
+  echo "1) 每日备份 (凌晨2点)"
+  echo "2) 每周备份 (周日凌晨2点)"
+  echo "3) 自定义时间"
+  
+  read -p "请选择: " freq_choice
+  
+  local cron_job=""
+  case "$freq_choice" in
+    1) cron_job="0 2 * * * $NCK_DIR/auto_backup.sh" ;;
+    2) cron_job="0 2 * * 0 $NCK_DIR/auto_backup.sh" ;;
+    3) 
+      read -p "请输入cron表达式 (如: 0 2 * * *): " custom_cron
+      cron_job="$custom_cron $NCK_DIR/auto_backup.sh"
+      ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return; return ;;
+  esac
+  
+  # 添加到crontab
+  (crontab -l 2>/dev/null | grep -v "auto_backup.sh"; echo "$cron_job") | crontab -
+  
+  echo -e "${GREEN}[+] 自动备份已设置${RESET}"
+  echo "备份时间: $cron_job"
+  
+  pause_and_return
+}
+
+function auto_backup_task() {
+  # 静默执行备份任务
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_path="$BACKUP_DIR/auto_backup_$timestamp.tar.gz"
+  
+  mkdir -p "$BACKUP_DIR"
+  
+  # 创建临时备份目录
+  local temp_dir="$BACKUP_DIR/temp_$$"
+  mkdir -p "$temp_dir"
+  
+  # 备份关键文件
+  [ -f "$ENV_FILE" ] && cp "$ENV_FILE" "$temp_dir/"
+  [ -d "$HOME/.nockchain" ] && cp -r "$HOME/.nockchain" "$temp_dir/" 2>/dev/null
+  
+  # 压缩备份
+  tar -czf "$backup_path" -C "$BACKUP_DIR" "$(basename "$temp_dir")" 2>/dev/null
+  rm -rf "$temp_dir"
+  
+  # 清理超过30天的备份
+  find "$BACKUP_DIR" -name "auto_backup_*.tar.gz" -mtime +30 -delete 2>/dev/null
+  
+  echo "$(date): 自动备份完成 - $backup_path" >> "$NCK_DIR/backup.log"
+}
+
+# ========= 网络诊断模块 =========
+function network_diagnostics() {
+  echo -e "${CYAN}========== 网络诊断 ==========${RESET}"
+  
+  echo -e "${BOLD}端口状态检查:${RESET}"
+  local important_ports=("8545" "30303")
+  for port in "${important_ports[@]}"; do
+    if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+      echo -e "端口 $port: ${GREEN}已占用${RESET}"
+      netstat -tlnp 2>/dev/null | grep ":$port " | head -1
+    else
+      echo -e "端口 $port: ${YELLOW}空闲${RESET}"
+    fi
+  done
+  echo ""
+  
+  echo -e "${BOLD}网络连接统计:${RESET}"
+  local total_connections=$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l)
+  echo "活跃连接数: $total_connections"
+  echo ""
+  
+  echo -e "${BOLD}防火墙状态:${RESET}"
+  if command -v ufw &>/dev/null; then
+    sudo ufw status 2>/dev/null || echo "UFW未安装或未启用"
+  elif command -v iptables &>/dev/null; then
+    echo "IPTables规则数: $(iptables -L INPUT 2>/dev/null | grep -c "^ACCEPT\|^DROP\|^REJECT" || echo "0")"
+  else
+    echo "未检测到防火墙配置"
+  fi
+  echo ""
+  
+  echo -e "${BOLD}网络连通性测试:${RESET}"
+  echo "测试外网连接..."
+  if ping -c 3 -W 3 8.8.8.8 >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] 外网连接正常${RESET}"
+  else
+    echo -e "${RED}[-] 外网连接异常${RESET}"
+  fi
+  
+  echo "测试DNS解析..."
+  if nslookup google.com >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] DNS解析正常${RESET}"
+  else
+    echo -e "${RED}[-] DNS解析异常${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function optimize_network() {
+  echo -e "${BLUE}[*] 网络优化...${RESET}"
+  
+  echo "正在优化网络参数..."
+  
+  # 备份原始配置
+  [ ! -f /etc/sysctl.conf.backup ] && sudo cp /etc/sysctl.conf /etc/sysctl.conf.backup
+  
+  # 添加网络优化参数
+  sudo tee -a /etc/sysctl.conf > /dev/null << 'EOF'
+
+# Nockchain网络优化参数
+net.core.rmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_default = 262144
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 65536 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.netdev_max_backlog = 5000
+net.ipv4.tcp_congestion_control = bbr
+EOF
+  
+  # 应用配置
+  sudo sysctl -p >/dev/null 2>&1
+  
+  echo -e "${GREEN}[+] 网络参数优化完成${RESET}"
+  echo "优化内容:"
+  echo "- 增大网络缓冲区"
+  echo "- 启用BBR拥塞控制"
+  echo "- 优化TCP参数"
+  
+  pause_and_return
+}
+
+# ========= 智能故障诊断 =========
+function smart_diagnostics() {
+  echo -e "${CYAN}========== 智能故障诊断 ==========${RESET}"
+  
+  local issues=()
+  
+  echo "正在执行全面系统检查..."
+  echo ""
+  
+  # 检查Rust环境
+  if ! check_rust_installation >/dev/null 2>&1; then
+    issues+=("Rust未正确安装")
+  fi
+  
+  # 检查依赖
+  if ! check_dependencies >/dev/null 2>&1; then
+    issues+=("系统依赖缺失")
+  fi
+  
+  # 检查磁盘空间
+  if ! check_disk_space >/dev/null 2>&1; then
+    issues+=("磁盘空间不足")
+  fi
+  
+  # 检查内存使用
+  if ! check_memory_usage >/dev/null 2>&1; then
+    issues+=("内存使用率过高")
+  fi
+  
+  # 检查端口冲突
+  if ! check_port_conflicts >/dev/null 2>&1; then
+    issues+=("端口被占用")
+  fi
+  
+  # 检查项目目录
+  if [ ! -d "$NCK_DIR" ]; then
+    issues+=("项目目录不存在")
+  fi
+  
+  # 检查配置文件
+  if [ ! -f "$ENV_FILE" ]; then
+    issues+=("配置文件缺失")
+  fi
+  
+  # 生成诊断报告
+  echo -e "${BOLD}诊断结果:${RESET}"
+  if [ ${#issues[@]} -eq 0 ]; then
+    echo -e "${GREEN}[+] 系统状态良好，未发现问题${RESET}"
+  else
+    echo -e "${RED}[-] 发现 ${#issues[@]} 个问题:${RESET}"
+    for issue in "${issues[@]}"; do
+      echo "  • $issue"
+    done
+    echo ""
+    
+    read -p "是否尝试自动修复这些问题? (y/n): " auto_fix
+    if [[ "$auto_fix" =~ ^[Yy]$ ]]; then
+      auto_fix_issues "${issues[@]}"
+    fi
+  fi
+  
+  pause_and_return
+}
+
+function auto_fix_issues() {
+  local issues=("$@")
+  echo -e "${BLUE}[*] 尝试自动修复问题...${RESET}"
+  
+  for issue in "${issues[@]}"; do
+    echo "修复: $issue"
+    case "$issue" in
+      "Rust未正确安装")
+        install_rust
+        ;;
+      "系统依赖缺失")
+        install_system_dependencies
+        ;;
+      "磁盘空间不足")
+        cleanup_disk_space
+        ;;
+      "内存使用率过高")
+        cleanup_memory
+        ;;
+      "项目目录不存在")
+        clone_repository
+        ;;
+      "配置文件缺失")
+        create_default_config
+        ;;
+      *)
+        echo "  无法自动修复此问题，请手动处理"
+        ;;
+    esac
+  done
+}
+
+function cleanup_disk_space() {
+  echo "清理磁盘空间..."
+  
+  # 清理系统缓存
+  sudo apt-get autoremove -y >/dev/null 2>&1
+  sudo apt-get autoclean >/dev/null 2>&1
+  
+  # 清理日志文件
+  find "$NCK_DIR" -name "*.log" -size +50M -exec truncate -s 10M {} \; 2>/dev/null
+  
+  # 清理旧的备份文件
+  find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete 2>/dev/null
+  
+  echo -e "${GREEN}[+] 磁盘清理完成${RESET}"
+}
+
+function cleanup_memory() {
+  echo "清理内存..."
+  
+  # 清理页面缓存
+  sudo sync
+  echo 1 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1
+  
+  echo -e "${GREEN}[+] 内存清理完成${RESET}"
+}
+
+# ========= 配置管理器 =========
+function config_manager() {
+  echo -e "${CYAN}========== 配置管理器 ==========${RESET}"
+  echo "1) 查看当前配置"
+  echo "2) 创建主网配置"
+  echo "3) 创建测试网配置"
+  echo "4) 创建开发配置"
+  echo "5) 自定义配置向导"
+  echo "6) 备份当前配置"
+  echo "7) 恢复配置"
+  echo "0) 返回主菜单"
+  echo ""
+  read -p "请选择: " config_choice
+  
+  case "$config_choice" in
+    1) view_current_config ;;
+    2) create_mainnet_config ;;
+    3) create_testnet_config ;;
+    4) create_dev_config ;;
+    5) custom_config_wizard ;;
+    6) backup_config ;;
+    7) restore_config ;;
+    0) main_menu ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function view_current_config() {
+  echo -e "${BLUE}[*] 当前配置:${RESET}"
+  
+  if [ -f "$ENV_FILE" ]; then
+    echo "配置文件: $ENV_FILE"
+    echo "文件大小: $(du -h "$ENV_FILE" | cut -f1)"
+    echo "修改时间: $(stat -c %y "$ENV_FILE" 2>/dev/null || stat -f %Sm "$ENV_FILE")"
+    echo ""
+    echo -e "${BOLD}配置内容:${RESET}"
+    cat "$ENV_FILE"
+  else
+    echo -e "${YELLOW}[!] 配置文件不存在${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function create_mainnet_config() {
+  echo -e "${BLUE}[*] 创建主网配置...${RESET}"
+  
+  cat > "$ENV_FILE" << 'EOF'
+# Nockchain 主网配置
+NETWORK=mainnet
+RPC_PORT=8545
+P2P_PORT=30303
+MINING_ENABLED=true
+LOG_LEVEL=info
+MAX_PEERS=50
+SYNC_MODE=full
+
+# 挖矿配置
+MINING_PUBKEY=
+MINING_THREADS=auto
+
+# 网络配置
+BOOTNODES=
+NAT=auto
+
+# 存储配置
+DATA_DIR=./data
+CACHE_SIZE=1024
+EOF
+  
+  echo -e "${GREEN}[+] 主网配置已创建${RESET}"
+  echo -e "${YELLOW}[!] 请设置 MINING_PUBKEY 参数${RESET}"
+  
+  pause_and_return
+}
+
+function create_testnet_config() {
+  echo -e "${BLUE}[*] 创建测试网配置...${RESET}"
+  
+  cat > "$ENV_FILE" << 'EOF'
+# Nockchain 测试网配置
+NETWORK=testnet
+RPC_PORT=8545
+P2P_PORT=30303
+MINING_ENABLED=true
+LOG_LEVEL=debug
+MAX_PEERS=25
+SYNC_MODE=fast
+
+# 挖矿配置
+MINING_PUBKEY=
+MINING_THREADS=2
+
+# 网络配置
+BOOTNODES=
+NAT=auto
+
+# 存储配置
+DATA_DIR=./testnet_data
+CACHE_SIZE=512
+EOF
+  
+  echo -e "${GREEN}[+] 测试网配置已创建${RESET}"
+  pause_and_return
+}
+
+function create_dev_config() {
+  echo -e "${BLUE}[*] 创建开发配置...${RESET}"
+  
+  cat > "$ENV_FILE" << 'EOF'
+# Nockchain 开发配置
+NETWORK=dev
+RPC_PORT=8545
+P2P_PORT=30303
+MINING_ENABLED=false
+LOG_LEVEL=trace
+MAX_PEERS=10
+SYNC_MODE=light
+
+# 开发配置
+DEV_MODE=true
+AUTO_MINE=false
+BLOCK_TIME=5
+
+# 网络配置
+NAT=none
+
+# 存储配置
+DATA_DIR=./dev_data
+CACHE_SIZE=256
+EOF
+  
+  echo -e "${GREEN}[+] 开发配置已创建${RESET}"
+  pause_and_return
+}
+
+function custom_config_wizard() {
+  echo -e "${BLUE}[*] 自定义配置向导...${RESET}"
+  
+  # 网络选择
+  echo "1. 选择网络类型:"
+  echo "  1) Mainnet"
+  echo "  2) Testnet"
+  echo "  3) Development"
+  read -p "请选择 (1-3): " network_choice
+  
+  local network=""
+  case "$network_choice" in
+    1) network="mainnet" ;;
+    2) network="testnet" ;;
+    3) network="dev" ;;
+    *) network="mainnet" ;;
+  esac
+  
+  # 端口配置
+  read -p "2. RPC端口 (默认: 8545): " rpc_port
+  rpc_port=${rpc_port:-8545}
+  
+  read -p "3. P2P端口 (默认: 30303): " p2p_port
+  p2p_port=${p2p_port:-30303}
+  
+  # 挖矿配置
+  read -p "4. 启用挖矿? (y/n, 默认: y): " mining_enabled
+  mining_enabled=${mining_enabled:-y}
+  [[ "$mining_enabled" =~ ^[Yy]$ ]] && mining_enabled="true" || mining_enabled="false"
+  
+  if [ "$mining_enabled" = "true" ]; then
+    read -p "5. 挖矿公钥: " mining_pubkey
+    read -p "6. 挖矿线程数 (默认: auto): " mining_threads
+    mining_threads=${mining_threads:-auto}
+  fi
+  
+  # 日志级别
+  echo "7. 日志级别:"
+  echo "  1) error  2) warn  3) info  4) debug  5) trace"
+  read -p "请选择 (1-5): " log_choice
+  
+  local log_level=""
+  case "$log_choice" in
+    1) log_level="error" ;;
+    2) log_level="warn" ;;
+    3) log_level="info" ;;
+    4) log_level="debug" ;;
+    5) log_level="trace" ;;
+    *) log_level="info" ;;
+  esac
+  
+  # 生成配置文件
+  cat > "$ENV_FILE" << EOF
+# Nockchain 自定义配置
+NETWORK=$network
+RPC_PORT=$rpc_port
+P2P_PORT=$p2p_port
+MINING_ENABLED=$mining_enabled
+LOG_LEVEL=$log_level
+
+# 挖矿配置
+MINING_PUBKEY=${mining_pubkey:-}
+MINING_THREADS=${mining_threads:-auto}
+
+# 网络配置
+MAX_PEERS=50
+SYNC_MODE=full
+NAT=auto
+
+# 存储配置
+DATA_DIR=./data
+CACHE_SIZE=1024
+
+# 生成时间
+CREATED=$(date)
+EOF
+  
+  echo -e "${GREEN}[+] 自定义配置已创建${RESET}"
+  pause_and_return
+}
+
+# ========= 原有功能增强 =========
+function setup_all() {
+  echo -e "${CYAN}========== 一键安装并构建 ==========${RESET}"
+  
+  # 系统检测
+  detect_system
+  
+  echo -e "[*] 安装系统依赖..."
+  install_system_dependencies
+  
+  echo -e "[*] 安装 Rust..."
+  install_rust
+  
+  echo -e "[*] 获取仓库..."
+  clone_repository
+  
+  cd_nck_dir
+  
+  echo -e "[*] 设置 .env 文件..."
+  setup_env_file
+  
+  echo -e "[*] 安装 hoonc..."
+  make install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; exit 1; }
+  
+  echo -e "[*] 编译 Nockchain..."
+  make build || { echo -e "${RED}[-] build 失败${RESET}"; exit 1; }
+  
+  echo -e "[*] 安装钱包..."
+  make install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; exit 1; }
+  
+  echo -e "[*] 安装节点..."
+  make install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; exit 1; }
+  
+  echo -e "${GREEN}[+] 安装完成${RESET}"
+  echo "下一步："
+  echo "1. 生成钱包密钥"
+  echo "2. 设置 MINING_PUBKEY"
+  echo "3. 启动节点"
+  
+  pause_and_return
+}
+
+function install_system_dependencies() {
+  case "$PKG_MANAGER" in
+    apt)
+      sudo apt update
+      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen bc sysstat
+      ;;
+    yum)
+      sudo yum update -y
+      sudo yum groupinstall -y "Development Tools"
+      sudo yum install -y clang llvm-devel openssl-devel curl git make screen bc sysstat
+      ;;
+  esac
+}
+
+function install_rust() {
+  if ! command -v cargo &>/dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+  fi
+  
+  # 添加到shell配置文件
+  for rc_file in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [ -f "$rc_file" ] && ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$rc_file"; then
+      echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
+    fi
+  done
+  
+  export PATH="$HOME/.cargo/bin:$PATH"
+}
+
+function clone_repository() {
+  if [ -d "$NCK_DIR" ]; then
+    echo "更新现有仓库..."
+    cd "$NCK_DIR" && git pull
+  else
+    echo "克隆新仓库..."
+    git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
+  fi
+}
+
+function setup_env_file() {
+  if [ ! -f "$ENV_FILE" ]; then
+    if [ -f "$NCK_DIR/.env_example" ]; then
+      cp "$NCK_DIR/.env_example" "$ENV_FILE"
+    else
+      # 创建默认配置
+      create_mainnet_config
+    fi
+  fi
+}
+
+function wallet_management() {
+  echo -e "${CYAN}========== 钱包管理 ==========${RESET}"
+  echo "1) 生成新钱包"
+  echo "2) 查看钱包信息"
+  echo "3) 导出钱包密钥"
+  echo "4) 导入钱包密钥"
+  echo "5) 设置挖矿公钥"
+  echo "6) 备份钱包"
+  echo "0) 返回主菜单"
+  echo ""
+  read -p "请选择: " wallet_choice
+  
+  case "$wallet_choice" in
+    1) generate_wallet ;;
+    2) view_wallet_info ;;
+    3) export_keys ;;
+    4) import_keys ;;
+    5) set_pubkey_env ;;
+    6) backup_wallet ;;
+    0) main_menu ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function generate_wallet() {
+  echo -e "${BLUE}[*] 生成钱包...${RESET}"
+  cd_nck_dir
+  
+  # 检查钱包是否已存在
+  if [ -d "$HOME/.nockchain" ]; then
+    read -p "钱包已存在，是否覆盖? (y/n): " overwrite
+    if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+      echo "取消生成钱包"
+      pause_and_return
+      return
+    fi
+  fi
+  
+  ./target/release/nockchain-wallet keygen
+  
+  echo -e "${YELLOW}[!] 钱包生成完成${RESET}"
+  echo "请保存好助记词和私钥！"
+  echo "下一步请将公钥设置到 .env 文件中"
+  
+  pause_and_return
+}
+
+function view_wallet_info() {
+  echo -e "${BLUE}[*] 查看钱包信息...${RESET}"
+  
+  if [ ! -d "$HOME/.nockchain" ]; then
+    echo -e "${RED}[-] 钱包未初始化${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  echo "钱包目录: $HOME/.nockchain"
+  echo "目录大小: $(du -sh "$HOME/.nockchain" | cut -f1)"
+  
+  if [ -f "$HOME/.nockchain/keystore" ]; then
+    echo "密钥文件: 存在"
+  else
+    echo "密钥文件: 不存在"
+  fi
+  
+  # 显示当前配置的挖矿公钥
+  if [ -f "$ENV_FILE" ]; then
+    local current_pubkey=$(grep "^MINING_PUBKEY=" "$ENV_FILE" | cut -d'=' -f2)
+    if [ -n "$current_pubkey" ]; then
+      echo "当前挖矿公钥: $current_pubkey"
+    else
+      echo "挖矿公钥: 未设置"
+    fi
+  fi
+  
+  pause_and_return
+}
+
+function set_pubkey_env() {
+  echo -e "${BLUE}[*] 设置 MINING_PUBKEY 到 .env...${RESET}"
+  cd_nck_dir
+  
+  # 显示当前值
+  if [ -f "$ENV_FILE" ]; then
+    local current_pubkey=$(grep "^MINING_PUBKEY=" "$ENV_FILE" | cut -d'=' -f2)
+    if [ -n "$current_pubkey" ]; then
+      echo "当前公钥: $current_pubkey"
+    fi
+  fi
+  
+  read -p "请输入新的公钥 (MINING_PUBKEY): " pubkey
+  if [ -z "$pubkey" ]; then
+    echo -e "${RED}[-] 公钥不能为空${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  # 验证公钥格式（简单检查）
+  if [[ ${#pubkey} -lt 40 ]]; then
+    echo -e "${YELLOW}[!] 警告: 公钥长度似乎不正确${RESET}"
+    read -p "是否继续? (y/n): " continue_anyway
+    if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+      pause_and_return
+      return
+    fi
+  fi
+  
+  # 更新配置文件
+  if [ -f "$ENV_FILE" ]; then
+    # 删除旧的配置行
+    sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
+  else
+    touch "$ENV_FILE"
+  fi
+  
+  # 添加新的配置
+  echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
+  
+  echo -e "${GREEN}[+] 已写入 MINING_PUBKEY 到 .env${RESET}"
+  pause_and_return
+}
+
+function export_keys() {
+  echo -e "${BLUE}[*] 导出钱包密钥...${RESET}"
+  cd_nck_dir
+  
+  local export_file="./keys_$(date +%Y%m%d_%H%M%S).export"
+  
+  ./target/release/nockchain-wallet export-keys --output "$export_file"
+  
+  if [ -f "$export_file" ]; then
+    echo -e "${GREEN}[+] 密钥已导出到: $export_file${RESET}"
+    echo "文件大小: $(du -h "$export_file" | cut -f1)"
+    echo -e "${YELLOW}[!] 请妥善保管导出文件${RESET}"
+  else
+    echo -e "${RED}[-] 导出失败${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function import_keys() {
+  echo -e "${BLUE}[*] 导入钱包密钥...${RESET}"
+  cd_nck_dir
+  
+  echo "请选择导入方式:"
+  echo "1) 从文件导入"
+  echo "2) 输入默认路径 (./keys.export)"
+  
+  read -p "请选择 (1-2): " import_choice
+  
+  local keyfile=""
+  case "$import_choice" in
+    1)
+      read -p "请输入密钥文件完整路径: " keyfile
+      ;;
+    2)
+      keyfile="./keys.export"
+      ;;
+    *)
+      echo -e "${RED}[-] 无效选项${RESET}"
+      pause_and_return
+      return
+      ;;
+  esac
+  
+  if [ ! -f "$keyfile" ]; then
+    echo -e "${RED}[-] 文件不存在: $keyfile${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  echo "导入文件: $keyfile"
+  echo "文件大小: $(du -h "$keyfile" | cut -f1)"
+  
+  read -p "确认导入? (y/n): " confirm
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    ./target/release/nockchain-wallet import-keys --input "$keyfile"
+    echo -e "${GREEN}[+] 密钥已导入${RESET}"
+  else
+    echo "取消导入"
+  fi
+  
+  pause_and_return
+}
+
+function backup_wallet() {
+  echo -e "${BLUE}[*] 备份钱包...${RESET}"
+  
+  if [ ! -d "$HOME/.nockchain" ]; then
+    echo -e "${RED}[-] 钱包目录不存在${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_file="$BACKUP_DIR/wallet_backup_$timestamp.tar.gz"
+  
+  mkdir -p "$BACKUP_DIR"
+  
+  # 创建钱包备份
+  tar -czf "$backup_file" -C "$HOME" ".nockchain" 2>/dev/null
+  
+  if [ -f "$backup_file" ]; then
+    echo -e "${GREEN}[+] 钱包备份已创建: $backup_file${RESET}"
+    echo "备份大小: $(du -sh "$backup_file" | cut -f1)"
+  else
+    echo -e "${RED}[-] 备份创建失败${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function node_control() {
+  echo -e "${CYAN}========== 节点控制 ==========${RESET}"
+  echo "1) 启动节点"
+  echo "2) 停止节点"
+  echo "3) 重启节点"
+  echo "4) 查看节点状态"
+  echo "5) 查看节点日志"
+  echo "6) 节点性能监控"
+  echo "0) 返回主菜单"
+  echo ""
+  read -p "请选择: " node_choice
+  
+  case "$node_choice" in
+    1) start_node ;;
+    2) stop_node ;;
+    3) restart_node ;;
+    4) check_node_status ;;
+    5) view_logs ;;
+    6) performance_dashboard ;;
+    0) main_menu ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function start_node() {
+  echo -e "${BLUE}[*] 启动节点...${RESET}"
+  cd_nck_dir
+  
+  # 检查配置文件
+  if [ ! -f "$ENV_FILE" ]; then
+    echo -e "${RED}[-] 配置文件不存在，请先设置配置${RESET}"
+    pause_and_return
+    return
+  fi
+  
+  source "$ENV_FILE"
+  
+  # 检查挖矿公钥
+  if [ "$MINING_ENABLED" = "true" ] && [ -z "$MINING_PUBKEY" ]; then
+    echo -e "${YELLOW}[!] 警告: 启用了挖矿但未设置 MINING_PUBKEY${RESET}"
+    read -p "是否继续启动? (y/n): " continue_start
+    if [[ ! "$continue_start" =~ ^[Yy]$ ]]; then
+      pause_and_return
+      return
+    fi
+  fi
+  
+  # 检查启动脚本
+  if [ ! -f "./scripts/run_nockchain_miner.sh" ]; then
+    echo -e "${YELLOW}[!] 启动脚本不存在，创建默认脚本...${RESET}"
+    mkdir -p scripts
+    cat > "./scripts/run_nockchain_miner.sh" << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")/.."
+source .env
+./target/release/nockchain --config .env
+EOF
+    chmod +x "./scripts/run_nockchain_miner.sh"
+  fi
+  
+  # 确保启动脚本有执行权限
+  chmod +x ./scripts/run_nockchain_miner.sh
+  
+  # 停止旧的会话
+  if screen -list | grep -qw "nockchain"; then
+    echo "[*] 停止旧的节点会话..."
+    screen -S nockchain -X quit
+    sleep 2
+  fi
+  
+  # 启动新会话
+  echo "启动节点 (screen 会话名: nockchain)..."
+  screen -dmS nockchain bash -c "cd $NCK_DIR && ./scripts/run_nockchain_miner.sh; read"
+  
+  sleep 3
+  
+  # 验证启动
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点已启动${RESET}"
+    echo "会话名: nockchain"
+    echo "查看日志: 选择菜单选项 '查看节点日志'"
+    echo "进入会话: screen -r nockchain"
+  else
+    echo -e "${RED}[-] 节点启动失败${RESET}"
+    echo "请检查启动脚本或配置文件"
+  fi
+  
+  pause_and_return
+}
+
+function stop_node() {
+  echo -e "${BLUE}[*] 停止节点...${RESET}"
+  
+  if screen -list | grep -qw "nockchain"; then
+    screen -S nockchain -X quit
+    sleep 2
+    
+    if ! screen -list | grep -qw "nockchain"; then
+      echo -e "${GREEN}[+] 节点已停止${RESET}"
+    else
+      echo -e "${YELLOW}[!] 强制停止节点...${RESET}"
+      screen -S nockchain -X kill
+    fi
+  else
+    echo -e "${YELLOW}[!] 节点未运行${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function restart_node() {
+  echo -e "${BLUE}[*] 重启节点...${RESET}"
+  stop_node
+  sleep 2
+  start_node
+}
+
+function view_logs() {
+  echo -e "${BLUE}[*] 查看节点日志...${RESET}"
+  
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${YELLOW}[!] 进入日志查看模式 (Ctrl+A+D 可退出)...${RESET}"
+    echo "等待3秒后进入..."
+    sleep 3
+    screen -r nockchain
+  else
+    echo -e "${RED}[-] 节点未运行${RESET}"
+    echo ""
+    echo "是否查看历史日志文件?"
+    echo "1) 查看主日志文件"
+    echo "2) 高级日志分析"
+    echo "3) 返回"
+    
+    read -p "请选择: " log_choice
+    case "$log_choice" in
+      1)
+        if [ -f "$LOG_FILE" ]; then
+          echo "最后50行日志:"
+          tail -50 "$LOG_FILE"
+        else
+          echo "日志文件不存在"
+        fi
+        ;;
+      2)
+        advanced_log_analysis
+        return
+        ;;
+    esac
+  fi
+  
+  pause_and_return
+}
+
+# ========= 高级功能菜单 =========
+function advanced_features() {
+  echo -e "${CYAN}========== 高级功能 ==========${RESET}"
+  echo "1) 系统健康检查"
+  echo "2) 智能故障诊断"
+  echo "3) 性能监控仪表板"
+  echo "4) 网络诊断与优化"
+  echo "5) 高级日志分析"
+  echo "6) 自动化设置"
+  echo "0) 返回主菜单"
+  echo ""
+  read -p "请选择: " advanced_choice
+  
+  case "$advanced_choice" in
+    1) system_health_check; pause_and_return ;;
+    2) smart_diagnostics ;;
+    3) performance_dashboard ;;
+    4) network_features ;;
+    5) advanced_log_analysis ;;
+    6) automation_setup ;;
+    0) main_menu ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function network_features() {
+  echo -e "${CYAN}========== 网络功能 ==========${RESET}"
+  echo "1) 网络诊断"
+  echo "2) 网络优化"
+  echo "3) 端口扫描"
+  echo "4) 连接统计"
+  echo "0) 返回"
+  echo ""
+  read -p "请选择: " net_choice
+  
+  case "$net_choice" in
+    1) network_diagnostics ;;
+    2) optimize_network ;;
+    3) port_scan ;;
+    4) connection_stats ;;
+    0) advanced_features ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function port_scan() {
+  echo -e "${BLUE}[*] 端口扫描...${RESET}"
+  
+  local ports=(8545 30303 22 80 443)
+  echo "扫描重要端口..."
+  
+  for port in "${ports[@]}"; do
+    if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+      local process=$(netstat -tlnp 2>/dev/null | grep ":$port " | awk '{print $7}' | head -1)
+      echo -e "端口 $port: ${GREEN}开放${RESET} ($process)"
+    else
+      echo -e "端口 $port: ${RED}关闭${RESET}"
+    fi
+  done
+  
+  pause_and_return
+}
+
+function connection_stats() {
+  echo -e "${BLUE}[*] 连接统计...${RESET}"
+  
+  echo "TCP连接统计:"
+  netstat -an 2>/dev/null | awk '/^tcp/ {print $6}' | sort | uniq -c | sort -nr
+  
+  echo ""
+  echo "活跃连接详情:"
+  netstat -tuln 2>/dev/null | grep -E "8545|30303"
+  
+  pause_and_return
+}
+
+function automation_setup() {
+  echo -e "${CYAN}========== 自动化设置 ==========${RESET}"
+  echo "1) 设置开机自启"
+  echo "2) 设置自动备份"
+  echo "3) 设置健康监控"
+  echo "4) 设置日志轮转"
+  echo "5) 查看定时任务"
+  echo "6) 移除自动化"
+  echo "0) 返回"
+  echo ""
+  read -p "请选择: " auto_choice
+  
+  case "$auto_choice" in
+    1) setup_autostart ;;
+    2) setup_auto_backup ;;
+    3) setup_health_monitor ;;
+    4) setup_log_rotation ;;
+    5) view_cron_jobs ;;
+    6) remove_automation ;;
+    0) advanced_features ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function setup_autostart() {
+  echo -e "${BLUE}[*] 设置开机自启...${RESET}"
+  
+  # 创建systemd服务文件
+  cat > /tmp/nockchain.service << EOF
+[Unit]
+Description=Nockchain Node
+After=network.target
+
+[Service]
+Type=forking
+User=$USER
+WorkingDirectory=$NCK_DIR
+ExecStart=/usr/bin/screen -dmS nockchain $NCK_DIR/scripts/run_nockchain_miner.sh
+ExecStop=/usr/bin/screen -S nockchain -X quit
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  
+  sudo mv /tmp/nockchain.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable nockchain.service
+  
+  echo -e "${GREEN}[+] 开机自启已设置${RESET}"
+  echo "管理命令:"
+  echo "  启动: sudo systemctl start nockchain"
+  echo "  停止: sudo systemctl stop nockchain"
+  echo "  状态: sudo systemctl status nockchain"
+  
+  pause_and_return
+}
+
+function setup_health_monitor() {
+  echo -e "${BLUE}[*] 设置健康监控...${RESET}"
+  
+  # 创建监控脚本
+  cat > "$NCK_DIR/health_monitor.sh" << 'EOF'
+#!/bin/bash
+LOG_FILE="$HOME/nockchain/health.log"
+NCK_DIR="$HOME/nockchain"
+
+log_message() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" >> "$LOG_FILE"
+}
+
+# 检查节点进程
+if ! screen -list | grep -qw "nockchain"; then
+  log_message "节点进程异常，尝试重启"
+  cd "$NCK_DIR" && screen -dmS nockchain ./scripts/run_nockchain_miner.sh
+fi
+
+# 检查磁盘空间
+DISK_USAGE=$(df / | awk '/^\// {print $5}' | sed 's/%//')
+if [ "$DISK_USAGE" -gt 85 ]; then
+  log_message "磁盘空间不足警告: ${DISK_USAGE}%"
+fi
+
+# 检查内存使用
+MEM_USAGE=$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')
+if [ "$MEM_USAGE" -gt 90 ]; then
+  log_message "内存使用率过高: ${MEM_USAGE}%"
+fi
+EOF
+  
+  chmod +x "$NCK_DIR/health_monitor.sh"
+  
+  # 添加到crontab (每5分钟检查一次)
+  (crontab -l 2>/dev/null | grep -v "health_monitor.sh"; echo "*/5 * * * * $NCK_DIR/health_monitor.sh") | crontab -
+  
+  echo -e "${GREEN}[+] 健康监控已设置 (每5分钟检查一次)${RESET}"
+  echo "日志文件: $NCK_DIR/health.log"
+  
+  pause_and_return
+}
+
+function setup_log_rotation() {
+  echo -e "${BLUE}[*] 设置日志轮转...${RESET}"
+  
+  # 添加日志轮转到crontab (每日执行)
+  (crontab -l 2>/dev/null | grep -v "log_rotation"; echo "0 3 * * * $0 log_rotation_task") | crontab -
+  
+  echo -e "${GREEN}[+] 日志轮转已设置 (每日凌晨3点执行)${RESET}"
+  
+  pause_and_return
+}
+
+function log_rotation_task() {
+  log_rotation
+}
+
+function view_cron_jobs() {
+  echo -e "${BLUE}[*] 当前定时任务:${RESET}"
+  
+  crontab -l 2>/dev/null | grep -E "nockchain|health_monitor|backup" || echo "未找到相关定时任务"
+  
+  pause_and_return
+}
+
+function remove_automation() {
+  echo -e "${BLUE}[*] 移除自动化设置...${RESET}"
+  
+  # 移除crontab任务
+  crontab -l 2>/dev/null | grep -v -E "nockchain|health_monitor|backup|log_rotation" | crontab -
+  
+  # 移除systemd服务
+  if [ -f "/etc/systemd/system/nockchain.service" ]; then
+    sudo systemctl disable nockchain.service
+    sudo rm /etc/systemd/system/nockchain.service
+    sudo systemctl daemon-reload
+  fi
+  
+  echo -e "${GREEN}[+] 自动化设置已移除${RESET}"
+  
+  pause_and_return
+}
+
+function pause_and_return() {
+  echo ""
+  read -n1 -r -p "按任意键继续..." key
+  main_menu
+}
+
+# ========= 主菜单增强 =========
+function main_menu() {
+  show_banner
+  
+  # 显示系统状态
+  echo -e "${BOLD}系统状态:${RESET}"
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "节点状态: ${GREEN}运行中${RESET}"
+  else
+    echo -e "节点状态: ${RED}已停止${RESET}"
+  fi
+  
+  local mem_usage=$(free | awk '/^Mem:/ {printf "%.1f%%", ($3/$2)*100}')
+  echo "内存使用: $mem_usage"
+  
+  local disk_usage=$(df / | awk '/^\// {print $5}')
+  echo "磁盘使用: $disk_usage"
+  echo ""
+  
+  echo -e "${CYAN}========== 基础功能 ==========${RESET}"
+  echo "  1) 一键安装并构建"
+  echo "  2) 钱包管理"
+  echo "  3) 节点控制"
+  echo "  4) 配置管理器"
+  echo ""
+  echo -e "${CYAN}========== 高级功能 ==========${RESET}"
+  echo "  5) 系统监控与诊断"
+  echo "  6) 备份与恢复"
+  echo "  7) 网络诊断与优化"
+  echo "  8) 日志分析工具"
+  echo "  9) 自动化设置"
+  echo ""
+  echo -e "${CYAN}========== 其他选项 ==========${RESET}"
+  echo " 10) 查看帮助信息"
+  echo " 11) 关于本工具"
+  echo "  0) 退出"
+  echo ""
+  read -p "请输入编号: " choice
+  
+  case "$choice" in
+    1) setup_all ;;
+    2) wallet_management ;;
+    3) node_control ;;
+    4) config_manager ;;
+    5) advanced_features ;;
+    6) backup_management ;;
+    7) network_features ;;
+    8) advanced_log_analysis ;;
+    9) automation_setup ;;
+    10) show_help ;;
+    11) show_about ;;
+    0) echo "退出脚本."; exit 0 ;;
+    "auto_backup_task") auto_backup_task ;;
+    "log_rotation_task") log_rotation_task ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
+  esac
+}
+
+function show_help() {
+  echo -e "${CYAN}========== 帮助信息 ==========${RESET}"
+  echo "本工具是 Nockchain 节点的高级管理助手，提供以下功能："
+  echo ""
+  echo -e "${BOLD}基础功能:${RESET}"
+  echo "• 一键安装: 自动安装所有依赖和编译节点"
+  echo "• 钱包管理: 生成、导入、导出钱包密钥"
+  echo "• 节点控制: 启动、停止、重启节点服务"
+  echo "• 配置管理: 创建和管理不同网络的配置"
+  echo ""
+  echo -e "${BOLD}高级功能:${RESET}"
+  echo "• 系统监控: 实时监控系统性能和节点状态"
+  echo "• 智能诊断: 自动检测和修复常见问题"
+  echo "• 备份恢复: 自动备份重要数据和配置"
+  echo "• 网络优化: 诊断和优化网络连接"
+  echo "• 日志分析: 深度分析节点运行日志"
+  echo "• 自动化: 设置开机自启、定时备份等"
+  echo ""
+  echo -e "${BOLD}常用快捷键:${RESET}"
+  echo "• Screen会话: Ctrl+A+D 退出会话"
+  echo "• 查看日志: screen -r nockchain"
+  echo "• 强制退出: Ctrl+C"
+  echo ""
+  echo -e "${BOLD}重要文件位置:${RESET}"
+  echo "• 项目目录: $NCK_DIR"
+  echo "• 配置文件: $ENV_FILE"
+  echo "• 钱包数据: $HOME/.nockchain"
+  echo "• 备份目录: $BACKUP_DIR"
+  
+  pause_and_return
+}
+
+function show_about() {
+  echo -e "${CYAN}========== 关于本工具 ==========${RESET}"
+  echo -e "${BOLD}Nockchain 高级管理助手 v2.0${RESET}"
+  echo ""
+  echo "作者: K2 节点教程分享"
+  echo "Telegram: https://t.me/+EaCiFDOghoM3Yzll"
+  echo "Twitter: https://x.com/BtcK241918"
+  echo ""
+  echo "版本特性:"
+  echo "• 史诗级功能集成"
+  echo "• 智能故障诊断"
+  echo "• 自动化运维"
+  echo "• 高级监控分析"
+  echo "• 多平台兼容"
+  echo ""
+  echo "更新日志:"
+  echo "v2.0 - 全面重构，添加高级功能"
+  echo "v1.0 - 基础安装和管理功能"
+  echo ""
+  echo "反馈与建议请联系作者"
+  
+  pause_and_return
+}
+
+# ========= 脚本入口 =========
+# 初始化
+detect_system
+
+# 检查特殊参数
+case "${1:-}" in
+  "auto_backup_task") auto_backup_task; exit 0 ;;
+  "log_rotation_task") log_rotation_task; exit 0 ;;
+  *) main_menu ;;
+esac
