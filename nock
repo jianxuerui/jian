@@ -122,27 +122,29 @@ install_dependencies() {
     ColorGreen "依赖安装成功。\n"
 }
 
-# (FIXED) Hoon Compiler Build with correct tag
+# (FIXED) Hoon Compiler Build with correct tag and mirror URL
 build_hoonc() {
     ColorBlue ">> [3/8] 正在构建 Hoon 编译器 (hoonc)...\n"
     if [ -f /usr/local/bin/hoonc ]; then ColorGreen "Hoon 编译器已存在，跳过此步。\n"; return; fi
-    git clone https://github.com/urbit/hoon.git /tmp/hoon
-    # <<< FIX: Changed non-existent tag 'hoonk-v1.0.2' to a real tag 'hoon-v1.0'
+    # <<< FIX: Using kgithub.com mirror to bypass network issues
+    ColorYellow "由于网络原因，正在通过 kgithub.com 镜像克隆 Hoon 仓库...\n"
+    git clone https://kgithub.com/urbit/hoon.git /tmp/hoon
     (cd /tmp/hoon && git checkout tags/hoon-v1.0 && make HOON_ARCH="$(uname -m)-linux" && sudo make install)
     sudo rm -rf /tmp/hoon
     ColorGreen "Hoon 编译器构建并安装成功。\n"
 }
 
-# (FIXED) Build the Nockchain Suite, enabling gcc-toolset-11
+# (FIXED) Build the Nockchain Suite, enabling gcc-toolset-11 and using mirror URL
 build_nockchain_suite() {
     local node_type=$1
     ColorBlue ">> [4/8] 正在构建 Nockchain 套件 (类型: $node_type)...\n"
-    # <<< FIX: Enable gcc-toolset-11 for this build session if on a dnf system
     if command -v dnf &>/dev/null && [ -f /opt/rh/gcc-toolset-11/enable ]; then
       ColorYellow "正在启用 gcc-toolset-11 以进行编译...\n"
       source /opt/rh/gcc-toolset-11/enable
     fi
-    git clone https://github.com/zorp-corp/nockchain "${CONFIG[SOURCE_DIR]}"
+    # <<< FIX: Using kgithub.com mirror to bypass network issues
+    ColorYellow "由于网络原因，正在通过 kgithub.com 镜像克隆 Nockchain 仓库...\n"
+    git clone https://kgithub.com/zorp-corp/nockchain.git "${CONFIG[SOURCE_DIR]}"
     pushd "${CONFIG[SOURCE_DIR]}" >/dev/null
       local build_features="zkpow,metrics"
       if [[ "$node_type" == "validator" ]]; then build_features+=",staking"; fi
@@ -179,7 +181,6 @@ setup_daemon_and_security() {
         archive) exec_start_args+=" --pruning archive";;
         light) exec_start_args="light ${exec_start_args}";;
     esac
-    # <<< FIX: Added a bash wrapper to source the gcc-toolset-11 environment for the service
     cat <<EOF | sudo tee /etc/systemd/system/nockchain-node.service
 [Unit]
 Description=Nockchain Node ($node_type)
