@@ -97,7 +97,7 @@ install_dependencies() {
         sudo dnf install -y -q 'dnf-command(config-manager)'
 
         local BUILDER_REPO_ID
-        # Search for the repo ID using common keywords, case-insensitively
+        # Search for the repo ID using common keywords, case-insensitively. This is much more reliable.
         BUILDER_REPO_ID=$(sudo dnf repolist all | grep -i -E 'powertools|crb|codeready|builder' | awk '{print $1}' | head -n 1)
 
         if [[ -n "$BUILDER_REPO_ID" ]]; then
