@@ -1,14 +1,9 @@
 #!/bin/bash
-# Nockchain Ecosystem Orchestrator v4.1 "Stabilized"
+# Nockchain Ecosystem Orchestrator v4.0 "Archon"
 #
 # A comprehensive suite for deploying, managing, and participating in the Nockchain ecosystem.
 # Features: Multi-node deployment, advanced security, staking & governance,
 #           developer toolkits, and an AI-powered Operations Co-Pilot.
-#
-# v4.1 Changes:
-# - Added compilation resource limits (make -j1, CARGO_BUILD_JOBS=1) to prevent system crashes
-#   on low-memory servers during the build process.
-# - Added a Swap space check to warn users about potential memory exhaustion issues.
 #
 set -euo pipefail
 # Errors are logged separately for cleaner main log
@@ -57,7 +52,7 @@ handle_error() {
 
 # --- CORE FUNCTIONS ---
 
-# (MODIFIED) Enhanced compatibility check with Swap warning
+# Enhanced compatibility check
 check_compatibility() {
     ColorBlue ">> [1/8] 正在进行系统兼容性检查...\n"
     if ! command -v lsb_release &>/dev/null; then
@@ -77,16 +72,10 @@ check_compatibility() {
         grep -q 'sse4_2' /proc/cpuinfo || { ColorRed "CPU 不支持 SSE4.2, 此为必须项。\n"; exit 1; }
         grep -q 'avx2' /proc/cpuinfo || ColorYellow "警告: 未检测到 AVX2 支持。ZK 相关操作性能可能会受影响。\n"
     fi
-    # [NEW] Swap check to prevent OOM crashes
-    if ! swapon --show | grep -q "."; then
-        ColorYellow "严重警告: 未检测到 Swap (虚拟内存)！在内存较小的服务器上编译可能会导致系统崩溃。\n"
-        ColorYellow "强烈建议在继续之前创建一个至少4GB的Swap文件。按回车键继续，风险自负...\n"
-        read -p ""
-    fi
     ColorGreen "系统兼容性检查通过。\n"
 }
 
-# Dependency installation with distro detection and LLVM PPA for Debian/Ubuntu
+# (MODIFIED) Dependency installation with distro detection and LLVM PPA for Debian/Ubuntu
 install_dependencies() {
     ColorBlue ">> [2/8] 正在安装核心依赖...\n"
     if command -v apt-get &>/dev/null; then
@@ -101,7 +90,16 @@ install_dependencies() {
             build-essential clang-15 llvm-15-dev libclang-15-dev cmake libssl-dev pkg-config \
             uuid-dev git cgroup-tools screen htop ntpdate jq python3-venv curl ufw tor
     elif command -v dnf &>/dev/null; then
-        sudo dnf install -y 'dnf-command(config-manager)' && sudo dnf config-manager --set-enabled powertools
+        # <<< MODIFIED BLOCK HERE / 已修改部分 >>>
+        # This block now tries to enable 'powertools' and falls back to 'crb' if it fails,
+        # making it compatible with CentOS 8, AlmaLinux, Rocky Linux etc.
+        ColorYellow "检测到 RHEL/CentOS 系统，正在启用 Powertools/CRB 仓库...\n"
+        sudo dnf install -y 'dnf-command(config-manager)'
+        if ! sudo dnf config-manager --set-enabled powertools &>/dev/null; then
+            ColorYellow "未找到 'powertools' 仓库, 正在尝试 'crb' (适用于 Alma/Rocky 8+)...\n"
+            sudo dnf config-manager --set-enabled crb
+        fi
+        # <<< END OF MODIFIED BLOCK >>>
         sudo dnf install -y \
             gcc-toolset-12 clang llvm-devel libasan libclang-devel cmake openssl-devel pkgconfig \
             libuuid-devel git libcgroup-tools screen htop ntpdate jq python3-venv curl firewalld tor
@@ -111,18 +109,17 @@ install_dependencies() {
     ColorGreen "依赖安装成功。\n"
 }
 
-# (MODIFIED) Hoon Compiler Build with resource limits
+# Hoon Compiler Build
 build_hoonc() {
     ColorBlue ">> [3/8] 正在构建 Hoon 编译器 (hoonc)...\n"
     if [ -f /usr/local/bin/hoonc ]; then ColorGreen "Hoon 编译器已存在，跳过此步。\n"; return; fi
     git clone https://github.com/urbit/hoon.git /tmp/hoon
-    # [MODIFIED] Added -j1 to make command to limit to a single job, preventing resource exhaustion.
-    (cd /tmp/hoon && git checkout tags/hoonk-v1.0.2 && make -j1 HOON_ARCH="$(uname -m)-linux" && sudo make install)
+    (cd /tmp/hoon && git checkout tags/hoonk-v1.0.2 && make HOON_ARCH="$(uname -m)-linux" && sudo make install)
     sudo rm -rf /tmp/hoon
     ColorGreen "Hoon 编译器构建并安装成功。\n"
 }
 
-# (MODIFIED) Build the Nockchain Suite with resource limits
+# Build the Nockchain Suite
 build_nockchain_suite() {
     local node_type=$1
     ColorBlue ">> [4/8] 正在构建 Nockchain 套件 (类型: $node_type)...\n"
@@ -130,16 +127,7 @@ build_nockchain_suite() {
     pushd "${CONFIG[SOURCE_DIR]}" >/dev/null
       local build_features="zkpow,metrics"
       if [[ "$node_type" == "validator" ]]; then build_features+=",staking"; fi
-      
-      # [NEW] Limit cargo build jobs to 1 to prevent OOM crash on low-spec servers.
-      ColorYellow "警告：已将编译任务限制为单核，以防止内存耗尽。编译时间会显著增加，请耐心等待...\n"
-      export CARGO_BUILD_JOBS=1
-      
       cargo build --release --features "$build_features"
-
-      # [NEW] Unset the variable after use.
-      unset CARGO_BUILD_JOBS
-      
       sudo cp target/release/nockchain /usr/local/bin/
       sudo cp target/release/nockchain-cli /usr/local/bin/
       sudo cp target/release/nockchain-wallet /usr/local/bin/
@@ -319,7 +307,7 @@ main_menu() {
     local status_text
     if systemctl is-active --quiet nockchain-node.service; then status_text="$(ColorGreen '运行中')";
     else status_text="$(ColorRed '已停止')"; fi
-    echo -e "\n$(ColorBlue '--- Nockchain 编排器 v4.1 "稳定版" ---')"
+    echo -e "\n$(ColorBlue '--- Nockchain 编排器 v4.0 "执政官" ---')"
     echo -e "节点服务状态: $status_text"
     echo -e "\n$(ColorGreen '1)') 完整安装 (首次部署)"
     echo -e "$(ColorGreen '2)') 节点管理 (启动/停止/重启)"
