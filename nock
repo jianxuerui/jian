@@ -2,14 +2,15 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-## 增强版 Nockchain 挖矿工具
-## 版本: 2.0.0 (优化编译版)
+## Nockchain 矿工专业版 v3.0.0
+## 全平台终极优化版本
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
+BLUE='\033[0;34m'
 RESET='\033[0m'
 
 # 全局配置
@@ -17,198 +18,208 @@ NOCK_DIR="$HOME/.nockchain"
 CONFIG_FILE="$NOCK_DIR/miner.conf"
 LOG_FILE="$NOCK_DIR/miner.log"
 PROFILE_DATA="$NOCK_DIR/pgo.prof"
-OPT_LEVEL=3  # 默认优化级别
 
-## 初始化环境
-init() {
+# 初始化环境
+init_environment() {
   mkdir -p "$NOCK_DIR"
   [[ -f "$CONFIG_FILE" ]] || {
     cat >"$CONFIG_FILE" <<-EOF
 MINING_ADDRESS="0x0000000000000000000000000000000000000000"
 RPC_URL="http://127.0.0.1:8545"
 MINING_THREADS=$(nproc)
-OPT_MODE="auto"  # auto/pgo/lto/bolt
+OPT_MODE="auto"
 EOF
   }
-  # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 }
 
-## 高级依赖检查
-check_advanced_deps() {
-  local required=("perf" "llvm-bolt" "clang")
-  for cmd in "${required[@]}"; do
-    if ! command -v "$cmd" &>/dev/null; then
-      echo -e "${YELLOW}安装高级优化工具: $cmd${RESET}"
-      sudo apt-get install -y "$cmd" || sudo yum install -y "$cmd"
-    fi
-  done
+# 跨平台检测模块
+detect_platform() {
+  # 操作系统检测
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    OS_ID="$ID"
+  else
+    case $(uname -s) in
+      Darwin)  OS_ID="macos" ;;
+      FreeBSD) OS_ID="freebsd" ;;
+      *)       OS_ID="unknown" ;;
+    esac
+  fi
+
+  # CPU架构检测
+  case $(uname -m) in
+    x86_64)  ARCH="x64" ;;
+    arm64)   ARCH="arm64" ;;
+    aarch64) ARCH="arm64" ;;
+    *)       ARCH="unknown" ;;
+  esac
+
+  # 包管理器检测
+  declare -A PM_MAP=(
+    [debian]="apt"
+    [ubuntu]="apt"
+    [centos]="yum"
+    [fedora]="dnf"
+    [arch]="pacman"
+    [macos]="brew"
+    [freebsd]="pkg"
+  )
+  PM="${PM_MAP[$OS_ID]}"
 }
 
-## CPU微架构检测
-detect_cpu_arch() {
-  local flags
-  flags=$(grep -m1 'flags' /proc/cpuinfo || sysctl -n machdep.cpu.features)
-  case "$flags" in
-    *avx512*)   echo "skylake-avx512" ;;
-    *avx2*)     echo "haswell" ;;
-    *avx*)      echo "sandybridge" ;;
-    *)          echo "native" ;;
+# 依赖管理模块
+manage_dependencies() {
+  local deps=(git curl clang llvm)
+  case "$PM" in
+    apt)
+      sudo apt update
+      sudo apt install -y "${deps[@]}" build-essential cmake
+      ;;
+    dnf|yum)
+      sudo $PM install -y "${deps[@]}" gcc-c++ make cmake
+      ;;
+    pacman)
+      sudo pacman -S --noconfirm "${deps[@]}" base-devel cmake
+      ;;
+    brew)
+      brew update
+      brew install "${deps[@]}" cmake
+      ;;
+    pkg)
+      sudo pkg install -y "${deps[@]}" gmake cmake
+      ;;
   esac
 }
 
-## PGO优化编译
-build_with_pgo() {
-  echo -e "${CYAN}[阶段1/3] 生成PGO训练数据...${RESET}"
-  RUSTFLAGS="-Cprofile-generate=$PROFILE_DATA" \
-    cargo build --release --target-dir ./target/pgo
+# 编译优化引擎
+perform_optimized_build() {
+  local cpu_arch=$(detect_cpu_arch)
+  local rust_flags=""
 
-  echo -e "${CYAN}[阶段2/3] 运行训练集...${RESET}"
-  ./target/pgo/release/nockchain bench --duration 600
+  # CPU微架构优化
+  case "$cpu_arch" in
+    skylake)   rust_flags="-C target-cpu=skylake" ;;
+    haswell)   rust_flags="-C target-cpu=haswell" ;;
+    zen2)      rust_flags="-C target-cpu=znver2" ;;
+    apple)     rust_flags="-C target-cpu=apple-m1" ;;
+    *)         rust_flags="-C target-cpu=native" ;;
+  esac
 
-  echo -e "${CYAN}[阶段3/3] 应用PGO优化...${RESET}"
-  RUSTFLAGS="-Cprofile-use=$PROFILE_DATA -Cllvm-args=-pgo-warn-missing-function" \
-    cargo build --release --target-dir ./target/optimized
-}
-
-## BOLT后处理优化
-apply_bolt_optimization() {
-  local binary_path="$1"
-  echo -e "${CYAN}应用BOLT优化...${RESET}"
-  perf record -e cycles:u -g -- "$binary_path" bench --duration 10
-  perf2bolt "$binary_path" \
-    -p perf.data \
-    -o "$binary_path.bolt" \
-    -nl
-
-  mv "$binary_path.bolt" "$binary_path"
-  strip "$binary_path"
-}
-
-## 智能编译引擎
-optimized_build() {
-  local arch_level cpu_arch
-  cpu_arch=$(detect_cpu_arch)
-  arch_level="-C target-cpu=$cpu_arch -C target-feature=+lzcnt,+bmi2"
-
+  # 编译策略选择
   case "$OPT_MODE" in
     pgo)
-      build_with_pgo
-      cp ./target/optimized/release/nockchain "$HOME/.local/bin/"
+      build_pgo "$rust_flags"
       ;;
     bolt)
-      RUSTFLAGS="$arch_level -C link-arg=-Wl,-q" cargo build --release
-      apply_bolt_optimization "$HOME/.local/bin/nockchain"
+      build_bolt "$rust_flags"
       ;;
     lto)
-      RUSTFLAGS="$arch_level -C lto=fat" \
-        cargo build --release --config profile.release.lto=\"fat\"
+      build_lto "$rust_flags"
       ;;
-    *)
-      RUSTFLAGS="$arch_level -C codegen-units=$(nproc)" \
-        cargo build --release
+    auto)
+      build_auto "$rust_flags"
       ;;
   esac
 }
 
-## 安装流程升级
-install_nockchain() {
-  check_dependencies
-  check_advanced_deps  # 新增高级依赖检查
-
-  echo -e "${CYAN}获取最新代码...${RESET}"
-  [[ -d "$HOME/nockchain" ]] || \
-    git clone https://github.com/nockchain/nockchain.git "$HOME/nockchain"
-  git -C "$HOME/nockchain" pull
-
-  echo -e "${CYAN}智能编译启动...${RESET}"
-  cd "$HOME/nockchain"
-  optimized_build
-
-  echo -e "${CYAN}安装优化版本...${RESET}"
-  install -m755 "$HOME/nockchain/target/release/nockchain" "$HOME/.local/bin/"
-  [[ "$OPT_MODE" == "pgo" ]] && \
-    install -m755 "$HOME/nockchain/target/optimized/release/nockchain" "$HOME/.local/bin/"
-
-  echo -e "${GREEN}优化编译完成！当前模式: ${YELLOW}$OPT_MODE${RESET}"
-}
-
-## 配置优化模式
-set_optimization() {
-  echo -e "${CYAN}当前优化策略: ${YELLOW}$OPT_MODE${RESET}"
-  select mode in "auto" "pgo" "lto" "bolt"; do
-    sed -i "s/^OPT_MODE=.*/OPT_MODE=\"$mode\"/" "$CONFIG_FILE"
-    echo -e "${GREEN}优化模式已设置为: ${YELLOW}$mode${RESET}"
-    return
+# 交互式菜单系统
+show_main_menu() {
+  while true; do
+    clear
+    draw_banner
+    echo -e "${CYAN}1) 完整安装/更新"
+    echo -e "2) 配置矿工参数"
+    echo -e "3) 启动挖矿程序"
+    echo -e "4) 系统性能监控"
+    echo -e "5) 高级编译设置"
+    echo -e "6) 系统优化调整"
+    echo -e "7) 日志查看管理"
+    echo -e "0) 退出程序${RESET}"
+    echo -e "${BLUE}=======================================${RESET}"
+    
+    read -rp "$(echo -e ${CYAN}➤ 请输入选项: ${RESET})" choice
+    case $choice in
+      1) install_workflow ;;
+      2) config_miner ;;
+      3) start_mining ;;
+      4) show_monitor ;;
+      5) show_compile_menu ;;
+      6) show_tuning_menu ;;
+      7) show_logs ;;
+      0) exit 0 ;;
+      *) echo -e "${RED}无效选项，请重新输入${RESET}"; sleep 1 ;;
+    esac
   done
 }
 
-## 增强版菜单
-show_menu() {
-  clear
-  echo -e "${CYAN}══ Nockchain 矿工专业版 ═══════════════════════════${RESET}"
-  echo "1) 完整安装/更新"
-  echo "2) 设置挖矿地址"
-  echo "3) 启动矿机"
-  echo "4) 实时监控"
-  echo "5) 高级编译设置"
-  echo "6) 系统服务管理"
-  echo "7) 性能调优"
-  echo "0) 退出"
-  read -rp "➤ 请输入选项 [0-7]: " opt
-
-  case $opt in
-    5) set_optimization ;;
-    7) show_performance_tuning ;;
-    # 其他原有选项保持不变
-  esac
+# 编译设置子菜单
+show_compile_menu() {
+  while true; do
+    clear
+    echo -e "${CYAN}=== 编译优化策略 ==="
+    echo -e "1) 自动模式 (PGO+BOLT)"
+    echo -e "2) 基于分析的优化 (PGO)"
+    echo -e "3) 链接时优化 (LTO)"
+    echo -e "4) 二进制优化 (BOLT)"
+    echo -e "5) 返回主菜单${RESET}"
+    echo -e "${BLUE}=======================================${RESET}"
+    
+    read -rp "$(echo -e ${CYAN}➤ 选择优化策略: ${RESET})" choice
+    case $choice in
+      1) set_optimization "auto" ;;
+      2) set_optimization "pgo" ;;
+      3) set_optimization "lto" ;;
+      4) set_optimization "bolt" ;;
+      5) return ;;
+      *) echo -e "${RED}无效选择，请重新输入${RESET}"; sleep 1 ;;
+    esac
+  done
 }
 
-## 性能调优界面
-show_performance_tuning() {
-  clear
-  echo -e "${CYAN}══ 硬件级性能调优 ════════════════════════════════${RESET}"
-  local current_cpu=$(detect_cpu_arch)
-  echo "1) CPU微架构优化 (当前: ${YELLOW}$current_cpu${RESET})"
-  echo "2) 内存子系统调优"
-  echo "3) 存储I/O优化"
-  echo "4) 网络栈参数调整"
-  echo "0) 返回主菜单"
-  read -rp "➤ 选择调优项目: " tune_opt
-
-  case $tune_opt in
-    1) optimize_cpu_settings ;;
-    2) tune_memory_subsystem ;;
-    3) optimize_io_scheduler ;;
-    4) tune_network_stack ;;
-  esac
+# 系统调优子菜单
+show_tuning_menu() {
+  while true; do
+    clear
+    echo -e "${CYAN}=== 系统性能调优 ==="
+    echo -e "1) CPU微架构优化"
+    echo -e "2) 内存子系统调优"
+    echo -e "3) 存储I/O优化"
+    echo -e "4) 网络参数调整"
+    echo -e "5) 返回主菜单${RESET}"
+    echo -e "${BLUE}=======================================${RESET}"
+    
+    read -rp "$(echo -e ${CYAN}➤ 选择调优项目: ${RESET})" choice
+    case $choice in
+      1) optimize_cpu ;;
+      2) tune_memory ;;
+      3) optimize_io ;;
+      4) tune_network ;;
+      5) return ;;
+      *) echo -e "${RED}无效选项，请重新输入${RESET}"; sleep 1 ;;
+    esac
+  done
 }
 
-## CPU微架构优化
-optimize_cpu_settings() {
-  local governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
-  echo -e "${CYAN}当前CPU频率策略: ${YELLOW}$governor${RESET}"
-  echo -e "推荐矿机使用 ${GREEN}performance${RESET} 模式"
-  sudo cpupower frequency-set -g performance
+# 可视化横幅
+draw_banner() {
+  echo -e "${BLUE}"
+  echo "███████╗███╗   ██╗ ██████╗██╗  ██╗███████╗██████╗ "
+  echo "██╔════╝████╗  ██║██╔════╝██║ ██╔╝██╔════╝██╔══██╗"
+  echo "█████╗  ██╔██╗ ██║██║     █████╔╝ █████╗  ██████╔╝"
+  echo "██╔══╝  ██║╚██╗██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗"
+  echo "███████╗██║ ╚████║╚██████╗██║  ██╗███████╗██║  ██║"
+  echo "╚══════╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
+  echo -e "${RESET}"
 }
 
-## 内存子系统调优
-tune_memory_subsystem() {
-  echo -e "${CYAN}优化内存分配策略...${RESET}"
-  sudo sysctl -w vm.swappiness=10
-  sudo sysctl -w vm.dirty_ratio=40
-  sudo sysctl -w vm.dirty_background_ratio=10
-}
-
-## 主入口增强
+# 主程序流程
 main() {
-  init
-  case "${1:-}" in
-    --tune)   show_performance_tuning ;;
-    --auto)   optimized_build ;;
-    *)        while true; do show_menu; done ;;
-  esac
+  init_environment
+  detect_platform
+  manage_dependencies
+  show_main_menu
 }
 
+# 执行入口
 main "$@"
