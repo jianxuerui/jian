@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v7.6 (终极解决方案)
-# 策略：完全放弃Hunter。依赖系统包管理器提供大型库(Boost, OpenSSL)，
-# 然后从 ethminer 项目自带的 externals/ 目录中编译所有其他依赖 (CLI11, jsoncpp, ethash)，
-# 从根本上保证版本100%兼容，并杜绝一切网络下载问题。
+# Ethminer 矿工专业工具 v7.7 (终极解决方案 - 修正版)
+# 策略：修正了 git clone 命令，确保使用 --recursive 参数来完整克隆
+# ethminer 及其所有绑定的子模块依赖源码。然后从这些本地源码编译所有依赖，
+# 保证版本兼容并杜绝网络问题。
 
 set -euo pipefail
 IFS='
@@ -62,7 +62,6 @@ install_ethminer() {
   case "$PKG_MANAGER" in
     apt)
       $SUDO_CMD apt-get update
-      # Debian/Ubuntu 仓库很全，可以直接安装大部分依赖
       $SUDO_CMD apt-get install -y git cmake build-essential libboost-all-dev libssl-dev
       ;;
     dnf)
@@ -77,16 +76,18 @@ install_ethminer() {
   echo "✔ 基础环境和系统依赖安装完成。"
   
   echo "▶ 步骤 2/4: 下载 ethminer 及其所有绑定的依赖源码..."
-  if [ ! -d "$REPO_PATH/externals" ]; then
+  # ### 这是最关键的修复 ###
+  # 必须使用 --recursive 才能下载子模块
+  if [ ! -d "$REPO_PATH/.git" ]; then
     echo "--> 正在克隆 ethminer 仓库 (包含所有依赖子模块，此步需要网络)..."
-    rm -rf "$REPO_PATH" # 清理不完整的旧克隆
     if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
       echo "克隆失败，请检查网络连接。" >&2; exit 1;
     fi
   else
-    echo "--> ethminer 源码已存在，跳过下载。"
+    echo "--> ethminer 源码已存在，正在检查并更新子模块..."
+    (cd "$REPO_PATH" && git submodule update --init --recursive)
   fi
-  echo "✔ 源码准备就绪。"
+  echo "✔ 源码及所有依赖子模块准备就绪。"
 
   echo "▶ 步骤 3/4: 编译 ethminer 自带的依赖库 (保证版本兼容)..."
   # --- 编译 CLI11 ---
@@ -139,7 +140,7 @@ install_ethminer() {
     echo "----------------------------------------------------------------------"
     echo "重要提示: '${HOME}/.local/bin' 不在你的 PATH 环境变量中。"
     echo "请运行以下命令，或将其加入 ~/.bashrc 文件："
-    echo "  export PATH=\"\$HOME}/.local/bin:\$PATH\""
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     echo "----------------------------------------------------------------------"
   fi
   echo "按任意键返回主菜单..."
@@ -160,7 +161,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v7.6           ║
+║           Ethminer 矿工专业工具 v7.7           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
