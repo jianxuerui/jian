@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v7.3 (Definitive Fix)
-# 最终解决方案：显式禁用 Hunter 包管理器，强制使用系统库，
-# 并为 RHEL/CentOS 系列手动编译缺失的核心依赖。
+# Ethminer 矿工专业工具 v7.4 (Definitive Fix)
+# 最终解决方案：显式禁用Hunter，强制使用系统库，并为所有系统手动编译通用缺失的依赖(CLI11)，
+# 再为 RHEL/CentOS 系列手动编译其特有缺失的依赖 (jsoncpp, ethash)。
 
 set -euo pipefail
 IFS='
@@ -33,7 +33,7 @@ get_cpu_cores() {
 }
 
 init_environment() {
-  mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+  mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$DEPS_SRC_PATH"
   if [ ! -f "$CONFIG_FILE" ]; then
     echo "▶ 首次运行，正在创建默认配置文件..."
     cat > "$CONFIG_FILE" <<EOF
@@ -48,12 +48,29 @@ EOF
   fi
 }
 
-# --- 手动编译 RHEL/CentOS 缺失的依赖 ---
-compile_missing_prerequisites() {
+# --- 新增：编译通用缺失依赖 CLI11 ---
+compile_cli11() {
+    echo "--> [通用依赖] 正在编译: CLI11 (所有系统都需要)..."
+    (
+        cd "$DEPS_SRC_PATH"
+        if [ ! -d "CLI11" ]; then
+            git clone https://github.com/CLIUtils/CLI11.git
+        fi
+        cd CLI11
+        mkdir -p build
+        cd build
+        # CLI11 是一个现代CMake项目，这样安装即可
+        cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+        $SUDO_CMD make install
+    ) || { echo "!! 致命错误：编译 CLI11 失败。"; exit 1; }
+    echo "✔ 依赖 CLI11 已成功编译并安装。"
+}
+
+# --- 手动编译 RHEL/CentOS 特有缺失的依赖 ---
+compile_rhel_missing_prerequisites() {
     echo "================================================="
-    echo "  为 RHEL/CentOS 编译缺失的依赖..."
+    echo "  为 RHEL/CentOS 编译其特有缺失的依赖..."
     echo "================================================="
-    mkdir -p "$DEPS_SRC_PATH"
     
     # --- 1. 编译 jsoncpp ---
     echo "--> [1/2] 正在编译依赖: jsoncpp..."
@@ -62,9 +79,7 @@ compile_missing_prerequisites() {
         if [ ! -d "jsoncpp" ]; then
             git clone https://github.com/open-source-parsers/jsoncpp.git
         fi
-        cd jsoncpp
-        mkdir -p build
-        cd build
+        cd jsoncpp; mkdir -p build; cd build
         cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_STATIC_LIBS=OFF
         make -j"$(get_cpu_cores)"
         $SUDO_CMD make install
@@ -78,19 +93,12 @@ compile_missing_prerequisites() {
         if [ ! -d "ethash" ]; then
             git clone https://github.com/chfast/ethash.git
         fi
-        cd ethash
-        mkdir -p build
-        cd build
+        cd ethash; mkdir -p build; cd build
         cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
         make -j"$(get_cpu_cores)"
         $SUDO_CMD make install
     ) || { echo "!! 致命错误：编译 ethash 失败。"; exit 1; }
     echo "✔ 依赖 ethash 已成功编译并安装。"
-    
-    # 刷新动态链接库缓存，让系统能找到我们刚安装的所有库
-    echo "--> 正在刷新系统链接库缓存..."
-    $SUDO_CMD ldconfig
-    echo "✔ 所有缺失的依赖已手动编译完成。"
 }
 
 # --- 编译与安装核心流程 (最终版) ---
@@ -103,11 +111,11 @@ install_ethminer() {
 
   echo "✔ 系统选择完成: $PKG_MANAGER"
   
-  echo "▶ 步骤 1/4: 安装所有可用的系统依赖..."
+  echo "▶ 步骤 1/5: 安装所有可用的系统依赖..."
   case "$PKG_MANAGER" in
     apt)
       $SUDO_CMD apt-get update
-      # Debian/Ubuntu 仓库很全，可以直接安装所有依赖
+      # Debian/Ubuntu 仓库很全，可以直接安装大部分依赖
       $SUDO_CMD apt-get install -y git cmake build-essential libboost-all-dev libssl-dev libjsoncpp-dev libethash-dev
       ;;
     dnf)
@@ -122,31 +130,35 @@ install_ethminer() {
   esac
   echo "✔ 基础环境和可用依赖安装完成。"
 
+  echo "▶ 步骤 2/5: 编译通用缺失依赖 CLI11 (所有系统都需要)..."
+  compile_cli11
+  
   # 只有在 dnf 系统上（我们知道它缺少包）才手动编译
   if [ "$PKG_MANAGER" = "dnf" ]; then
-      echo "▶ 步骤 2/4: 编译系统缺失的核心依赖..."
-      compile_missing_prerequisites
+      echo "▶ 步骤 3/5: 编译 RHEL/CentOS 特有缺失的核心依赖..."
+      compile_rhel_missing_prerequisites
   fi
   
-  echo "▶ 步骤 3/4: 下载/更新 ethminer 源码..."
+  echo "▶ 步骤 4/5: 刷新动态链接库缓存..."
+  $SUDO_CMD ldconfig
+  echo "✔ 链接库缓存已刷新，系统可找到新编译的库。"
+
+  echo "▶ 步骤 5/5: 下载/更新并编译 ethminer ..."
   if [ ! -d "$REPO_PATH/.git" ]; then
     echo "--> 正在克隆 ethminer 仓库..."
-    if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
-      echo "克隆失败，请检查网络连接。" >&2; exit 1;
-    fi
+    git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"
   else
     echo "--> 正在更新 ethminer 仓库代码..."
     (cd "$REPO_PATH" && git pull && git submodule update --init --recursive)
   fi
-  echo "✔ 源码下载/更新完成。"
 
-  echo "▶ 步骤 4/4: 编译 ethminer (禁用Hunter，使用系统库)..."
+  echo "--> 正在编译 ethminer (禁用Hunter，使用系统库)..."
   (
     cd "$REPO_PATH"
     mkdir -p build
     cd build
     # --- 这是最终的、最关键的修复 ---
-    # 显式禁用 Hunter，并告诉 CMake 在 /usr/local 查找我们手动安装的依赖
+    # 显式禁用 Hunter，并告诉 CMake 在 /usr/local 查找我们手动安装的所有依赖
     cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF -DHUNTER_ENABLED=OFF -DCMAKE_PREFIX_PATH=/usr/local
     make -j"$(get_cpu_cores)"
   ) || { echo "!! 致命错误：编译 ethminer 失败。请检查以上日志。"; exit 1; }
@@ -181,7 +193,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v7.3           ║
+║           Ethminer 矿工专业工具 v7.4           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
