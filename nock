@@ -1,11 +1,9 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v9.0 (终极解决方案 - 自动"投喂"Hunter)
-# 策略：正视 Hunter 官方下载地址失效的根本问题。本脚本将：
-# 1. 自动从一个可靠的备用源 (SourceForge) 下载所需的 Boost 库。
-# 2. 自动校验下载文件的 SHA1 值，确保其正确性。
-# 3. 自动将文件放置到 Hunter 的缓存目录中，完成“投喂”。
-# 4. 最后才运行 cmake，从而彻底绕开网络下载失败的问题。
-# 这是在无代理环境下，针对 ethminer 最新版的终极自动化解决方案。
+# Ethminer 矿工专业工具 v9.1 (终极解决方案 - 修正版)
+# 策略：修正了 v9.0 中一个愚蠢的路径问题。在删除旧源码目录后，
+# 强制切换回 HOME 目录，然后再执行 git clone，以防止
+# "Unable to read current working directory" 的错误。
+# 其他逻辑（自动"投喂"Hunter）保持不变。
 
 set -euo pipefail
 IFS='
@@ -74,9 +72,15 @@ install_ethminer() {
   echo "✔ 基础编译工具安装完成。"
 
   echo "▶ 步骤 2/5: 清理旧环境并为 Hunter 准备依赖..."
+  
+  # ### 这是最关键的修复：清理后立即切换到安全目录 ###
+  echo "--> 切换到安全的主目录..."
+  cd "$HOME"
+  
   # 清理
+  echo "--> 正在清理旧文件..."
   rm -rf "$REPO_PATH" "$HOME/.hunter"
-  $SUDO_CMD rm -rf "/root/.hunter"
+  $SUDO_CMD rm -rf "/root/.hunter" # 如果以sudo运行，也清理root的缓存
   
   # 定义 Boost 依赖信息
   BOOST_VERSION="1.66.0"
@@ -84,7 +88,12 @@ install_ethminer() {
   BOOST_FILENAME="boost_1_66_0.7z"
   # 可靠的备用下载地址
   BOOST_URL="https://sourceforge.net/projects/boost/files/boost/${BOOST_VERSION}/${BOOST_FILENAME}/download"
-  HUNTER_CACHE_DIR="$HOME/.hunter/_Base/Download/Boost/${BOOST_VERSION}/${BOOST_SHA1:0:7}"
+  # 根据当前用户确定Hunter缓存目录
+  HUNTER_USER_CACHE_DIR="$HOME/.hunter"
+  if [ "$(id -u)" -eq 0 ]; then
+      HUNTER_USER_CACHE_DIR="/root/.hunter"
+  fi
+  HUNTER_CACHE_DIR="$HUNTER_USER_CACHE_DIR/_Base/Download/Boost/${BOOST_VERSION}/${BOOST_SHA1:0:7}"
   
   echo "--> [投喂 Hunter] 正在准备依赖: Boost v${BOOST_VERSION}"
   mkdir -p "$HUNTER_CACHE_DIR"
@@ -170,7 +179,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v9.0           ║
+║           Ethminer 矿工专业工具 v9.1           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
