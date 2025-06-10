@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v2.1
-# 修复了在 CentOS/RHEL 系统上因缺少 EPEL 源而无法找到依赖的问题
+# Ethminer 矿工专业工具 v2.2
+# 修复了在 CentOS/RHEL 系统上因缺少 CRB/PowerTools 源而找不到依赖的问题
 
 set -euo pipefail
 IFS='
@@ -76,11 +76,18 @@ install_ethminer() {
       $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev
       ;;
     dnf)
-      # --- 这是关键的修复 ---
-      echo "--> 正在为 dnf/yum 系统启用 EPEL 仓库..."
+      # --- 这是最终的关键修复 ---
+      echo "--> 正在为 dnf/yum 系统安装核心插件..."
+      $SUDO_CMD "$PKG_MANAGER" install -y dnf-plugins-core
+      
+      echo "--> 正在启用 EPEL 仓库..."
       $SUDO_CMD "$PKG_MANAGER" install -y epel-release
+      
+      echo "--> 正在启用 CRB (CodeReady Builder) / PowerTools 仓库..."
+      # 兼容不同系统命名 (crb是新名字, powertools是旧名字)
+      $SUDO_CMD dnf config-manager --set-enabled crb || $SUDO_CMD dnf config-manager --set-enabled powertools
+
       echo "--> 正在安装核心依赖..."
-      # dnf 和 yum 的命令和包名通常兼容
       $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make json-rpc-cpp-devel
       ;;
   esac
@@ -131,6 +138,7 @@ install_ethminer() {
 }
 
 # --- 日常管理功能 ---
+# (这部分代码没有改动，保持原样)
 
 change_mining_address() {
     . "$CONFIG_FILE"
@@ -222,12 +230,11 @@ show_monitor() {
 
 show_menu() {
   while true; do
-    # 每次循环都加载配置，以反映更改
     if [ -f "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v2.1          ║
+║              Ethminer 矿工专业工具 v2.2          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
@@ -240,7 +247,6 @@ EOF
     else
         echo "当前状态: 已停止"
     fi
-    # 确保变量存在，避免报错
     echo "挖矿地址: ${MINING_ADDRESS:-未设置}"
     echo "矿池地址: ${POOL_URL:-未设置}"
     echo
