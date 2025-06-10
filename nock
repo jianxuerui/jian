@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v8.0 (终极解决方案 - 无需代理)
-# 策略：正视 Hunter 在无代理环境下不可行，且新版 ethminer 移除了本地依赖源码。
-# 解决方案是：克隆一个经典的、稳定的旧版本 (v0.18.0)，这个版本仍然
-# 包含所有依赖的子模块源码 (externals/)。然后通过编译这些自带的、
-# 版本匹配的源码来完成安装，从而彻底绕开 Hunter 和网络下载问题。
+# Ethminer 矿工专业工具 v8.1 (终极解决方案 - 修正版)
+# 策略：修正了克隆指定版本的方法。不再使用无效的 --branch 参数，
+# 而是采用标准的 "先克隆，再检出标签，最后更新子模块" 流程。
+# 这能100%保证我们获取到的是 v0.18.0 版本及其对应的、包含所有
+# 源码的子模块，从而彻底解决问题。
 
 set -euo pipefail
 IFS='
@@ -76,15 +76,28 @@ install_ethminer() {
   esac
   echo "✔ 基础环境和系统依赖安装完成。"
   
-  echo "▶ 步骤 2/4: 强制全新克隆 ethminer v0.18.0 (一个包含本地依赖的稳定版)..."
+  # ### 这是最最最关键的修复：正确地检出指定的 Tag ###
+  echo "▶ 步骤 2/4: 强制全新克隆并检出 ethminer v0.18.0..."
   echo "--> 正在删除旧的源码目录 (如有): $REPO_PATH"
   rm -rf "$REPO_PATH"
-  echo "--> 正在以 --recursive 模式完整克隆 ethminer v0.18.0..."
-  # ### 这是最关键的修复：克隆指定的、包含 externals/ 的 tag ###
-  if ! git clone --recursive --branch v0.18.0 https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
+  
+  echo "--> 正在克隆 ethminer 仓库..."
+  if ! git clone https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
     echo "!! 克隆失败，请检查网络连接或 Git 是否已正确安装。" >&2; exit 1;
   fi
-  echo "✔ 源码及所有依赖子模块已完整下载。"
+  
+  (
+    cd "$REPO_PATH"
+    echo "--> 正在切换到稳定的 v0.18.0 版本..."
+    if ! git checkout v0.18.0; then
+      echo "!! 切换到 tag v0.18.0 失败。" >&2; exit 1;
+    fi
+    echo "--> 正在初始化并下载 v0.18.0 对应的所有子模块..."
+    if ! git submodule update --init --recursive; then
+      echo "!! 更新子模块失败。" >&2; exit 1;
+    fi
+  )
+  echo "✔ 源码及所有依赖子模块已完整下载并切换到 v0.18.0。"
 
   echo "▶ 步骤 3/4: 编译 ethminer 自带的依赖库 (保证版本兼容)..."
   # --- 编译 CLI11 ---
@@ -157,7 +170,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v8.0           ║
+║           Ethminer 矿工专业工具 v8.1           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
