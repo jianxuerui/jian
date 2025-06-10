@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v7.0
+# Ethminer 矿工专业工具 v7.1 (已修复 OpenSSL 依赖问题)
 # 最终版：采用多阶段构建，手动编译并链接所有缺失的依赖项（jsoncpp, ethash）。
 
 set -euo pipefail
@@ -109,7 +109,8 @@ install_ethminer() {
     apt)
       $SUDO_CMD apt-get update
       # 在apt系统中，这些依赖通常都是可用的
-      $SUDO_CMD apt-get install -y git cmake build-essential libjsoncpp-dev libethash-dev libboost-all-dev
+      # ### 新增 ### 添加了 libssl-dev 来解决 OpenSSL 编译依赖问题
+      $SUDO_CMD apt-get install -y git cmake build-essential libjsoncpp-dev libethash-dev libboost-all-dev libssl-dev
       ;;
     dnf)
       echo "--> 正在启用 EPEL 和 CRB/PowerTools 仓库..."
@@ -118,7 +119,8 @@ install_ethminer() {
       if [ -n "$REPO_ID" ]; then $SUDO_CMD dnf config-manager --set-enabled "$REPO_ID"; fi
       
       echo "--> 正在安装基础依赖 (git, cmake, gcc, make, boost)..."
-      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make boost-devel
+      # ### 新增 ### 添加了 openssl-devel 来解决 OpenSSL 编译依赖问题
+      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make boost-devel openssl-devel
       ;;
   esac
   echo "✔ 基础环境和可用依赖安装完成。"
@@ -182,7 +184,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v7.0          ║
+║           Ethminer 矿工专业工具 v7.1           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
