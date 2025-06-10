@@ -1,12 +1,14 @@
 #!/usr/bin/env sh
+# shellcheck disable=SC2034,SC2164
+# 增强版 Nockchain 矿工工具 v5.0
+# 全平台兼容优化版
+
 set -euo pipefail
+# 使用换行符作为字段分隔符，以处理带空格的文件名
 IFS='
 '
 
-# 增强版 Nockchain 矿工工具 v4.0
-# 全平台兼容优化版
-
-# 颜色定义
+# --- 颜色定义 ---
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
@@ -14,29 +16,57 @@ CYAN='\033[1;36m'
 BLUE='\033[1;34m'
 NC='\033[0m'
 
-# 全局配置
+# --- 全局配置 ---
 NOCK_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nockchain"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nockchain"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nockchain"
 LOG_FILE="$CACHE_DIR/miner.log"
+CONFIG_FILE="$CONFIG_DIR/miner.conf"
+PID_FILE="$CACHE_DIR/miner.pid"
+
+# --- 动态命令配置 ---
+# 自动检测是否需要sudo
+SUDO_CMD=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO_CMD="sudo"
+fi
+
+# --- 环境与依赖 ---
+
+# 跨平台获取CPU核心数
+get_cpu_cores() {
+  case "$(uname -s)" in
+    Linux*)  nproc 2>/dev/null || echo "2" ;;
+    Darwin*) sysctl -n hw.ncpu 2>/dev/null || echo "2" ;;
+    *)       echo "2" ;; # 安全的回退值
+  esac
+}
 
 # 初始化环境
 init_environment() {
   mkdir -p "$NOCK_DIR" "$CONFIG_DIR" "$CACHE_DIR"
-  [ -f "$CONFIG_DIR/miner.conf" ] || cat > "$CONFIG_DIR/miner.conf" <<EOF
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "${CYAN}▶ 正在创建默认配置文件...${NC}"
+    cat > "$CONFIG_FILE" <<EOF
+# Nockchain 矿工配置文件
 MINING_ADDRESS="0x0000000000000000000000000000000000000000"
 RPC_URL="http://127.0.0.1:8545"
-MINING_THREADS=$(nproc)
-OPT_MODE="auto"
+MINING_THREADS=$(get_cpu_cores)
+# 编译优化模式: release, pgo, lto, bolt
+OPT_MODE="release"
+# 源码存放路径
+REPO_PATH="$HOME/nockchain"
 EOF
-  . "$CONFIG_DIR/miner.conf"
+  fi
+  # 加载配置，使其在整个脚本中可用
+  . "$CONFIG_FILE"
 }
 
 # 跨平台检测
 detect_platform() {
   OS_NAME=$(uname -s | tr '[:upper:]' '[:lower:]')
   case "$OS_NAME" in
-    linux*)  
+    linux*)
       [ -f /etc/os-release ] && . /etc/os-release
       PKG_MANAGER=""
       [ -x "$(command -v apt)" ] && PKG_MANAGER="apt"
@@ -49,47 +79,46 @@ detect_platform() {
   esac
 }
 
-# 安全临时文件
+# 安全创建临时文件
 create_tempfile() {
-  if command -v mktemp >/dev/null; then
-    mktemp 2>/dev/null || echo "$CACHE_DIR/tmp.$$"
-  else
-    printf "%s/tmp.%s" "$CACHE_DIR" $(date +%s%N)
-  fi
+  # mktemp优先，兼容macOS的-t参数
+  mktemp -t nockchain.XXXXXX 2>/dev/null || printf "%s/tmp.%s.%s" "$CACHE_DIR" "$(date +%s%N)" "$$"
 }
 
 # 依赖管理
 install_deps() {
+  echo "${CYAN}▶ 正在安装依赖...${NC}"
   case "$PKG_MANAGER" in
     apt)
-      sudo apt update
-      sudo apt install -y build-essential cmake clang llvm git curl
+      $SUDO_CMD apt-get update
+      $SUDO_CMD apt-get install -y build-essential cmake clang llvm git curl
       ;;
     dnf|yum)
-      sudo $PKG_MANAGER install -y gcc-c++ make cmake clang llvm-toolset
+      $SUDO_CMD "$PKG_MANAGER" install -y gcc-c++ make cmake clang llvm-toolset git curl
       ;;
     pacman)
-      sudo pacman -S --noconfirm base-devel cmake clang llvm
+      $SUDO_CMD pacman -S --noconfirm --needed base-devel cmake clang llvm git curl
       ;;
     brew)
       brew update
-      brew install cmake llvm
+      brew install cmake llvm git
       ;;
     pkg)
-      sudo pkg install -y gmake cmake clang llvm git
+      $SUDO_CMD pkg install -y gmake cmake clang llvm git curl
       ;;
     *)
-      echo "${RED}不支持的包管理器: $PKG_MANAGER${NC}" >&2
+      echo "${RED}不支持的包管理器: $PKG_MANAGER。请手动安装 build-essential, cmake, clang, git, curl。${NC}" >&2
       exit 1
       ;;
   esac
 }
 
-# 安全克隆仓库
+# --- 安装与编译 ---
+
+# 安全克隆或更新仓库
 safe_clone_repo() {
-  REPO_PATH="$HOME/nockchain"
-  if [ ! -d "$REPO_PATH" ]; then
-    echo "${CYAN}▶ 正在克隆主仓库...${NC}"
+  if [ ! -d "$REPO_PATH/.git" ]; then
+    echo "${CYAN}▶ 正在克隆主仓库到 '$REPO_PATH'...${NC}"
     if ! git clone https://github.com/nockchain/nockchain.git "$REPO_PATH"; then
       echo "${YELLOW}HTTPS克隆失败，尝试SSH方式...${NC}"
       git clone git@github.com:nockchain/nockchain.git "$REPO_PATH" || {
@@ -98,25 +127,44 @@ safe_clone_repo() {
       }
     fi
   else
-    echo "${CYAN}▶ 更新仓库代码...${NC}"
-    git -C "$REPO_PATH" pull || {
-      echo "${YELLOW}更新失败，尝试强制更新...${NC}"
-      git -C "$REPO_PATH" fetch --all
-      git -C "$REPO_PATH" reset --hard origin/main
-    }
+    echo "${CYAN}▶ 正在更新仓库代码...${NC}"
+    (
+      cd "$REPO_PATH"
+      if ! git pull; then
+        echo "${YELLOW}更新失败，可能存在本地修改。将尝试暂存后更新...${NC}"
+        if git stash && git pull && git stash pop; then
+          echo "${GREEN}仓库更新成功，本地修改已恢复。${NC}"
+        else
+          echo "${RED}自动更新失败。请手动解决 '$REPO_PATH' 中的冲突。${NC}" >&2
+          printf "${YELLOW}是否要放弃所有本地修改并强制更新？[y/N]: ${NC}"
+          read -r confirm
+          if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            git fetch --all && git reset --hard origin/main
+            echo "${GREEN}已强制更新。${NC}"
+          else
+            echo "${RED}操作已取消。${NC}"
+            exit 1
+          fi
+        fi
+      fi
+    )
   fi
 }
 
 # 编译优化
 optimized_build() {
-  cd "$HOME/nockchain"
-  make clean
-  case "$OPT_MODE" in
-    pgo)   make pgo ;;
-    lto)   make lto ;;
-    bolt)  make bolt ;;
-    *)     make release ;;
-  esac
+  echo "${CYAN}▶ 正在以 '${OPT_MODE}' 模式编译...${NC}"
+  (
+    cd "$REPO_PATH"
+    make clean
+    # 根据配置的优化模式选择编译命令
+    case "$OPT_MODE" in
+      pgo)   make pgo ;;
+      lto)   make lto ;;
+      bolt)  make bolt ;;
+      *)     make release ;;
+    esac
+  ) || { echo "${RED}编译失败，请检查依赖和源码。${NC}"; exit 1; }
 }
 
 # 主安装流程
@@ -125,50 +173,318 @@ install_nockchain() {
   install_deps
   safe_clone_repo
   optimized_build
-  
-  echo "${GREEN}▶ 安装优化版本...${NC}"
-  install -m755 "$HOME/nockchain/build/nockchain" "${HOME}/.local/bin/"
+
+  echo "${GREEN}▶ 正在安装优化版本...${NC}"
+  mkdir -p "${HOME}/.local/bin"
+  install -m755 "$REPO_PATH/build/nockchain" "${HOME}/.local/bin/"
+
+  # 检查PATH并提供指导
+  if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+    echo "${YELLOW}----------------------------------------------------------------------${NC}"
+    echo "${YELLOW}注意: '${HOME}/.local/bin' 不在你的 PATH 环境变量中。${NC}"
+    echo "${YELLOW}请将以下行添加到你的 shell 配置文件 (如 ~/.bashrc, ~/.zshrc) 中:${NC}"
+    echo
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo
+    echo "${YELLOW}然后重启你的终端, 或运行 'source ~/.your_shell_profile' 来立即生效。${NC}"
+    echo "${YELLOW}----------------------------------------------------------------------${NC}"
+  fi
+  echo "${GREEN}✔ Nockchain 安装/更新完成!${NC}"
+  sleep 3
 }
 
-# 清理临时文件
+# --- 核心功能 ---
+
+configure_miner() {
+  echo "${CYAN}▶ 打开配置文件进行编辑...${NC}"
+  # 优先使用nano，其次vi/vim
+  if command -v nano >/dev/null; then
+    nano "$CONFIG_FILE"
+  elif command -v vi >/dev/null; then
+    vi "$CONFIG_FILE"
+  else
+    echo "${RED}未找到命令行编辑器 (nano, vi)。请手动编辑:${NC}"
+    echo "$CONFIG_FILE"
+  fi
+  echo "${GREEN}配置完成。部分更改可能需要重启矿机才能生效。${NC}"
+  sleep 2
+}
+
+start_miner() {
+  if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
+      echo "${YELLOW}矿机已经在运行 (PID: $(cat "$PID_FILE"))。${NC}"
+      sleep 2
+      return
+  fi
+
+  echo "${CYAN}▶ 正在启动矿机...${NC}"
+  if ! command -v nockchain >/dev/null; then
+    echo "${RED}错误: 'nockchain' 命令未找到。请先执行安装 (选项 1)。${NC}" >&2
+    sleep 2
+    return 1
+  fi
+
+  # 重新加载配置以确保最新
+  . "$CONFIG_FILE"
+
+  echo "日志文件: $LOG_FILE"
+  # 使用nohup在后台运行，并将输出重定向到日志
+  nohup nockchain \
+    --address "$MINING_ADDRESS" \
+    --rpc "$RPC_URL" \
+    --threads "$MINING_THREADS" \
+    >"$LOG_FILE" 2>&1 &
+
+  MINER_PID=$!
+  echo "$MINER_PID" > "$PID_FILE"
+  sleep 1
+  if ps -p "$MINER_PID" > /dev/null; then
+    echo "${GREEN}✔ 矿机已启动，进程ID: $MINER_PID${NC}"
+  else
+    echo "${RED}✘ 矿机启动失败，请检查日志: $LOG_FILE${NC}"
+    rm -f "$PID_FILE"
+  fi
+  sleep 2
+}
+
+stop_miner() {
+  if [ ! -f "$PID_FILE" ]; then
+    echo "${YELLOW}未找到PID文件，矿机可能未在运行。${NC}"
+    sleep 2
+    return
+  fi
+  
+  PID=$(cat "$PID_FILE")
+  if ps -p "$PID" > /dev/null; then
+    echo "${CYAN}▶ 正在停止矿机 (PID: $PID)...${NC}"
+    kill "$PID"
+    sleep 2
+    if ! ps -p "$PID" > /dev/null; then
+      echo "${GREEN}✔ 矿机已停止。${NC}"
+      rm -f "$PID_FILE"
+    else
+      echo "${YELLOW}等待超时，尝试强制停止...${NC}"
+      kill -9 "$PID"
+      rm -f "$PID_FILE"
+    fi
+  else
+    echo "${YELLOW}PID $PID 不存在，可能已被手动停止。正在清理PID文件...${NC}"
+    rm -f "$PID_FILE"
+  fi
+  sleep 2
+}
+
+show_monitor() {
+  if [ -f "$LOG_FILE" ]; then
+    echo "${CYAN}▶ 实时监控日志 (按 Ctrl+C 退出)...${NC}"
+    tail -f "$LOG_FILE"
+  else
+    echo "${YELLOW}日志文件不存在，请先启动矿机。${NC}"
+    sleep 2
+  fi
+}
+
+show_compile_menu() {
+  while true; do
+    . "$CONFIG_FILE" # 确保读取最新配置
+    clear
+    echo "${BLUE}--- 高级编译设置 ---${NC}"
+    echo "当前编译优化模式: ${GREEN}${OPT_MODE}${NC}"
+    echo
+    echo "1) release (标准发布版，最稳定)"
+    echo "2) lto     (链接时优化，提升性能)"
+    echo "3) pgo     (配置文件引导优化，更高性能)"
+    echo "4) bolt    (二进制优化，极限性能)"
+    echo "0) 返回主菜单"
+    echo
+    printf "${CYAN}➤ 请选择新的编译模式 [0-4]: ${NC}"
+    read -r choice
+
+    NEW_MODE=""
+    case $choice in
+      1) NEW_MODE="release" ;;
+      2) NEW_MODE="lto" ;;
+      3) NEW_MODE="pgo" ;;
+      4) NEW_MODE="bolt" ;;
+      0) return ;;
+      *) echo "${RED}无效选项。${NC}"; sleep 1; continue ;;
+    esac
+
+    # 跨平台 sed -i
+    if sed -i.bak "s/OPT_MODE=.*/OPT_MODE=\"$NEW_MODE\"/" "$CONFIG_FILE"; then
+       rm -f "${CONFIG_FILE}.bak"
+       echo "${GREEN}✔ 编译模式已更新为 '$NEW_MODE'。下次安装/更新时将生效。${NC}"
+    else
+       echo "${RED}✘ 更新配置文件失败。${NC}"
+    fi
+    sleep 2
+  done
+}
+
+manage_service() {
+    if ! command -v systemctl >/dev/null; then
+        echo "${RED}系统未检测到 systemd (systemctl)，无法使用此功能。${NC}"
+        sleep 2
+        return
+    fi
+    
+    SERVICE_FILE="/etc/systemd/system/nockchain-miner.service"
+    
+    show_service_menu() {
+        clear
+        echo "${BLUE}--- 系统服务管理 (systemd) ---${NC}"
+        $SUDO_CMD systemctl is-active --quiet nockchain-miner.service && \
+            echo "服务状态: ${GREEN}运行中${NC}" || echo "服务状态: ${RED}已停止${NC}"
+        $SUDO_CMD systemctl is-enabled --quiet nockchain-miner.service && \
+            echo "开机自启: ${GREEN}已启用${NC}" || echo "开机自启: ${RED}已禁用${NC}"
+        echo
+        echo "1) 创建/更新服务"
+        echo "2) 启用开机自启"
+        echo "3) 禁用开机自启"
+        echo "4) 启动服务"
+        echo "5) 停止服务"
+        echo "6) 查看服务状态"
+        echo "7) 移除服务"
+        echo "0) 返回主菜单"
+        printf "${CYAN}➤ 请输入选项 [0-7]: ${NC}"
+        read -r service_choice
+    }
+
+    while true; do
+        show_service_menu
+        case $service_choice in
+            1)
+                echo "${CYAN}▶ 正在创建 systemd 服务文件...${NC}"
+                NOCKCHAIN_PATH=$(command -v nockchain)
+                if [ -z "$NOCKCHAIN_PATH" ]; then
+                    echo "${RED}未找到 'nockchain' 可执行文件，请先安装。${NC}"; sleep 2; continue;
+                fi
+                SERVICE_CONTENT=$(cat <<EOF
+[Unit]
+Description=Nockchain Miner Service
+After=network.target
+
+[Service]
+User=$(whoami)
+ExecStart=$NOCKCHAIN_PATH --address $MINING_ADDRESS --rpc $RPC_URL --threads $MINING_THREADS
+Restart=always
+RestartSec=10
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+                echo "$SERVICE_CONTENT" | $SUDO_CMD tee "$SERVICE_FILE" >/dev/null
+                $SUDO_CMD systemctl daemon-reload
+                echo "${GREEN}✔ 服务文件已创建/更新。${NC}"
+                sleep 2
+                ;;
+            2) $SUDO_CMD systemctl enable nockchain-miner.service && echo "${GREEN}✔ 已启用开机自启。${NC}" || echo "${RED}✘ 操作失败。${NC}"; sleep 2 ;;
+            3) $SUDO_CMD systemctl disable nockchain-miner.service && echo "${GREEN}✔ 已禁用开机自启。${NC}" || echo "${RED}✘ 操作失败。${NC}"; sleep 2 ;;
+            4) $SUDO_CMD systemctl start nockchain-miner.service && echo "${GREEN}✔ 服务已启动。${NC}" || echo "${RED}✘ 启动失败，请用选项6查看日志。${NC}"; sleep 2 ;;
+            5) $SUDO_CMD systemctl stop nockchain-miner.service && echo "${GREEN}✔ 服务已停止。${NC}" || echo "${RED}✘ 操作失败。${NC}"; sleep 2 ;;
+            6) echo "${CYAN}--- 服务状态 ---${NC}"; $SUDO_CMD systemctl status nockchain-miner.service; echo "${CYAN}按任意键返回...${NC}"; read -n 1; ;;
+            7)
+                echo "${YELLOW}警告：这将停止并移除服务文件。${NC}"
+                printf "${CYAN}确定要移除吗？[y/N]: ${NC}"
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                    $SUDO_CMD systemctl stop nockchain-miner.service
+                    $SUDO_CMD systemctl disable nockchain-miner.service
+                    $SUDO_CMD rm -f "$SERVICE_FILE"
+                    $SUDO_CMD systemctl daemon-reload
+                    echo "${GREEN}✔ 服务已移除。${NC}"
+                else
+                    echo "${RED}操作已取消。${NC}"
+                fi
+                sleep 2
+                ;;
+            0) return ;;
+            *) echo "${RED}无效选项。${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+tune_performance() {
+  echo "${BLUE}--- 性能调优建议 ---${NC}"
+  echo
+  echo "1. ${CYAN}CPU亲和性 (Linux):${NC}"
+  echo "   你可以使用 'taskset' 将矿工进程绑定到特定的CPU核心，以减少缓存抖动。"
+  echo "   例如，要绑定到核心 0, 1, 2, 3:"
+  if command -v taskset >/dev/null; then
+    echo "   ${GREEN}taskset -c 0-3 nockchain [参数]...${NC}"
+    echo "   'taskset' 命令已在你的系统上找到。"
+  else
+    echo "   ${YELLOW}命令 'taskset' 在你的系统上未找到。${NC}"
+  fi
+  echo
+  echo "2. ${CYAN}内存大页 (Huge Pages):${NC}"
+  echo "   启用大页可以提高内存密集型应用的性能。具体配置方法因系统而异。"
+  echo
+  echo "3. ${CYAN}超频:${NC}"
+  echo "   对CPU和内存进行适当超频可以显著提升算力，但请注意散热和稳定性。"
+  echo
+  printf "${CYAN}按任意键返回...${NC}"
+  read -n 1
+}
+
+# --- 主流程控制 ---
+
 cleanup() {
-  rm -rf "${TMPFILE:-/tmp/nockchain*}"
+  # 清理临时文件，并取消陷阱以防止递归
+  rm -f "${TMPFILE:-/tmp/nockchain_tmp_*}"
   trap - EXIT INT TERM
 }
 
-# 主菜单
 show_menu() {
   while true; do
+    . "$CONFIG_FILE" # 每次循环都加载配置，以反映更改
     clear
     echo "${BLUE}"
-    echo "╔════════════════════════════════════════════════╗"
-    echo "║             Nockchain 矿工专业版               ║"
-    echo "╠════════════════════════════════════════════════╣"
-    echo "║ 1) 完整安装/更新     2) 配置矿工参数           ║"
-    echo "║ 3) 启动矿机         4) 实时监控               ║"
-    echo "║ 5) 高级编译设置     6) 系统服务管理           ║"
-    echo "║ 7) 性能调优         0) 退出                   ║"
-    echo "╚════════════════════════════════════════════════╝"
+    cat << "EOF"
+╔════════════════════════════════════════════════╗
+║             Nockchain 矿工专业版 v5.0            ║
+╠════════════════════════════════════════════════╣
+║ 1) 完整安装/更新     2) 配置矿工参数           ║
+║ 3) 启动/停止矿机     4) 实时监控               ║
+║ 5) 高级编译设置     6) 系统服务管理 (systemd)   ║
+║ 7) 性能调优         0) 退出                   ║
+╚════════════════════════════════════════════════╝
+EOF
     echo "${NC}"
-    
+
+    # 动态显示启动/停止选项
+    if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
+        echo "状态: ${GREEN}运行中${NC} | 选项 3 将会 ${RED}停止${NC} 矿机"
+    else
+        echo "状态: ${RED}已停止${NC} | 选项 3 将会 ${GREEN}启动${NC} 矿机"
+    fi
+
     printf "${CYAN}➤ 请输入选项 [0-7]: ${NC}"
     read -r choice
-    
+
     case $choice in
       1) install_nockchain ;;
       2) configure_miner ;;
-      3) start_miner ;;
+      3) 
+        if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
+            stop_miner
+        else
+            start_miner
+        fi
+        ;;
       4) show_monitor ;;
       5) show_compile_menu ;;
       6) manage_service ;;
       7) tune_performance ;;
-      0) exit 0 ;;
+      0) echo "${GREEN}感谢使用，再见！${NC}"; exit 0 ;;
       *) echo "${RED}无效选项，请重新输入${NC}"; sleep 1 ;;
     esac
   done
 }
 
-# 初始化执行
 main() {
   TMPFILE=$(create_tempfile)
   trap cleanup EXIT INT TERM
@@ -176,4 +492,5 @@ main() {
   show_menu
 }
 
+# 启动主程序
 main "$@"
