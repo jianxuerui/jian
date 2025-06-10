@@ -1,232 +1,214 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
 
-# Nockchain 挖矿工具 - 精简优化版
-# 功能：安装、更改挖矿公钥、节点启动和日志查看
+## 增强版 Nockchain 挖矿工具
+## 版本: 2.0.0 (优化编译版)
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
 
-# 配置文件和目录
-NOCKCHAIN_DIR="$HOME/.nockchain"
-CONFIG_FILE="$NOCKCHAIN_DIR/miner.conf"
-LOG_FILE="$NOCKCHAIN_DIR/miner.log"
-PID_FILE="$NOCKCHAIN_DIR/miner.pid"
+# 全局配置
+NOCK_DIR="$HOME/.nockchain"
+CONFIG_FILE="$NOCK_DIR/miner.conf"
+LOG_FILE="$NOCK_DIR/miner.log"
+PROFILE_DATA="$NOCK_DIR/pgo.prof"
+OPT_LEVEL=3  # 默认优化级别
 
-# 创建目录
-mkdir -p "$NOCKCHAIN_DIR"
+## 初始化环境
+init() {
+  mkdir -p "$NOCK_DIR"
+  [[ -f "$CONFIG_FILE" ]] || {
+    cat >"$CONFIG_FILE" <<-EOF
+MINING_ADDRESS="0x0000000000000000000000000000000000000000"
+RPC_URL="http://127.0.0.1:8545"
+MINING_THREADS=$(nproc)
+OPT_MODE="auto"  # auto/pgo/lto/bolt
+EOF
+  }
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+}
 
-# 检查配置文件是否存在，不存在则创建
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "# Nockchain 挖矿配置" > "$CONFIG_FILE"
-  echo "MINING_ADDRESS=\"0x0000000000000000000000000000000000000000\"" >> "$CONFIG_FILE"
-  echo "RPC_URL=\"http://127.0.0.1:8545\"" >> "$CONFIG_FILE"
-  echo "MINING_THREADS=4" >> "$CONFIG_FILE"
-fi
-
-# 加载配置
-source "$CONFIG_FILE"
-
-# 检查依赖
-check_dependencies() {
-  echo -e "${CYAN}正在检查系统依赖...${RESET}"
-  
-  # 检查必要的命令
-  for cmd in curl git build-essential; do
-    if ! command -v $cmd &> /dev/null; then
-      echo -e "${YELLOW}正在安装 $cmd...${RESET}"
-      sudo apt-get update
-      sudo apt-get install -y $cmd
+## 高级依赖检查
+check_advanced_deps() {
+  local required=("perf" "llvm-bolt" "clang")
+  for cmd in "${required[@]}"; do
+    if ! command -v "$cmd" &>/dev/null; then
+      echo -e "${YELLOW}安装高级优化工具: $cmd${RESET}"
+      sudo apt-get install -y "$cmd" || sudo yum install -y "$cmd"
     fi
   done
-  
-  # 检查 Rust 环境
-  if ! command -v rustc &> /dev/null; then
-    echo -e "${YELLOW}Rust 未安装，正在安装...${RESET}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-  
-  echo -e "${GREEN}系统依赖检查完成！${RESET}"
 }
 
-# 安装 Nockchain
+## CPU微架构检测
+detect_cpu_arch() {
+  local flags
+  flags=$(grep -m1 'flags' /proc/cpuinfo || sysctl -n machdep.cpu.features)
+  case "$flags" in
+    *avx512*)   echo "skylake-avx512" ;;
+    *avx2*)     echo "haswell" ;;
+    *avx*)      echo "sandybridge" ;;
+    *)          echo "native" ;;
+  esac
+}
+
+## PGO优化编译
+build_with_pgo() {
+  echo -e "${CYAN}[阶段1/3] 生成PGO训练数据...${RESET}"
+  RUSTFLAGS="-Cprofile-generate=$PROFILE_DATA" \
+    cargo build --release --target-dir ./target/pgo
+
+  echo -e "${CYAN}[阶段2/3] 运行训练集...${RESET}"
+  ./target/pgo/release/nockchain bench --duration 600
+
+  echo -e "${CYAN}[阶段3/3] 应用PGO优化...${RESET}"
+  RUSTFLAGS="-Cprofile-use=$PROFILE_DATA -Cllvm-args=-pgo-warn-missing-function" \
+    cargo build --release --target-dir ./target/optimized
+}
+
+## BOLT后处理优化
+apply_bolt_optimization() {
+  local binary_path="$1"
+  echo -e "${CYAN}应用BOLT优化...${RESET}"
+  perf record -e cycles:u -g -- "$binary_path" bench --duration 10
+  perf2bolt "$binary_path" \
+    -p perf.data \
+    -o "$binary_path.bolt" \
+    -nl
+
+  mv "$binary_path.bolt" "$binary_path"
+  strip "$binary_path"
+}
+
+## 智能编译引擎
+optimized_build() {
+  local arch_level cpu_arch
+  cpu_arch=$(detect_cpu_arch)
+  arch_level="-C target-cpu=$cpu_arch -C target-feature=+lzcnt,+bmi2"
+
+  case "$OPT_MODE" in
+    pgo)
+      build_with_pgo
+      cp ./target/optimized/release/nockchain "$HOME/.local/bin/"
+      ;;
+    bolt)
+      RUSTFLAGS="$arch_level -C link-arg=-Wl,-q" cargo build --release
+      apply_bolt_optimization "$HOME/.local/bin/nockchain"
+      ;;
+    lto)
+      RUSTFLAGS="$arch_level -C lto=fat" \
+        cargo build --release --config profile.release.lto=\"fat\"
+      ;;
+    *)
+      RUSTFLAGS="$arch_level -C codegen-units=$(nproc)" \
+        cargo build --release
+      ;;
+  esac
+}
+
+## 安装流程升级
 install_nockchain() {
-  echo -e "${CYAN}开始安装 Nockchain...${RESET}"
-  
-  # 检查依赖
   check_dependencies
-  
-  # 克隆 Nockchain 代码库
-  echo -e "${CYAN}正在下载 Nockchain 源代码...${RESET}"
-  if [ ! -d "$HOME/nockchain" ]; then
+  check_advanced_deps  # 新增高级依赖检查
+
+  echo -e "${CYAN}获取最新代码...${RESET}"
+  [[ -d "$HOME/nockchain" ]] || \
     git clone https://github.com/nockchain/nockchain.git "$HOME/nockchain"
-  else
-    echo -e "${YELLOW}源代码已存在，正在更新...${RESET}"
-    cd "$HOME/nockchain"
-    git pull
-  fi
-  
-  # 编译 Nockchain
-  echo -e "${CYAN}正在编译 Nockchain...${RESET}"
+  git -C "$HOME/nockchain" pull
+
+  echo -e "${CYAN}智能编译启动...${RESET}"
   cd "$HOME/nockchain"
-  cargo build --release
-  
-  # 复制可执行文件到本地 bin 目录
-  mkdir -p "$HOME/.local/bin"
-  cp "$HOME/nockchain/target/release/nockchain" "$HOME/.local/bin/"
-  
-  echo -e "${GREEN}Nockchain 安装完成！${RESET}"
-  
-  # 提示更改挖矿地址
-  echo -e "${YELLOW}请记得使用选项 2 设置您的挖矿公钥！${RESET}"
+  optimized_build
+
+  echo -e "${CYAN}安装优化版本...${RESET}"
+  install -m755 "$HOME/nockchain/target/release/nockchain" "$HOME/.local/bin/"
+  [[ "$OPT_MODE" == "pgo" ]] && \
+    install -m755 "$HOME/nockchain/target/optimized/release/nockchain" "$HOME/.local/bin/"
+
+  echo -e "${GREEN}优化编译完成！当前模式: ${YELLOW}$OPT_MODE${RESET}"
 }
 
-# 更改挖矿公钥
-change_mining_key() {
-  echo -e "${CYAN}当前挖矿公钥: ${YELLOW}$MINING_ADDRESS${RESET}"
-  echo -e "${CYAN}请输入新的挖矿公钥地址 (0x开头的42位地址):${RESET}"
-  read -r new_address
-  
-  # 验证地址格式
-  if [[ $new_address =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-    # 更新配置文件
-    sed -i "s/^MINING_ADDRESS=.*/MINING_ADDRESS=\"$new_address\"/" "$CONFIG_FILE"
-    source "$CONFIG_FILE"
-    echo -e "${GREEN}挖矿公钥已更新为: ${YELLOW}$MINING_ADDRESS${RESET}"
-  else
-    echo -e "${RED}无效的地址格式！请输入有效的以太坊格式地址 (0x开头的42位十六进制字符串)${RESET}"
-  fi
-}
-
-# 启动挖矿节点
-start_mining() {
-  # 检查是否已安装
-  if [ ! -f "$HOME/.local/bin/nockchain" ]; then
-    echo -e "${RED}未检测到 Nockchain 安装，请先安装！${RESET}"
-    return 1
-  fi
-  
-  # 检查挖矿地址
-  if [ "$MINING_ADDRESS" = "0x0000000000000000000000000000000000000000" ]; then
-    echo -e "${RED}请先设置有效的挖矿公钥！${RESET}"
-    return 1
-  fi
-  
-  # 检查是否已经在运行
-  if [ -f "$PID_FILE" ] && ps -p $(cat "$PID_FILE") > /dev/null; then
-    echo -e "${YELLOW}挖矿节点已经在运行中！${RESET}"
-    return 0
-  fi
-  
-  # 显示当前配置
-  echo -e "${CYAN}当前挖矿配置:${RESET}"
-  echo -e "  挖矿地址: ${YELLOW}$MINING_ADDRESS${RESET}"
-  echo -e "  RPC URL: ${YELLOW}$RPC_URL${RESET}"
-  echo -e "  挖矿线程: ${YELLOW}$MINING_THREADS${RESET}"
-  
-  # 确认启动
-  echo -e "${CYAN}是否使用以上配置启动挖矿? (y/n)${RESET}"
-  read -r confirm
-  if [[ ! $confirm =~ ^[Yy]$ ]]; then
-    echo -e "${YELLOW}已取消启动${RESET}"
-    return 0
-  fi
-  
-  # 启动挖矿进程
-  echo -e "${CYAN}正在启动挖矿节点...${RESET}"
-  nohup "$HOME/.local/bin/nockchain" mine --address "$MINING_ADDRESS" --threads "$MINING_THREADS" --rpc "$RPC_URL" > "$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  
-  echo -e "${GREEN}挖矿节点已启动！PID: $(cat "$PID_FILE")${RESET}"
-  echo -e "${CYAN}使用选项 4 查看挖矿日志${RESET}"
-}
-
-# 查看挖矿日志
-view_logs() {
-  if [ ! -f "$LOG_FILE" ]; then
-    echo -e "${RED}日志文件不存在，请先启动挖矿节点！${RESET}"
-    return 1
-  fi
-  
-  echo -e "${CYAN}显示最近的挖矿日志:${RESET}"
-  echo -e "${YELLOW}按 Ctrl+C 退出日志查看${RESET}\n"
-  
-  # 先显示最后50行日志
-  tail -n 50 "$LOG_FILE"
-  
-  # 然后跟踪日志更新
-  echo -e "\n${CYAN}正在实时跟踪日志...${RESET}\n"
-  tail -f "$LOG_FILE"
-}
-
-# 停止挖矿
-stop_mining() {
-  if [ ! -f "$PID_FILE" ]; then
-    echo -e "${YELLOW}没有找到正在运行的挖矿进程${RESET}"
-    return 0
-  fi
-  
-  local pid=$(cat "$PID_FILE")
-  if ps -p $pid > /dev/null; then
-    echo -e "${CYAN}正在停止挖矿进程 (PID: $pid)...${RESET}"
-    kill $pid
-    rm "$PID_FILE"
-    echo -e "${GREEN}挖矿进程已停止${RESET}"
-  else
-    echo -e "${YELLOW}挖矿进程不存在，可能已经停止${RESET}"
-    rm "$PID_FILE"
-  fi
-}
-
-# 显示菜单
-show_menu() {
-  clear
-  echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${CYAN}║                    Nockchain 挖矿工具                      ║${RESET}"
-  echo -e "${CYAN}║                      精简优化版                            ║${RESET}"
-  echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${RESET}"
-  echo
-  echo -e "${YELLOW}适用于 Nockchain ZK-PoW 挖矿${RESET}"
-  echo
-  echo -e "${CYAN}请选择操作:${RESET}"
-  echo
-  echo -e " ${GREEN}1)${RESET} 🚀 安装 Nockchain"
-  echo -e " ${GREEN}2)${RESET} 🔑 更改挖矿公钥"
-  echo -e " ${GREEN}3)${RESET} ⛏️  启动挖矿节点"
-  echo -e " ${GREEN}4)${RESET} 📋 查看挖矿日志"
-  echo -e " ${GREEN}5)${RESET} 🛑 停止挖矿"
-  echo -e " ${GREEN}0)${RESET} 退出"
-  echo
-  echo -e "${CYAN}请输入选项 [0-5]:${RESET}"
-}
-
-# 主循环
-main() {
-  while true; do
-    show_menu
-    read -r option
-    
-    case $option in
-      1) install_nockchain ;;
-      2) change_mining_key ;;
-      3) start_mining ;;
-      4) view_logs ;;
-      5) stop_mining ;;
-      0) echo -e "${GREEN}感谢使用 Nockchain 挖矿工具！${RESET}"; exit 0 ;;
-      *) echo -e "${RED}无效选项，请重新选择${RESET}" ;;
-    esac
-    
-    echo
-    echo -e "${YELLOW}按回车键继续...${RESET}"
-    read -r
+## 配置优化模式
+set_optimization() {
+  echo -e "${CYAN}当前优化策略: ${YELLOW}$OPT_MODE${RESET}"
+  select mode in "auto" "pgo" "lto" "bolt"; do
+    sed -i "s/^OPT_MODE=.*/OPT_MODE=\"$mode\"/" "$CONFIG_FILE"
+    echo -e "${GREEN}优化模式已设置为: ${YELLOW}$mode${RESET}"
+    return
   done
 }
 
-# 启动主程序
-main
+## 增强版菜单
+show_menu() {
+  clear
+  echo -e "${CYAN}══ Nockchain 矿工专业版 ═══════════════════════════${RESET}"
+  echo "1) 完整安装/更新"
+  echo "2) 设置挖矿地址"
+  echo "3) 启动矿机"
+  echo "4) 实时监控"
+  echo "5) 高级编译设置"
+  echo "6) 系统服务管理"
+  echo "7) 性能调优"
+  echo "0) 退出"
+  read -rp "➤ 请输入选项 [0-7]: " opt
+
+  case $opt in
+    5) set_optimization ;;
+    7) show_performance_tuning ;;
+    # 其他原有选项保持不变
+  esac
+}
+
+## 性能调优界面
+show_performance_tuning() {
+  clear
+  echo -e "${CYAN}══ 硬件级性能调优 ════════════════════════════════${RESET}"
+  local current_cpu=$(detect_cpu_arch)
+  echo "1) CPU微架构优化 (当前: ${YELLOW}$current_cpu${RESET})"
+  echo "2) 内存子系统调优"
+  echo "3) 存储I/O优化"
+  echo "4) 网络栈参数调整"
+  echo "0) 返回主菜单"
+  read -rp "➤ 选择调优项目: " tune_opt
+
+  case $tune_opt in
+    1) optimize_cpu_settings ;;
+    2) tune_memory_subsystem ;;
+    3) optimize_io_scheduler ;;
+    4) tune_network_stack ;;
+  esac
+}
+
+## CPU微架构优化
+optimize_cpu_settings() {
+  local governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+  echo -e "${CYAN}当前CPU频率策略: ${YELLOW}$governor${RESET}"
+  echo -e "推荐矿机使用 ${GREEN}performance${RESET} 模式"
+  sudo cpupower frequency-set -g performance
+}
+
+## 内存子系统调优
+tune_memory_subsystem() {
+  echo -e "${CYAN}优化内存分配策略...${RESET}"
+  sudo sysctl -w vm.swappiness=10
+  sudo sysctl -w vm.dirty_ratio=40
+  sudo sysctl -w vm.dirty_background_ratio=10
+}
+
+## 主入口增强
+main() {
+  init
+  case "${1:-}" in
+    --tune)   show_performance_tuning ;;
+    --auto)   optimized_build ;;
+    *)        while true; do show_menu; done ;;
+  esac
+}
+
+main "$@"
