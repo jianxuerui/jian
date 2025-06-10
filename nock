@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v2.2
-# 修复了在 CentOS/RHEL 系统上因缺少 CRB/PowerTools 源而找不到依赖的问题
+# Ethminer 矿工专业工具 v2.3
+# 终极修复：动态查找并启用 CRB/PowerTools 仓库，不再硬编码名称
 
 set -euo pipefail
 IFS='
@@ -76,16 +76,21 @@ install_ethminer() {
       $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev
       ;;
     dnf)
-      # --- 这是最终的关键修复 ---
-      echo "--> 正在为 dnf/yum 系统安装核心插件..."
-      $SUDO_CMD "$PKG_MANAGER" install -y dnf-plugins-core
+      # --- 这是最终的、动态的修复 ---
+      echo "--> 正在为 dnf/yum 系统启用 EPEL 仓库..."
+      $SUDO_CMD "$PKG_MANAGER" -y install epel-release
       
-      echo "--> 正在启用 EPEL 仓库..."
-      $SUDO_CMD "$PKG_MANAGER" install -y epel-release
-      
-      echo "--> 正在启用 CRB (CodeReady Builder) / PowerTools 仓库..."
-      # 兼容不同系统命名 (crb是新名字, powertools是旧名字)
-      $SUDO_CMD dnf config-manager --set-enabled crb || $SUDO_CMD dnf config-manager --set-enabled powertools
+      echo "--> 正在动态查找并启用开发工具仓库 (CRB/PowerTools)..."
+      # 使用 `dnf repolist --all` 查找包含 "builder" 或 "powertools" 的仓库ID
+      REPO_ID=$(dnf repolist --all | grep -i -E 'builder|powertools' | head -n 1 | awk '{print $1}')
+
+      if [ -n "$REPO_ID" ]; then
+        echo "--> 自动检测到开发仓库 ID: $REPO_ID. 正在启用..."
+        $SUDO_CMD dnf config-manager --set-enabled "$REPO_ID"
+      else
+        echo "!! 警告：无法自动找到 CRB/PowerTools 仓库。"
+        echo "!! 编译可能会因缺少依赖而失败。脚本将继续尝试..."
+      fi
 
       echo "--> 正在安装核心依赖..."
       $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make json-rpc-cpp-devel
@@ -234,7 +239,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v2.2          ║
+║              Ethminer 矿工专业工具 v2.3          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
