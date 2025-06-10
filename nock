@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v2.0
-# 集成一键编译、配置管理与日常运维功能
+# Ethminer 矿工专业工具 v2.1
+# 修复了在 CentOS/RHEL 系统上因缺少 EPEL 源而无法找到依赖的问题
 
 set -euo pipefail
 IFS='
@@ -9,7 +9,7 @@ IFS='
 # --- 全局配置 ---
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ethminer-tool"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ethminer-tool"
-REPO_PATH="$HOME/ethminer" # 源码下载路径
+REPO_PATH="$HOME/ethminer"
 
 LOG_FILE="$CACHE_DIR/miner.log"
 CONFIG_FILE="$CONFIG_DIR/ethminer.conf"
@@ -36,16 +36,8 @@ init_environment() {
     echo "▶ 首次运行，正在创建默认配置文件..."
     cat > "$CONFIG_FILE" <<EOF
 # ethminer 配置文件
-# ========================
-
-# 你的以太坊挖矿地址 (0x...)
 MINING_ADDRESS="0x0000000000000000000000000000000000000000"
-
-# 矿池地址 (示例为 2miners 的 ETC 矿池)
-# 格式: stratum+tcp://<矿池域名>:<端口>
 POOL_URL="stratum+tcp://etc.2miners.com:1010"
-
-# 矿工名，可以自定义
 WORKER_NAME="myrig1"
 EOF
     echo "✔ 默认配置已创建于: $CONFIG_FILE"
@@ -57,7 +49,6 @@ EOF
 # --- 编译与安装核心流程 ---
 
 install_ethminer() {
-  # --- 1. 手动选择系统 ---
   PKG_MANAGER=""
   while [ -z "$PKG_MANAGER" ]; do
     clear
@@ -71,12 +62,11 @@ install_ethminer() {
 
     case $sys_choice in
       1) PKG_MANAGER="apt" ;;
-      2) PKG_MANAGER="dnf" ;; # dnf 和 yum 的依赖名通常相似
+      2) PKG_MANAGER="dnf" ;;
       *) echo "输入无效，请重新输入。" && sleep 1 ;;
     esac
   done
 
-  # --- 2. 执行安装流程 ---
   echo "✔ 系统选择完成: $PKG_MANAGER"
   
   echo "▶ 步骤 1/4: 安装依赖..."
@@ -85,7 +75,12 @@ install_ethminer() {
       $SUDO_CMD apt-get update
       $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev
       ;;
-    dnf|yum)
+    dnf)
+      # --- 这是关键的修复 ---
+      echo "--> 正在为 dnf/yum 系统启用 EPEL 仓库..."
+      $SUDO_CMD "$PKG_MANAGER" install -y epel-release
+      echo "--> 正在安装核心依赖..."
+      # dnf 和 yum 的命令和包名通常兼容
       $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make json-rpc-cpp-devel
       ;;
   esac
@@ -111,7 +106,7 @@ install_ethminer() {
     cd "$REPO_PATH"
     mkdir -p build
     cd build
-    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF # 只编译CPU版
+    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF
     make -j"$(get_cpu_cores)"
   ) || { echo "编译失败，请检查依赖和源码。"; exit 1; }
   echo "✔ 编译完成。"
@@ -151,7 +146,6 @@ change_mining_address() {
         sleep 3; return 1;
     fi
     
-    # 使用sed安全地替换，兼容不同平台
     sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"
     rm -f "${CONFIG_FILE}.bak"
     echo "✔ 挖矿地址已成功更新！"
@@ -179,8 +173,6 @@ start_miner() {
 
   . "$CONFIG_FILE"
 
-  # 从配置中拼接出 Stratum URI
-  # 示例: stratum+tcp://0xWallet.worker@etc.2miners.com:1010
   POOL_HOST_PORT=$(echo "$POOL_URL" | sed 's|stratum+tcp://||')
   STRATUM_URI="stratum+tcp://${MINING_ADDRESS}.${WORKER_NAME}@${POOL_HOST_PORT}"
   
@@ -230,11 +222,12 @@ show_monitor() {
 
 show_menu() {
   while true; do
-    . "$CONFIG_FILE"
+    # 每次循环都加载配置，以反映更改
+    if [ -f "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v2.0          ║
+║              Ethminer 矿工专业工具 v2.1          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
@@ -247,8 +240,9 @@ EOF
     else
         echo "当前状态: 已停止"
     fi
-    echo "挖矿地址: $MINING_ADDRESS"
-    echo "矿池地址: $POOL_URL"
+    # 确保变量存在，避免报错
+    echo "挖矿地址: ${MINING_ADDRESS:-未设置}"
+    echo "矿池地址: ${POOL_URL:-未设置}"
     echo
 
     printf "➤ 请输入选项 [0-5]: "
