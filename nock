@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck disable=SC2034,SC2164
-# 增强版 Nockchain 矿工工具 v5.0
-# 全平台兼容优化版
+# 增强版 Nockchain 矿工工具 v5.1
+# 全平台兼容优化版，新增地址修改功能
 
 set -euo pipefail
 # 使用换行符作为字段分隔符，以处理带空格的文件名
@@ -194,6 +194,36 @@ install_nockchain() {
 }
 
 # --- 核心功能 ---
+
+change_mining_address() {
+    . "$CONFIG_FILE" # 确保读取最新配置
+    echo "${CYAN}--- 更改挖矿地址 ---${NC}"
+    echo "当前挖矿地址: ${GREEN}$MINING_ADDRESS${NC}"
+    printf "${CYAN}➤ 请输入新的挖矿地址 (或直接回车取消): ${NC}"
+    read -r new_address
+
+    if [ -z "$new_address" ]; then
+        echo "${YELLOW}操作已取消。${NC}"
+        sleep 2
+        return
+    fi
+
+    # 验证地址格式: 0x后跟40位十六进制字符
+    if ! echo "$new_address" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then
+        echo "${RED}✘ 错误：地址格式无效。应为 '0x' 开头的40位十六进制字符。${NC}"
+        sleep 3
+        return 1
+    fi
+    
+    # 使用sed安全地替换配置文件中的行，兼容不同平台
+    if sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"; then
+       rm -f "${CONFIG_FILE}.bak" # 成功后删除备份
+       echo "${GREEN}✔ 挖矿地址已成功更新为: $new_address${NC}"
+    else
+       echo "${RED}✘ 更新配置文件失败。${NC}"
+    fi
+    sleep 3
+}
 
 configure_miner() {
   echo "${CYAN}▶ 打开配置文件进行编辑...${NC}"
@@ -445,12 +475,13 @@ show_menu() {
     echo "${BLUE}"
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║             Nockchain 矿工专业版 v5.0            ║
+║             Nockchain 矿工专业版 v5.1            ║
 ╠════════════════════════════════════════════════╣
-║ 1) 完整安装/更新     2) 配置矿工参数           ║
+║ 1) 完整安装/更新     2) 更改挖矿地址           ║
 ║ 3) 启动/停止矿机     4) 实时监控               ║
-║ 5) 高级编译设置     6) 系统服务管理 (systemd)   ║
-║ 7) 性能调优         0) 退出                   ║
+║ 5) 编辑完整配置      6) 高级编译设置           ║
+║ 7) 系统服务管理      8) 性能调优               ║
+║ 0) 退出                                        ║
 ╚════════════════════════════════════════════════╝
 EOF
     echo "${NC}"
@@ -462,12 +493,12 @@ EOF
         echo "状态: ${RED}已停止${NC} | 选项 3 将会 ${GREEN}启动${NC} 矿机"
     fi
 
-    printf "${CYAN}➤ 请输入选项 [0-7]: ${NC}"
+    printf "${CYAN}➤ 请输入选项 [0-8]: ${NC}"
     read -r choice
 
     case $choice in
       1) install_nockchain ;;
-      2) configure_miner ;;
+      2) change_mining_address ;;
       3) 
         if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
             stop_miner
@@ -476,9 +507,10 @@ EOF
         fi
         ;;
       4) show_monitor ;;
-      5) show_compile_menu ;;
-      6) manage_service ;;
-      7) tune_performance ;;
+      5) configure_miner ;;
+      6) show_compile_menu ;;
+      7) manage_service ;;
+      8) tune_performance ;;
       0) echo "${GREEN}感谢使用，再见！${NC}"; exit 0 ;;
       *) echo "${RED}无效选项，请重新输入${NC}"; sleep 1 ;;
     esac
