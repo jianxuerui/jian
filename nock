@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v7.7 (终极解决方案 - 修正版)
-# 策略：修正了 git clone 命令，确保使用 --recursive 参数来完整克隆
-# ethminer 及其所有绑定的子模块依赖源码。然后从这些本地源码编译所有依赖，
-# 保证版本兼容并杜绝网络问题。
+# Ethminer 矿工专业工具 v7.8 (终极解决方案 - 强制清理版)
+# 策略：彻底解决源码不完整的问题。安装脚本将无条件删除旧的源码目录，
+# 然后强制执行一次全新的 `git clone --recursive`。
+# 这保证了我们始终从一个已知的、完整的、干净的状态开始编译。
 
 set -euo pipefail
 IFS='
@@ -75,19 +75,15 @@ install_ethminer() {
   esac
   echo "✔ 基础环境和系统依赖安装完成。"
   
-  echo "▶ 步骤 2/4: 下载 ethminer 及其所有绑定的依赖源码..."
-  # ### 这是最关键的修复 ###
-  # 必须使用 --recursive 才能下载子模块
-  if [ ! -d "$REPO_PATH/.git" ]; then
-    echo "--> 正在克隆 ethminer 仓库 (包含所有依赖子模块，此步需要网络)..."
-    if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
-      echo "克隆失败，请检查网络连接。" >&2; exit 1;
-    fi
-  else
-    echo "--> ethminer 源码已存在，正在检查并更新子模块..."
-    (cd "$REPO_PATH" && git submodule update --init --recursive)
+  # ### 这是最最最关键的修复：强制删除并全新克隆 ###
+  echo "▶ 步骤 2/4: 强制进行全新克隆以确保源码完整性..."
+  echo "--> 正在删除旧的源码目录 (如有) 以确保全新开始: $REPO_PATH"
+  rm -rf "$REPO_PATH"
+  echo "--> 正在以 --recursive 模式完整克隆 ethminer 及其所有依赖..."
+  if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
+    echo "!! 克隆失败，请检查网络连接或 Git 是否已正确安装。" >&2; exit 1;
   fi
-  echo "✔ 源码及所有依赖子模块准备就绪。"
+  echo "✔ 源码及所有依赖子模块已完整下载。"
 
   echo "▶ 步骤 3/4: 编译 ethminer 自带的依赖库 (保证版本兼容)..."
   # --- 编译 CLI11 ---
@@ -161,7 +157,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v7.7           ║
+║           Ethminer 矿工专业工具 v7.8           ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
