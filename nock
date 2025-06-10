@@ -35,7 +35,6 @@ EOF
 
 # 跨平台检测模块
 detect_platform() {
-  # 操作系统检测
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     OS_ID="$ID"
@@ -47,7 +46,6 @@ detect_platform() {
     esac
   fi
 
-  # CPU架构检测
   case $(uname -m) in
     x86_64)  ARCH="x64" ;;
     arm64)   ARCH="arm64" ;;
@@ -55,7 +53,6 @@ detect_platform() {
     *)       ARCH="unknown" ;;
   esac
 
-  # 包管理器检测
   declare -A PM_MAP=(
     [debian]="apt"
     [ubuntu]="apt"
@@ -98,7 +95,6 @@ perform_optimized_build() {
   cpu_arch=$(detect_cpu_arch)
   local rust_flags=""
 
-  # CPU微架构优化
   case "$cpu_arch" in
     skylake)   rust_flags="-C target-cpu=skylake" ;;
     haswell)   rust_flags="-C target-cpu=haswell" ;;
@@ -107,7 +103,6 @@ perform_optimized_build() {
     *)         rust_flags="-C target-cpu=native" ;;
   esac
 
-  # 编译策略选择
   case "$OPT_MODE" in
     pgo)
       build_pgo "$rust_flags"
@@ -124,11 +119,35 @@ perform_optimized_build() {
   esac
 }
 
+# 主安装流程函数
+install_nockchain() {
+  echo -e "${CYAN}▶ 开始智能编译流程...${RESET}"
+  detect_platform
+  manage_dependencies
+  
+  [[ -d "$HOME/nockchain" ]] || git clone https://github.com/nockchain/nockchain.git "$HOME/nockchain"
+  git -C "$HOME/nockchain" pull
+  
+  cd "$HOME/nockchain"
+  perform_optimized_build
+  
+  install -m755 "$HOME/nockchain/target/release/nockchain" "$HOME/.local/bin/"
+  echo -e "${GREEN}安装完成! 优化模式: ${YELLOW}$OPT_MODE${RESET}"
+}
+
 # 交互式菜单系统
 show_main_menu() {
   while true; do
     clear
-    draw_banner
+    echo -e "${BLUE}"
+    echo "███████╗███╗   ██╗ ██████╗██╗  ██╗███████╗██████╗ "
+    echo "██╔════╝████╗  ██║██╔════╝██║ ██╔╝██╔════╝██╔══██╗"
+    echo "█████╗  ██╔██╗ ██║██║     █████╔╝ █████╗  ██████╔╝"
+    echo "██╔══╝  ██║╚██╗██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗"
+    echo "███████╗██║ ╚████║╚██████╗██║  ██╗███████╗██║  ██║"
+    echo "╚══════╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
+    echo -e "${RESET}"
+    
     echo -e "${CYAN}1) 完整安装/更新"
     echo -e "2) 配置矿工参数"
     echo -e "3) 启动挖矿程序"
@@ -154,12 +173,6 @@ show_main_menu() {
   done
 }
 
-# 安装流程函数定义
-install_nockchain() {
-  echo "开始安装Nockchain..."
-  # 在此处补充具体的安装和编译逻辑
-}
-
 # 其他函数占位符
 config_miner()    { echo "配置矿工参数功能待实现"; }
 start_mining()    { echo "启动挖矿程序功能待实现"; }
@@ -173,23 +186,10 @@ build_bolt()      { echo "BOLT编译功能待实现"; }
 build_lto()       { echo "LTO编译功能待实现"; }
 build_auto()      { echo "自动编译功能待实现"; }
 
-# 可视化横幅
-draw_banner() {
-  echo -e "${BLUE}"
-  echo "███████╗███╗   ██╗ ██████╗██╗  ██╗███████╗██████╗ "
-  echo "██╔════╝████╗  ██║██╔════╝██║ ██╔╝██╔════╝██╔══██╗"
-  echo "█████╗  ██╔██╗ ██║██║     █████╔╝ █████╗  ██████╔╝"
-  echo "██╔══╝  ██║╚██╗██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗"
-  echo "███████╗██║ ╚████║╚██████╗██║  ██╗███████╗██║  ██║"
-  echo "╚══════╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
-  echo -e "${RESET}"
-}
-
 # 主程序流程
 main() {
   init_environment
   detect_platform
-  manage_dependencies
   show_main_menu
 }
 
