@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v3.0
-# 终极版：自动从源码编译前置依赖 (json-rpc-cpp)，解决仓库缺失问题
+# Ethminer 矿工专业工具 v4.0
+# 最终版：优先使用系统包管理器安装所有依赖(包括Boost)，绕过Hunter下载问题
 
 set -euo pipefail
 IFS='
@@ -10,7 +10,6 @@ IFS='
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ethminer-tool"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ethminer-tool"
 REPO_PATH="$HOME/ethminer"
-DEPS_SRC_PATH="/tmp/ethminer_deps_src" # 依赖源码临时存放处
 
 LOG_FILE="$CACHE_DIR/miner.log"
 CONFIG_FILE="$CONFIG_DIR/ethminer.conf"
@@ -47,30 +46,6 @@ EOF
   fi
 }
 
-# --- 新增：从源码编译 json-rpc-cpp ---
-compile_json_rpc_cpp() {
-    echo "--> 检测到系统仓库缺少 json-rpc-cpp-devel，将从源码编译..."
-    mkdir -p "$DEPS_SRC_PATH"
-    (
-        cd "$DEPS_SRC_PATH"
-        if [ ! -d "libjson-rpc-cpp" ]; then
-            echo "--> 正在克隆 libjson-rpc-cpp 源码..."
-            git clone https://github.com/cinemast/libjson-rpc-cpp.git
-        fi
-        cd libjson-rpc-cpp
-        echo "--> 正在编译并安装 libjson-rpc-cpp..."
-        mkdir -p build
-        cd build
-        cmake ..
-        make -j"$(get_cpu_cores)"
-        $SUDO_CMD make install
-        # 确保系统能找到新安装的库
-        $SUDO_CMD ldconfig
-    ) || { echo "!! 错误：编译依赖 json-rpc-cpp 失败。"; exit 1; }
-    echo "✔ 依赖 json-rpc-cpp 已成功编译并安装。"
-}
-
-
 # --- 编译与安装核心流程 ---
 
 install_ethminer() {
@@ -94,11 +69,12 @@ install_ethminer() {
 
   echo "✔ 系统选择完成: $PKG_MANAGER"
   
-  echo "▶ 步骤 1/5: 安装基础编译环境..."
+  echo "▶ 步骤 1/4: 安装所有编译依赖..."
   case "$PKG_MANAGER" in
     apt)
       $SUDO_CMD apt-get update
-      $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev
+      # 安装最全的依赖，包括 libboost-all-dev
+      $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev libboost-all-dev
       ;;
     dnf)
       echo "--> 正在启用 EPEL 和 CRB/PowerTools 仓库..."
@@ -108,19 +84,14 @@ install_ethminer() {
         $SUDO_CMD dnf config-manager --set-enabled "$REPO_ID"
       fi
 
-      echo "--> 正在安装基础依赖 (git, cmake, gcc, make)..."
-      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make
+      echo "--> 正在安装所有核心依赖 (包括 Boost)..."
+      # 这是关键的修复：直接安装 boost-devel 和其他所有依赖
+      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make json-rpc-cpp-devel boost-devel
       ;;
   esac
-  echo "✔ 基础环境安装完成。"
+  echo "✔ 所有依赖安装完成。"
 
-  # --- 这是新增的关键步骤 ---
-  if [ "$PKG_MANAGER" = "dnf" ]; then
-      echo "▶ 步骤 2/5: 编译核心依赖 (json-rpc-cpp)..."
-      compile_json_rpc_cpp
-  fi
-  
-  echo "▶ 步骤 3/5: 下载 ethminer 源码..."
+  echo "▶ 步骤 2/4: 下载 ethminer 源码..."
   if [ ! -d "$REPO_PATH/.git" ]; then
     echo "▶ 正在克隆 ethminer 仓库..."
     if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
@@ -132,17 +103,18 @@ install_ethminer() {
   fi
   echo "✔ 源码下载完成。"
 
-  echo "▶ 步骤 4/5: 编译 ethminer (此步骤非常耗时，请耐心等待！)..."
+  echo "▶ 步骤 3/4: 编译 ethminer (此步骤非常耗时)..."
   (
     cd "$REPO_PATH"
     mkdir -p build
     cd build
-    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF
+    # 关键改动：添加 -DHUNTER_ENABLED=OFF 来强制禁用 Hunter
+    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF -DHUNTER_ENABLED=OFF
     make -j"$(get_cpu_cores)"
   ) || { echo "编译失败，请检查依赖和源码。"; exit 1; }
   echo "✔ 编译完成。"
 
-  echo "▶ 步骤 5/5: 安装程序..."
+  echo "▶ 步骤 4/4: 安装程序..."
   mkdir -p "${HOME}/.local/bin"
   install -m755 "$REPO_PATH/build/ethminer/ethminer" "${HOME}/.local/bin/"
   echo "✔ ethminer 已成功安装到 ${HOME}/.local/bin/"
@@ -159,7 +131,6 @@ install_ethminer() {
 }
 
 # --- 日常管理功能 (无改动) ---
-
 change_mining_address(){ . "$CONFIG_FILE"; echo "--- 更改挖矿地址 ---"; echo "当前挖矿地址: $MINING_ADDRESS"; printf "➤ 请输入新的挖矿地址 (或直接回车取消): "; read -r new_address; if [ -z "$new_address" ]; then echo "操作已取消。"; sleep 2; return; fi; if ! echo "$new_address" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then echo "✘ 错误：地址格式无效。"; sleep 3; return 1; fi; sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"; rm -f "${CONFIG_FILE}.bak"; echo "✔ 挖矿地址已成功更新！"; sleep 2; }
 edit_config(){ echo "▶ 打开配置文件进行编辑..."; if command -v nano >/dev/null; then nano "$CONFIG_FILE"; elif command -v vi >/dev/null; then vi "$CONFIG_FILE"; else echo "未找到编辑器。请手动编辑: $CONFIG_FILE"; fi; echo "配置完成。"; sleep 2; }
 start_miner(){ if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then echo "矿机已经在运行 (PID: $(cat "$PID_FILE"))。"; sleep 2; return; fi; echo "▶ 正在启动矿机..."; if ! command -v ethminer >/dev/null; then echo "错误: 'ethminer' 命令未找到。请先安装(选项 1)。"; sleep 2; return 1; fi; . "$CONFIG_FILE"; POOL_HOST_PORT=$(echo "$POOL_URL" | sed 's|stratum+tcp://||'); STRATUM_URI="stratum+tcp://${MINING_ADDRESS}.${WORKER_NAME}@${POOL_HOST_PORT}"; echo "使用的矿池地址: $STRATUM_URI"; echo "日志文件位于: $LOG_FILE"; nohup ethminer -P "$STRATUM_URI" >"$LOG_FILE" 2>&1 & MINER_PID=$!; echo "$MINER_PID" > "$PID_FILE"; sleep 1; if ps -p "$MINER_PID" > /dev/null; then echo "✔ 矿机已启动，进程ID: $MINER_PID"; else echo "✘ 矿机启动失败，请查看日志: $LOG_FILE"; rm -f "$PID_FILE"; fi; sleep 2; }
@@ -172,7 +143,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v3.0          ║
+║              Ethminer 矿工专业工具 v4.0          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
