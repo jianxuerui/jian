@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v2.3
-# 终极修复：动态查找并启用 CRB/PowerTools 仓库，不再硬编码名称
+# Ethminer 矿工专业工具 v3.0
+# 终极版：自动从源码编译前置依赖 (json-rpc-cpp)，解决仓库缺失问题
 
 set -euo pipefail
 IFS='
@@ -10,6 +10,7 @@ IFS='
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ethminer-tool"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ethminer-tool"
 REPO_PATH="$HOME/ethminer"
+DEPS_SRC_PATH="/tmp/ethminer_deps_src" # 依赖源码临时存放处
 
 LOG_FILE="$CACHE_DIR/miner.log"
 CONFIG_FILE="$CONFIG_DIR/ethminer.conf"
@@ -46,6 +47,30 @@ EOF
   fi
 }
 
+# --- 新增：从源码编译 json-rpc-cpp ---
+compile_json_rpc_cpp() {
+    echo "--> 检测到系统仓库缺少 json-rpc-cpp-devel，将从源码编译..."
+    mkdir -p "$DEPS_SRC_PATH"
+    (
+        cd "$DEPS_SRC_PATH"
+        if [ ! -d "libjson-rpc-cpp" ]; then
+            echo "--> 正在克隆 libjson-rpc-cpp 源码..."
+            git clone https://github.com/cinemast/libjson-rpc-cpp.git
+        fi
+        cd libjson-rpc-cpp
+        echo "--> 正在编译并安装 libjson-rpc-cpp..."
+        mkdir -p build
+        cd build
+        cmake ..
+        make -j"$(get_cpu_cores)"
+        $SUDO_CMD make install
+        # 确保系统能找到新安装的库
+        $SUDO_CMD ldconfig
+    ) || { echo "!! 错误：编译依赖 json-rpc-cpp 失败。"; exit 1; }
+    echo "✔ 依赖 json-rpc-cpp 已成功编译并安装。"
+}
+
+
 # --- 编译与安装核心流程 ---
 
 install_ethminer() {
@@ -69,51 +94,45 @@ install_ethminer() {
 
   echo "✔ 系统选择完成: $PKG_MANAGER"
   
-  echo "▶ 步骤 1/4: 安装依赖..."
+  echo "▶ 步骤 1/5: 安装基础编译环境..."
   case "$PKG_MANAGER" in
     apt)
       $SUDO_CMD apt-get update
       $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev
       ;;
     dnf)
-      # --- 这是最终的、动态的修复 ---
-      echo "--> 正在为 dnf/yum 系统启用 EPEL 仓库..."
+      echo "--> 正在启用 EPEL 和 CRB/PowerTools 仓库..."
       $SUDO_CMD "$PKG_MANAGER" -y install epel-release
-      
-      echo "--> 正在动态查找并启用开发工具仓库 (CRB/PowerTools)..."
-      # 使用 `dnf repolist --all` 查找包含 "builder" 或 "powertools" 的仓库ID
       REPO_ID=$(dnf repolist --all | grep -i -E 'builder|powertools' | head -n 1 | awk '{print $1}')
-
       if [ -n "$REPO_ID" ]; then
-        echo "--> 自动检测到开发仓库 ID: $REPO_ID. 正在启用..."
         $SUDO_CMD dnf config-manager --set-enabled "$REPO_ID"
-      else
-        echo "!! 警告：无法自动找到 CRB/PowerTools 仓库。"
-        echo "!! 编译可能会因缺少依赖而失败。脚本将继续尝试..."
       fi
 
-      echo "--> 正在安装核心依赖..."
-      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make json-rpc-cpp-devel
+      echo "--> 正在安装基础依赖 (git, cmake, gcc, make)..."
+      $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make
       ;;
   esac
-  echo "✔ 依赖安装完成。"
+  echo "✔ 基础环境安装完成。"
 
-  echo "▶ 步骤 2/4: 下载源码..."
+  # --- 这是新增的关键步骤 ---
+  if [ "$PKG_MANAGER" = "dnf" ]; then
+      echo "▶ 步骤 2/5: 编译核心依赖 (json-rpc-cpp)..."
+      compile_json_rpc_cpp
+  fi
+  
+  echo "▶ 步骤 3/5: 下载 ethminer 源码..."
   if [ ! -d "$REPO_PATH/.git" ]; then
-    echo "▶ 正在克隆 ethminer 仓库 (这可能需要一些时间)..."
+    echo "▶ 正在克隆 ethminer 仓库..."
     if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
       echo "克隆失败，请检查网络连接。" >&2; exit 1;
     fi
   else
     echo "▶ 正在更新 ethminer 仓库代码..."
-    (cd "$REPO_PATH" && git pull && git submodule update --init --recursive) || {
-      echo "更新失败，正在尝试强制更新...";
-      (cd "$REPO_PATH" && git fetch --all && git reset --hard origin/master && git submodule update --init --recursive);
-    }
+    (cd "$REPO_PATH" && git pull && git submodule update --init --recursive)
   fi
   echo "✔ 源码下载完成。"
 
-  echo "▶ 步骤 3/4: 编译源码 (此步骤非常耗时，请耐心等待！)..."
+  echo "▶ 步骤 4/5: 编译 ethminer (此步骤非常耗时，请耐心等待！)..."
   (
     cd "$REPO_PATH"
     mkdir -p build
@@ -123,7 +142,7 @@ install_ethminer() {
   ) || { echo "编译失败，请检查依赖和源码。"; exit 1; }
   echo "✔ 编译完成。"
 
-  echo "▶ 步骤 4/4: 安装程序..."
+  echo "▶ 步骤 5/5: 安装程序..."
   mkdir -p "${HOME}/.local/bin"
   install -m755 "$REPO_PATH/build/ethminer/ethminer" "${HOME}/.local/bin/"
   echo "✔ ethminer 已成功安装到 ${HOME}/.local/bin/"
@@ -133,105 +152,19 @@ install_ethminer() {
     echo "重要提示: '${HOME}/.local/bin' 不在你的 PATH 环境变量中。"
     echo "请运行以下命令，或将其加入 ~/.bashrc 文件："
     echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo "之后，你就可以直接通过输入 'ethminer' 来运行程序了。"
     echo "----------------------------------------------------------------------"
-  else
-    echo "现在你可以直接通过输入 'ethminer' 来运行程序了！"
   fi
   echo "按任意键返回主菜单..."
   read -n 1
 }
 
-# --- 日常管理功能 ---
-# (这部分代码没有改动，保持原样)
+# --- 日常管理功能 (无改动) ---
 
-change_mining_address() {
-    . "$CONFIG_FILE"
-    echo "--- 更改挖矿地址 ---"
-    echo "当前挖矿地址: $MINING_ADDRESS"
-    printf "➤ 请输入新的挖矿地址 (或直接回车取消): "
-    read -r new_address
-
-    if [ -z "$new_address" ]; then echo "操作已取消。"; sleep 2; return; fi
-
-    if ! echo "$new_address" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then
-        echo "✘ 错误：地址格式无效。应为 '0x' 开头的40位十六进制字符。"
-        sleep 3; return 1;
-    fi
-    
-    sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"
-    rm -f "${CONFIG_FILE}.bak"
-    echo "✔ 挖矿地址已成功更新！"
-    sleep 2
-}
-
-edit_config() {
-  echo "▶ 打开配置文件进行编辑..."
-  if command -v nano >/dev/null; then nano "$CONFIG_FILE";
-  elif command -v vi >/dev/null; then vi "$CONFIG_FILE";
-  else echo "未找到编辑器 nano 或 vi。请手动编辑: $CONFIG_FILE"; fi
-  echo "配置完成。重启矿机后生效。"
-  sleep 2
-}
-
-start_miner() {
-  if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
-      echo "矿机已经在运行 (PID: $(cat "$PID_FILE"))。"; sleep 2; return;
-  fi
-
-  echo "▶ 正在启动矿机..."
-  if ! command -v ethminer >/dev/null; then
-    echo "错误: 'ethminer' 命令未找到。请先执行安装 (选项 1)。"; sleep 2; return 1;
-  fi
-
-  . "$CONFIG_FILE"
-
-  POOL_HOST_PORT=$(echo "$POOL_URL" | sed 's|stratum+tcp://||')
-  STRATUM_URI="stratum+tcp://${MINING_ADDRESS}.${WORKER_NAME}@${POOL_HOST_PORT}"
-  
-  echo "使用的矿池地址: $STRATUM_URI"
-  echo "日志文件位于: $LOG_FILE"
-  
-  nohup ethminer -P "$STRATUM_URI" >"$LOG_FILE" 2>&1 &
-
-  MINER_PID=$!
-  echo "$MINER_PID" > "$PID_FILE"
-  sleep 1
-  if ps -p "$MINER_PID" > /dev/null; then
-    echo "✔ 矿机已启动，进程ID: $MINER_PID"
-  else
-    echo "✘ 矿机启动失败，请通过选项 5 查看日志: $LOG_FILE"
-    rm -f "$PID_FILE"
-  fi
-  sleep 2
-}
-
-stop_miner() {
-  if [ ! -f "$PID_FILE" ]; then echo "矿机未在运行。"; sleep 2; return; fi
-  
-  PID=$(cat "$PID_FILE")
-  if ps -p "$PID" > /dev/null; then
-    echo "▶ 正在停止矿机 (PID: $PID)..."
-    kill "$PID"
-    sleep 2
-    if ! ps -p "$PID" > /dev/null; then
-      echo "✔ 矿机已停止。"; rm -f "$PID_FILE";
-    else
-      echo "等待超时，尝试强制停止..."; kill -9 "$PID"; rm -f "$PID_FILE";
-    fi
-  else
-    echo "PID $PID 不存在，可能已被手动停止。正在清理PID文件..."; rm -f "$PID_FILE";
-  fi
-  sleep 2
-}
-
-show_monitor() {
-  if [ -f "$LOG_FILE" ]; then
-    echo "▶ 实时监控日志 (按 Ctrl+C 退出)..."; tail -f "$LOG_FILE";
-  else
-    echo "日志文件不存在，请先启动矿机。"; sleep 2;
-  fi
-}
+change_mining_address(){ . "$CONFIG_FILE"; echo "--- 更改挖矿地址 ---"; echo "当前挖矿地址: $MINING_ADDRESS"; printf "➤ 请输入新的挖矿地址 (或直接回车取消): "; read -r new_address; if [ -z "$new_address" ]; then echo "操作已取消。"; sleep 2; return; fi; if ! echo "$new_address" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then echo "✘ 错误：地址格式无效。"; sleep 3; return 1; fi; sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"; rm -f "${CONFIG_FILE}.bak"; echo "✔ 挖矿地址已成功更新！"; sleep 2; }
+edit_config(){ echo "▶ 打开配置文件进行编辑..."; if command -v nano >/dev/null; then nano "$CONFIG_FILE"; elif command -v vi >/dev/null; then vi "$CONFIG_FILE"; else echo "未找到编辑器。请手动编辑: $CONFIG_FILE"; fi; echo "配置完成。"; sleep 2; }
+start_miner(){ if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then echo "矿机已经在运行 (PID: $(cat "$PID_FILE"))。"; sleep 2; return; fi; echo "▶ 正在启动矿机..."; if ! command -v ethminer >/dev/null; then echo "错误: 'ethminer' 命令未找到。请先安装(选项 1)。"; sleep 2; return 1; fi; . "$CONFIG_FILE"; POOL_HOST_PORT=$(echo "$POOL_URL" | sed 's|stratum+tcp://||'); STRATUM_URI="stratum+tcp://${MINING_ADDRESS}.${WORKER_NAME}@${POOL_HOST_PORT}"; echo "使用的矿池地址: $STRATUM_URI"; echo "日志文件位于: $LOG_FILE"; nohup ethminer -P "$STRATUM_URI" >"$LOG_FILE" 2>&1 & MINER_PID=$!; echo "$MINER_PID" > "$PID_FILE"; sleep 1; if ps -p "$MINER_PID" > /dev/null; then echo "✔ 矿机已启动，进程ID: $MINER_PID"; else echo "✘ 矿机启动失败，请查看日志: $LOG_FILE"; rm -f "$PID_FILE"; fi; sleep 2; }
+stop_miner(){ if [ ! -f "$PID_FILE" ]; then echo "矿机未在运行。"; sleep 2; return; fi; PID=$(cat "$PID_FILE"); if ps -p "$PID" > /dev/null; then echo "▶ 正在停止矿机 (PID: $PID)..."; kill "$PID"; sleep 2; if ! ps -p "$PID" > /dev/null; then echo "✔ 矿机已停止。"; rm -f "$PID_FILE"; else echo "等待超时，强制停止..."; kill -9 "$PID"; rm -f "$PID_FILE"; fi; else echo "PID $PID 不存在。清理PID文件..."; rm -f "$PID_FILE"; fi; sleep 2; }
+show_monitor(){ if [ -f "$LOG_FILE" ]; then echo "▶ 实时监控日志 (按 Ctrl+C 退出)..."; tail -f "$LOG_FILE"; else echo "日志文件不存在。"; sleep 2; fi; }
 
 show_menu() {
   while true; do
@@ -239,40 +172,18 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v2.3          ║
+║              Ethminer 矿工专业工具 v3.0          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
 ║ 5) 查看实时日志      0) 退出                   ║
 ╚════════════════════════════════════════════════╝
 EOF
-    echo
-    if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
-        echo "当前状态: 运行中 (PID: $(cat "$PID_FILE"))"
-    else
-        echo "当前状态: 已停止"
-    fi
-    echo "挖矿地址: ${MINING_ADDRESS:-未设置}"
-    echo "矿池地址: ${POOL_URL:-未设置}"
-    echo
-
-    printf "➤ 请输入选项 [0-5]: "
-    read -r choice
-
+    echo; if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then echo "当前状态: 运行中 (PID: $(cat "$PID_FILE"))"; else echo "当前状态: 已停止"; fi; echo "挖矿地址: ${MINING_ADDRESS:-未设置}"; echo "矿池地址: ${POOL_URL:-未设置}"; echo; printf "➤ 请输入选项 [0-5]: "; read -r choice
     case $choice in
-      1) install_ethminer ;;
-      2) change_mining_address ;;
-      3) edit_config ;;
-      4) 
-        if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
-            stop_miner
-        else
-            start_miner
-        fi
-        ;;
-      5) show_monitor ;;
-      0) echo "感谢使用，再见！"; exit 0 ;;
-      *) echo "无效选项，请重新输入"; sleep 1 ;;
+      1) install_ethminer ;; 2) change_mining_address ;; 3) edit_config ;;
+      4) if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then stop_miner; else start_miner; fi ;;
+      5) show_monitor ;; 0) echo "感谢使用，再见！"; exit 0 ;; *) echo "无效选项。"; sleep 1 ;;
     esac
   done
 }
