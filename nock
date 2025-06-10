@@ -94,7 +94,8 @@ manage_dependencies() {
 
 # 编译优化引擎
 perform_optimized_build() {
-  local cpu_arch=$(detect_cpu_arch)
+  local cpu_arch
+  cpu_arch=$(detect_cpu_arch)
   local rust_flags=""
 
   # CPU微架构优化
@@ -137,10 +138,10 @@ show_main_menu() {
     echo -e "7) 日志查看管理"
     echo -e "0) 退出程序${RESET}"
     echo -e "${BLUE}=======================================${RESET}"
-    
+
     read -rp "$(echo -e ${CYAN}➤ 请输入选项: ${RESET})" choice
     case $choice in
-      1) install_workflow ;;
+      1) install_nockchain ;;
       2) config_miner ;;
       3) start_mining ;;
       4) show_monitor ;;
@@ -153,53 +154,24 @@ show_main_menu() {
   done
 }
 
-# 编译设置子菜单
-show_compile_menu() {
-  while true; do
-    clear
-    echo -e "${CYAN}=== 编译优化策略 ==="
-    echo -e "1) 自动模式 (PGO+BOLT)"
-    echo -e "2) 基于分析的优化 (PGO)"
-    echo -e "3) 链接时优化 (LTO)"
-    echo -e "4) 二进制优化 (BOLT)"
-    echo -e "5) 返回主菜单${RESET}"
-    echo -e "${BLUE}=======================================${RESET}"
-    
-    read -rp "$(echo -e ${CYAN}➤ 选择优化策略: ${RESET})" choice
-    case $choice in
-      1) set_optimization "auto" ;;
-      2) set_optimization "pgo" ;;
-      3) set_optimization "lto" ;;
-      4) set_optimization "bolt" ;;
-      5) return ;;
-      *) echo -e "${RED}无效选择，请重新输入${RESET}"; sleep 1 ;;
-    esac
-  done
+# 安装流程函数定义
+install_nockchain() {
+  echo "开始安装Nockchain..."
+  # 在此处补充具体的安装和编译逻辑
 }
 
-# 系统调优子菜单
-show_tuning_menu() {
-  while true; do
-    clear
-    echo -e "${CYAN}=== 系统性能调优 ==="
-    echo -e "1) CPU微架构优化"
-    echo -e "2) 内存子系统调优"
-    echo -e "3) 存储I/O优化"
-    echo -e "4) 网络参数调整"
-    echo -e "5) 返回主菜单${RESET}"
-    echo -e "${BLUE}=======================================${RESET}"
-    
-    read -rp "$(echo -e ${CYAN}➤ 选择调优项目: ${RESET})" choice
-    case $choice in
-      1) optimize_cpu ;;
-      2) tune_memory ;;
-      3) optimize_io ;;
-      4) tune_network ;;
-      5) return ;;
-      *) echo -e "${RED}无效选项，请重新输入${RESET}"; sleep 1 ;;
-    esac
-  done
-}
+# 其他函数占位符
+config_miner()    { echo "配置矿工参数功能待实现"; }
+start_mining()    { echo "启动挖矿程序功能待实现"; }
+show_monitor()    { echo "系统性能监控功能待实现"; }
+show_compile_menu() { echo "高级编译设置功能待实现"; }
+show_tuning_menu()  { echo "系统优化调整功能待实现"; }
+show_logs()       { echo "日志查看管理功能待实现"; }
+detect_cpu_arch() { echo "skylake"; }
+build_pgo()       { echo "PGO编译功能待实现"; }
+build_bolt()      { echo "BOLT编译功能待实现"; }
+build_lto()       { echo "LTO编译功能待实现"; }
+build_auto()      { echo "自动编译功能待实现"; }
 
 # 可视化横幅
 draw_banner() {
