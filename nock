@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ethminer 矿工专业工具 v5.0
-# 终极版：采用混合构建策略，手动编译缺失的核心依赖，并从系统安装其余部分。
+# Ethminer 矿工专业工具 v6.0
+# 终极修复版：编译并链接正确的`jsoncpp`依赖，并明确告知主项目其路径。
 
 set -euo pipefail
 IFS='
@@ -10,7 +10,7 @@ IFS='
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ethminer-tool"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ethminer-tool"
 REPO_PATH="$HOME/ethminer"
-DEPS_SRC_PATH="/tmp/ethminer_deps_src" # 依赖源码临时存放处
+DEPS_SRC_PATH="/tmp/ethminer_deps_src"
 
 LOG_FILE="$CACHE_DIR/miner.log"
 CONFIG_FILE="$CONFIG_DIR/ethminer.conf"
@@ -47,26 +47,29 @@ EOF
   fi
 }
 
-# --- 新增：从源码编译 json-rpc-cpp ---
-compile_json_rpc_cpp() {
-    echo "--> 检测到系统仓库缺少 json-rpc-cpp-devel，将从源码编译..."
+# --- 新增：从源码编译正确的 jsoncpp 依赖 ---
+compile_and_install_jsoncpp() {
+    echo "--> 检测到系统仓库缺少 jsoncpp-devel，将从源码编译..."
     mkdir -p "$DEPS_SRC_PATH"
     (
         cd "$DEPS_SRC_PATH"
-        if [ ! -d "libjson-rpc-cpp" ]; then
-            echo "--> 正在克隆 libjson-rpc-cpp 源码..."
-            git clone https://github.com/cinemast/libjson-rpc-cpp.git
+        if [ ! -d "jsoncpp" ]; then
+            echo "--> 正在克隆 jsoncpp 源码..."
+            # 使用正确的 jsoncpp 官方仓库
+            git clone https://github.com/open-source-parsers/jsoncpp.git
         fi
-        cd libjson-rpc-cpp
-        echo "--> 正在编译并安装 libjson-rpc-cpp..."
+        cd jsoncpp
+        echo "--> 正在编译并安装 jsoncpp..."
         mkdir -p build
         cd build
-        cmake ..
+        # 编译并安装到标准位置 /usr/local
+        cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_STATIC_LIBS=OFF
         make -j"$(get_cpu_cores)"
         $SUDO_CMD make install
+        # 刷新动态链接库缓存，非常重要！
         $SUDO_CMD ldconfig
-    ) || { echo "!! 错误：编译依赖 json-rpc-cpp 失败。"; exit 1; }
-    echo "✔ 依赖 json-rpc-cpp 已成功编译并安装。"
+    ) || { echo "!! 错误：编译依赖 jsoncpp 失败。"; exit 1; }
+    echo "✔ 依赖 jsoncpp 已成功编译并安装到 /usr/local。"
 }
 
 
@@ -85,23 +88,24 @@ install_ethminer() {
   case "$PKG_MANAGER" in
     apt)
       $SUDO_CMD apt-get update
-      $SUDO_CMD apt-get install -y git cmake build-essential libjson-rpc-cpp-dev libboost-all-dev
+      $SUDO_CMD apt-get install -y git cmake build-essential libjsoncpp-dev libboost-all-dev
       ;;
     dnf)
       echo "--> 正在启用 EPEL 和 CRB/PowerTools 仓库..."
       $SUDO_CMD "$PKG_MANAGER" -y install epel-release
       REPO_ID=$(dnf repolist --all | grep -i -E 'builder|powertools' | head -n 1 | awk '{print $1}')
       if [ -n "$REPO_ID" ]; then $SUDO_CMD dnf config-manager --set-enabled "$REPO_ID"; fi
-
+      
       echo "--> 正在安装基础依赖 (git, cmake, gcc, make, boost)..."
       $SUDO_CMD "$PKG_MANAGER" install -y git cmake gcc-c++ make boost-devel
       ;;
   esac
-  echo "✔ 基础环境和依赖安装完成。"
+  echo "✔ 基础环境和可用依赖安装完成。"
 
+  # 只有在 dnf 系统上（我们知道它缺少包）才手动编译
   if [ "$PKG_MANAGER" = "dnf" ]; then
-      echo "▶ 步骤 2/5: 编译缺失的核心依赖 (json-rpc-cpp)..."
-      compile_json_rpc_cpp
+      echo "▶ 步骤 2/5: 编译缺失的核心依赖 (jsoncpp)..."
+      compile_and_install_jsoncpp
   fi
   
   echo "▶ 步骤 3/5: 下载 ethminer 源码..."
@@ -121,7 +125,9 @@ install_ethminer() {
     cd "$REPO_PATH"
     mkdir -p build
     cd build
-    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF -DHUNTER_ENABLED=OFF
+    # --- 这是最终的关键修复 ---
+    # 明确告诉 cmake 在 /usr/local 路径下查找我们手动安装的 jsoncpp
+    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF -DHUNTER_ENABLED=OFF -DCMAKE_PREFIX_PATH=/usr/local
     make -j"$(get_cpu_cores)"
   ) || { echo "编译失败。请检查以上日志。"; exit 1; }
   echo "✔ 编译完成。"
@@ -155,7 +161,7 @@ show_menu() {
     clear
     cat << "EOF"
 ╔════════════════════════════════════════════════╗
-║              Ethminer 矿工专业工具 v5.0          ║
+║              Ethminer 矿工专业工具 v6.0          ║
 ╠════════════════════════════════════════════════╣
 ║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
 ║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
