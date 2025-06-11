@@ -23,7 +23,6 @@ function check_docker() {
 
 # ========= Docker安装模块 =========
 function install_docker() {
-  # 自动识别发行版
   if grep -q "ubuntu" /etc/os-release; then
     sudo apt-get update
     sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
@@ -51,7 +50,6 @@ function install_docker() {
 function deploy_container() {
   echo -e "${CYAN}[*] 启动Nockchain容器...${RESET}"
   
-  # GPU自动检测
   GPU_OPT=""
   if lspci | grep -qi "nvidia"; then
     GPU_OPT="--gpus all"
@@ -70,18 +68,10 @@ function deploy_container() {
 # ========= 矿工控制中心 =========
 function miner_control() {
   case "$1" in
-    start)
-      docker start nck-miner
-      ;;
-    stop)
-      docker stop nck-miner
-      ;;
-    status)
-      docker ps -f name=nck-miner --format "table {{.ID}}\t{{.Status}}\t{{.Image}}"
-      ;;
-    logs)
-      docker logs -f nck-miner
-      ;;
+    start) docker start nck-miner ;;
+    stop) docker stop nck-miner ;;
+    status) docker ps -f name=nck-miner --format "table {{.ID}}\t{{.Status}}\t{{.Image}}" ;;
+    logs) docker logs -f nck-miner ;;
   esac
 }
 
@@ -96,18 +86,22 @@ function live_dashboard() {
   "
 }
 
-# ========= 配置向导 =========
+# ========= 增强版公钥验证 =========
 function config_wizard() {
   echo -e "${CYAN}>>> 容器配置向导 <<<${RESET}"
   
-  # 公钥验证
   while :; do
     read -p "输入矿工公钥（128位十六进制）: " PUBKEY
-    [[ "$PUBKEY" =~ ^[0-9a-fA-F]{32}$ ]] && break
-    echo -e "${RED}✗ 格式错误，示例: 89f4fe6de0028e6b0d123ac7ee123456${RESET}"
+    # 支持带0x前缀的128位验证
+    if [[ "$PUBKEY" =~ ^0x[0-9a-fA-F]{128}$ ]] || [[ "$PUBKEY" =~ ^[0-9a-fA-F]{128}$ ]]; then
+      # 标准化存储格式（小写无前缀）
+      PUBKEY=$(echo "${PUBKEY#0x}" | tr '[:upper:]' '[:lower:]')
+      break
+    else
+      echo -e "${RED}✗ 格式错误，示例：d24c0c53d1162325eba695f32b7194f4c9b2943441a3162837922d36f3325c341ce049e7b3992080a9603e91147e4529f79261a355e16570c975a6c0e81716e3${RESET}"
+    fi
   done
 
-  # 生成配置文件
   cat > $NCK_DIR/.env <<EOF
 MINER_PUBKEY=$PUBKEY
 THREADS=$(nproc)
@@ -145,7 +139,7 @@ function main_menu() {
 }
 
 # ========= 初始化执行 =========
-[ ! -d "$NCK_DIR" ] && mkdir -p "$NCK_DIR"
+mkdir -p "$NCK_DIR"
 trap "echo -e '${RED}强制退出!${RESET}'; exit 130" SIGINT
 
 while true; do
