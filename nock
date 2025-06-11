@@ -13,6 +13,18 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 
+# ========= 内核优化预处理 =========
+function kernel_tuning() {
+  echo -e "${CYAN}[*] 应用内核优化参数...${RESET}"
+  sudo tee /etc/sysctl.d/99-nockchain.conf <<EOF
+vm.overcommit_memory=1
+vm.max_map_count=16777216
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+EOF
+  sudo sysctl -p /etc/sysctl.d/99-nockchain.conf
+}
+
 # ========= Docker安装模块 =========
 function install_docker() {
   echo -e "${CYAN}[*] 开始安装Docker...${RESET}"
@@ -49,50 +61,21 @@ function install_docker() {
   fi
 }
 
-# ========= 智能GPU检测 =========
-function detect_gpu() {
-  if lspci | grep -qi "nvidia"; then
-    echo "nvidia"
-  elif lspci | grep -qi "amd"; then
-    echo "amd"
-  else
-    echo "none"
-  fi
-}
-
 # ========= 容器部署引擎 =========
 function deploy_container() {
   echo -e "${CYAN}[*] 启动Nockchain容器...${RESET}"
   
-  local gpu_type=$(detect_gpu)
-  local gpu_opt=""
-  
-  case $gpu_type in
-    nvidia)
-      gpu_opt="--gpus all"
-      if ! dpkg -l | grep -q nvidia-container-toolkit; then
-        echo -e "${YELLOW}! 正在安装NVIDIA容器工具包...${RESET}"
-        distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-        curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-        curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-        sudo apt-get update
-        sudo apt-get install -y nvidia-container-toolkit
-        sudo systemctl restart docker
-      fi
-      ;;
-    amd)
-      gpu_opt="--device=/dev/kfd --device=/dev/dri"
-      ;;
-  esac
+  # 自动资源分配
+  local CPU_CORES=$(($(nproc) - 1))
+  [ $CPU_CORES -lt 1 ] && CPU_CORES=1
+  local MEM_LIMIT=$(($(free -m | awk '/Mem:/{print $2}') * 85 / 100))m
 
-  # 添加健康检查和资源限制
   docker run -itd --restart always \
     --name nck-miner \
     $VOLUME_MAP \
-    $gpu_opt \
+    --cpus $CPU_CORES \
+    --memory $MEM_LIMIT \
     --network host \
-    --memory="32g" \
-    --cpus="$(($(nproc) - 1))" \
     $DOCKER_IMAGE \
     --config /nockchain/.env \
     --health-cmd="nck-top --check" \
@@ -122,13 +105,9 @@ function config_wizard() {
     fi
   done
 
-  # 自动优化线程数
-  OPTIMAL_THREADS=$(($(nproc) * 8 / 10))
-  [ $OPTIMAL_THREADS -lt 1 ] && OPTIMAL_THREADS=1
-
   cat > $NCK_DIR/.env <<EOF
 MINER_PUBKEY=$PUBKEY
-THREADS=$OPTIMAL_THREADS
+THREADS=$(($(nproc) * 8 / 10))
 EOF
 
   echo -e "${GREEN}✓ 配置文件已生成: $NCK_DIR/.env${RESET}"
@@ -138,7 +117,7 @@ EOF
 function main_menu() {
   clear
   echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 v3.2 ==="
+  echo "=== Nockchain矿工管理系统 v4.0 ==="
   echo -e "${RESET}"
   echo "1) 完整部署矿工"
   echo "2) 启动矿工容器"
@@ -151,7 +130,12 @@ function main_menu() {
   
   read -p "请选择操作: " choice
   case $choice in
-    1) check_docker && config_wizard && deploy_container ;;
+    1) 
+      kernel_tuning
+      install_docker
+      config_wizard 
+      deploy_container
+      ;;
     2) docker start nck-miner ;;
     3) docker stop nck-miner ;;
     4) watch -n1 "docker stats --no-stream nck-miner && echo && docker exec nck-miner nck-top" ;;
