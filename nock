@@ -22,13 +22,13 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain Error 101修复版 v5.0"
+  echo "    Nockchain Binary存在冲突修复版 v6.0"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 专门修复: Error 101编译问题"
+  echo "⚡ 修复: binary already exists + --force处理"
   echo "-----------------------------------------------"
   echo ""
 }
@@ -41,24 +41,24 @@ function check_system_requirements() {
   total_mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
   total_mem_gb=$((total_mem_kb / 1024 / 1024))
   
-  echo -e "${BLUE}[i] 当前系统内存: ${total_mem_gb}GB${RESET}"
+  echo -e "${BLUE}[i] 系统内存: ${total_mem_gb}GB${RESET}"
   
   if [ $total_mem_gb -lt 4 ]; then
-    echo -e "${RED}[-] 严重警告: 内存不足可能导致Error 101${RESET}"
-    read -p "是否继续? (y/N): " continue_choice
+    echo -e "${RED}[-] 内存不足警告${RESET}"
+    read -p "继续? (y/N): " continue_choice
     if [[ ! "$continue_choice" =~ ^[Yy]$ ]]; then
       exit 1
     fi
   else
-    echo -e "${GREEN}[+] 内存检查通过: ${total_mem_gb}GB${RESET}"
+    echo -e "${GREEN}[+] 内存检查通过${RESET}"
   fi
   
   # 检查磁盘空间
   free_space=$(df -BG "$HOME" | tail -1 | awk '{print $4}' | sed 's/G//')
   if [ "$free_space" -lt 15 ]; then
-    echo -e "${RED}[-] 警告: 磁盘空间不足，建议至少15GB${RESET}"
+    echo -e "${YELLOW}[!] 磁盘空间: ${free_space}GB (建议15GB+)${RESET}"
   else
-    echo -e "${GREEN}[+] 磁盘空间: ${free_space}GB可用${RESET}"
+    echo -e "${GREEN}[+] 磁盘空间: ${free_space}GB${RESET}"
   fi
   
   # 检查操作系统
@@ -70,174 +70,91 @@ function check_system_requirements() {
     fi
   else
     OS="unknown"
-    echo -e "${YELLOW}[!] 非Linux系统，可能需要特殊处理${RESET}"
+    echo -e "${YELLOW}[!] 非Linux系统${RESET}"
   fi
 }
 
-# ========= 修复Error 101的完整依赖安装 =========
-function install_build_tools_complete() {
-  echo -e "[*] 安装完整构建工具链修复Error 101..."
+# ========= 安装依赖 =========
+function install_dependencies() {
+  echo -e "[*] 安装完整依赖包..."
   
   # 更新包管理器
   sudo apt-get update && sudo apt-get upgrade -y
   
-  # 根据搜索结果[2]，Error 101通常缺少C工具链
-  echo -e "[*] 安装C/C++编译工具..."
-  sudo apt install -y \
-    gcc g++ \
-    build-essential \
-    libc6-dev \
-    linux-libc-dev \
-    libc-dev-bin \
-    libc-devtools
-  
-  # 安装完整的LLVM/Clang工具链
-  echo -e "[*] 安装LLVM/Clang工具链..."
-  sudo apt install -y \
-    clang \
-    clang-tools \
-    llvm \
-    llvm-dev \
-    llvm-runtime \
-    libclang-dev \
-    libclang1
-  
-  # 安装开发库和工具
-  echo -e "[*] 安装开发库..."
-  sudo apt install -y \
-    pkg-config \
-    pkgconf \
-    libssl-dev \
-    libssl3 \
-    openssl \
-    libffi-dev \
-    zlib1g-dev \
-    libbz2-dev \
-    libreadline-dev \
-    libsqlite3-dev \
-    libncurses5-dev \
-    libncursesw5-dev \
-    xz-utils \
-    tk-dev \
-    libgdbm-dev \
-    liblzma-dev \
-    uuid-dev
-  
-  # 安装构建工具
+  # 根据搜索结果[4]Bruce的经验，确保build-essential
   echo -e "[*] 安装构建工具..."
   sudo apt install -y \
-    cmake \
-    make \
-    automake \
-    autoconf \
-    libtool \
-    m4 \
-    perl \
-    curl \
-    git \
-    wget \
-    unzip \
-    tar \
-    gzip
+    build-essential \
+    gcc g++ \
+    libc6-dev \
+    cmake make \
+    curl git wget \
+    pkg-config \
+    libssl-dev \
+    clang llvm-dev libclang-dev \
+    screen htop unzip \
+    jq
   
-  # 安装Python开发环境（某些Rust crate需要）
-  sudo apt install -y \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-setuptools
-  
-  # 验证工具安装
-  echo -e "[*] 验证构建工具..."
-  if command -v gcc >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] GCC: $(gcc --version | head -1)${RESET}"
-  else
-    echo -e "${RED}[-] GCC未安装${RESET}"
-    return 1
-  fi
-  
-  if command -v clang >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] Clang: $(clang --version | head -1)${RESET}"
-  else
-    echo -e "${RED}[-] Clang未安装${RESET}"
-    return 1
-  fi
-  
-  if command -v cmake >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] CMake: $(cmake --version | head -1)${RESET}"
-  else
-    echo -e "${RED}[-] CMake未安装${RESET}"
-    return 1
-  fi
-  
-  echo -e "${GREEN}[+] 构建工具链安装完成${RESET}"
+  echo -e "${GREEN}[+] 依赖安装完成${RESET}"
 }
 
-# ========= 内存和swap优化 =========
+# ========= 内存优化 =========
 function setup_memory_optimization() {
-  echo -e "[*] 内存优化防止Error 101..."
+  echo -e "[*] 内存优化..."
   
-  # 增加swap防止内存不足导致的Error 101
+  # 如果内存不足，增加swap
   if [ $total_mem_gb -lt 8 ]; then
-    echo -e "${YELLOW}[*] 内存不足，配置swap防止编译失败...${RESET}"
+    echo -e "${YELLOW}[*] 配置swap空间...${RESET}"
     
     current_swap=$(free -g | grep Swap | awk '{print $2}')
     if [ "$current_swap" -lt 4 ]; then
-      echo -e "[*] 创建4GB swap文件..."
-      sudo fallocate -l 4G /swapfile-nockchain 2>/dev/null || \
-      sudo dd if=/dev/zero of=/swapfile-nockchain bs=1M count=4096 2>/dev/null
+      echo -e "[*] 创建4GB swap..."
+      sudo fallocate -l 4G /swapfile-nock 2>/dev/null || \
+      sudo dd if=/dev/zero of=/swapfile-nock bs=1M count=4096 2>/dev/null
       
-      sudo chmod 600 /swapfile-nockchain
-      sudo mkswap /swapfile-nockchain >/dev/null 2>&1
-      sudo swapon /swapfile-nockchain >/dev/null 2>&1
+      sudo chmod 600 /swapfile-nock
+      sudo mkswap /swapfile-nock >/dev/null 2>&1
+      sudo swapon /swapfile-nock >/dev/null 2>&1
       
-      echo -e "${GREEN}[+] Swap空间已配置${RESET}"
+      echo -e "${GREEN}[+] Swap已配置${RESET}"
     fi
   fi
-  
-  # 设置编译器内存限制
-  sudo sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
-  sudo sysctl -w vm.max_map_count=655360 >/dev/null 2>&1 || true
   
   echo -e "${GREEN}[+] 内存优化完成${RESET}"
 }
 
-# ========= 重置Rust环境解决Error 101 =========
-function reset_rust_fix_error101() {
-  echo -e "[*] 重置Rust环境修复Error 101..."
+# ========= 修复Rust环境和cargo配置 =========
+function setup_rust_fixed() {
+  echo -e "[*] 设置Rust环境（修复版）..."
   
-  # 完全清理旧的Rust环境
+  # 清理旧环境
   pkill -f cargo 2>/dev/null || true
-  pkill -f rustc 2>/dev/null || true
   sleep 2
   
   if [ -d "$HOME/.cargo" ]; then
-    echo -e "${YELLOW}[*] 删除损坏的cargo目录...${RESET}"
+    echo -e "${YELLOW}[*] 清理旧Rust环境...${RESET}"
     rm -rf "$HOME/.cargo"
   fi
   if [ -d "$HOME/.rustup" ]; then
-    echo -e "${YELLOW}[*] 删除rustup目录...${RESET}"
     rm -rf "$HOME/.rustup"
   fi
   
-  # 重新安装Rust，使用stable工具链
-  echo -e "[*] 重新安装Rust stable工具链..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  # 根据搜索结果[4]的方法安装Rust
+  echo -e "[*] 安装Rust..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   
   # 立即加载环境
   source "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 配置cargo解决Error 101
+  # 修复cargo配置 - 根据错误信息移除无效的timeout配置
   mkdir -p "$HOME/.cargo"
   cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
 jobs = 1
-rustflags = ["-C", "opt-level=1", "-C", "debuginfo=0"]
 
 [net]
 retry = 15
-timeout = 600
 
 [env]
 CC = "gcc"
@@ -246,29 +163,25 @@ CXX = "g++"
 [profile.release]
 lto = false
 codegen-units = 1
-panic = "abort"
 debug = false
-incremental = false
 
 [profile.dev]
-incremental = false
 debug = false
 EOF
 
-  # 设置环境变量防止Error 101
+  # 设置环境变量
   export CC=gcc
   export CXX=g++
   export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0"
   
   # 配置shell环境
   for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$rc_file" ]; then
-      # 移除旧配置
+      # 清理旧配置
       sed -i '/cargo/d' "$rc_file" 2>/dev/null || true
       sed -i '/rustup/d' "$rc_file" 2>/dev/null || true
       
-      # 添加新配置
+      # 添加配置
       echo 'source $HOME/.cargo/env' >> "$rc_file"
       echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
       echo 'export CC=gcc' >> "$rc_file"
@@ -277,13 +190,13 @@ EOF
   done
   
   # 验证安装
-  if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] Rust环境重置成功${RESET}"
-    echo -e "${GREEN}[+] Rust版本: $(rustc --version)${RESET}"
-    echo -e "${GREEN}[+] Cargo版本: $(cargo --version)${RESET}"
+  if command -v cargo >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] Rust环境设置成功${RESET}"
+    echo -e "${GREEN}[+] Rust: $(rustc --version)${RESET}"
+    echo -e "${GREEN}[+] Cargo: $(cargo --version)${RESET}"
     return 0
   else
-    echo -e "${RED}[-] Rust环境重置失败${RESET}"
+    echo -e "${RED}[-] Rust环境设置失败${RESET}"
     return 1
   fi
 }
@@ -303,7 +216,7 @@ function clean_and_clone() {
   rm -rf nockchain .nockapp 2>/dev/null || true
   
   # 克隆仓库
-  echo -e "[*] 克隆Nockchain仓库..."
+  echo -e "[*] 克隆仓库..."
   if git clone https://github.com/zorp-corp/nockchain; then
     echo -e "${GREEN}[+] 仓库克隆成功${RESET}"
     cd nockchain || return 1
@@ -314,9 +227,37 @@ function clean_and_clone() {
   fi
 }
 
-# ========= 修复Error 101的构建方法 =========
-function build_fix_error101() {
-  echo -e "[*] 使用Error 101修复方法构建..."
+# ========= 修复Makefile的--force问题 =========
+function fix_makefile() {
+  echo -e "[*] 修复Makefile..."
+  
+  cd "$NCK_DIR" || return 1
+  
+  # 备份原始Makefile
+  if [ ! -f "Makefile.backup" ]; then
+    cp Makefile Makefile.backup
+  fi
+  
+  # 根据搜索结果[1][3][5]，添加--force参数解决"binary already exists"问题
+  echo -e "[*] 修复cargo install命令..."
+  
+  # 修复所有cargo install命令，添加--force参数
+  sed -i 's/cargo install --locked --path/cargo install --locked --force --path/g' Makefile
+  sed -i 's/cargo install --path/cargo install --force --path/g' Makefile
+  
+  # 确保没有重复的--force
+  sed -i 's/--force --force/--force/g' Makefile
+  
+  echo -e "${GREEN}[+] Makefile修复完成${RESET}"
+  
+  # 显示修改内容
+  echo -e "${BLUE}[i] 修复的命令:${RESET}"
+  grep "cargo install" Makefile | head -3
+}
+
+# ========= 修复binary存在问题的构建方法 =========
+function build_fix_binary_exists() {
+  echo -e "[*] 使用--force修复构建..."
   
   cd "$NCK_DIR" || return 1
   
@@ -326,9 +267,8 @@ function build_fix_error101() {
   export CC=gcc
   export CXX=g++
   export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0"
   
-  # 设置环境文件
+  # 设置.env文件
   echo -e "[*] 设置.env文件..."
   if [ -f ".env_example" ]; then
     cp .env_example .env
@@ -338,58 +278,51 @@ function build_fix_error101() {
 MINING_PUBKEY=
 RUST_LOG=info
 EOF
-    echo -e "${GREEN}[+] 创建基本.env文件${RESET}"
+    echo -e "${GREEN}[+] 基本.env文件创建成功${RESET}"
   fi
+  
+  # 修复Makefile
+  fix_makefile
   
   # 清理构建缓存
   echo -e "[*] 清理构建缓存..."
   cargo clean >/dev/null 2>&1 || true
   rm -rf target/ 2>/dev/null || true
   
-  # 更新依赖，使用locked防止版本冲突（根据搜索结果[2]）
-  echo -e "[*] 更新依赖..."
-  timeout 300 cargo update >/dev/null 2>&1 || true
+  # 手动清理可能存在的二进制文件
+  echo -e "[*] 清理现有二进制文件..."
+  rm -f "$HOME/.cargo/bin/hoonc" 2>/dev/null || true
+  rm -f "$HOME/.cargo/bin/nockchain-wallet" 2>/dev/null || true
+  rm -f "$HOME/.cargo/bin/nockchain" 2>/dev/null || true
   
-  # 构建hoonc - 使用多种方法防止Error 101
-  echo -e "[*] 构建hoonc（Error 101修复版）..."
+  # 构建hoonc - 根据搜索结果[3][5]使用--force
+  echo -e "[*] 构建hoonc（使用--force）..."
   
-  # 方法1: 使用--locked参数（根据搜索结果[2]）
-  echo -e "[*] 方法1: 使用--locked构建hoonc..."
-  if timeout 1200 cargo install --locked --path crates/hoonc --bin hoonc --force; then
+  # 方法1: 直接使用--force参数
+  echo -e "[*] 方法1: 直接cargo install --force..."
+  if timeout 1200 cargo install --locked --force --path crates/hoonc --bin hoonc; then
     echo -e "${GREEN}[+] hoonc构建成功 (方法1)${RESET}"
   else
     echo -e "${YELLOW}[!] 方法1失败，尝试方法2...${RESET}"
     
-    # 方法2: 直接构建
-    echo -e "[*] 方法2: 直接构建hoonc..."
-    cd crates/hoonc
-    if timeout 1200 cargo build --release; then
-      mkdir -p "$HOME/.cargo/bin"
-      if [ -f "target/release/hoonc" ]; then
-        cp target/release/hoonc "$HOME/.cargo/bin/"
-        echo -e "${GREEN}[+] hoonc构建成功 (方法2)${RESET}"
-      fi
+    # 方法2: 使用make（已修复的Makefile）
+    echo -e "[*] 方法2: 使用修复的make..."
+    if timeout 1200 make install-hoonc; then
+      echo -e "${GREEN}[+] hoonc构建成功 (方法2)${RESET}"
     else
-      echo -e "${YELLOW}[!] 方法2失败，尝试方法3...${RESET}"
+      echo -e "${YELLOW}[!] 方法2失败，手动构建...${RESET}"
       
-      # 方法3: 使用系统级make
-      cd "$NCK_DIR"
-      echo -e "[*] 方法3: 使用make构建hoonc..."
-      if timeout 1200 make install-hoonc; then
-        echo -e "${GREEN}[+] hoonc构建成功 (方法3)${RESET}"
-      else
-        echo -e "${YELLOW}[!] hoonc构建失败，创建占位符...${RESET}"
-        # 创建占位符
+      # 方法3: 手动构建
+      cd crates/hoonc
+      if timeout 1200 cargo build --release; then
         mkdir -p "$HOME/.cargo/bin"
-        cat > "$HOME/.cargo/bin/hoonc" << 'EOF'
-#!/bin/bash
-echo "hoonc placeholder"
-exit 0
-EOF
-        chmod +x "$HOME/.cargo/bin/hoonc"
+        if [ -f "target/release/hoonc" ]; then
+          cp target/release/hoonc "$HOME/.cargo/bin/"
+          echo -e "${GREEN}[+] hoonc手动构建成功${RESET}"
+        fi
       fi
+      cd "$NCK_DIR"
     fi
-    cd "$NCK_DIR"
   fi
   
   # 确保PATH包含cargo bin
@@ -398,46 +331,42 @@ EOF
   # 构建主项目
   echo -e "[*] 构建主项目..."
   
-  # 设置内存友好的构建参数
-  export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0"
-  
-  # 构建方法1: make build
-  echo -e "[*] 尝试make build..."
+  # 尝试make build
   if timeout 2400 make build; then
     echo -e "${GREEN}[+] make build成功${RESET}"
   else
     echo -e "${YELLOW}[!] make build失败，尝试cargo build...${RESET}"
-    
-    # 构建方法2: cargo build
     if timeout 2400 cargo build --release; then
       echo -e "${GREEN}[+] cargo build成功${RESET}"
-    else
-      echo -e "${YELLOW}[!] release构建失败，尝试debug...${RESET}"
-      if timeout 1800 cargo build; then
-        echo -e "${GREEN}[+] debug构建成功${RESET}"
-      fi
     fi
   fi
   
-  # 安装组件
+  # 安装组件（使用修复的Makefile）
   echo -e "[*] 安装钱包组件..."
   export PATH="$HOME/.cargo/bin:$PATH"
   if timeout 600 make install-nockchain-wallet; then
     echo -e "${GREEN}[+] 钱包安装成功${RESET}"
+  else
+    # 手动安装钱包
+    echo -e "[*] 手动安装钱包..."
+    cargo install --locked --force --path . --bin nockchain-wallet >/dev/null 2>&1 || true
   fi
   
   echo -e "[*] 安装节点组件..."
   export PATH="$HOME/.cargo/bin:$PATH"
   if timeout 600 make install-nockchain; then
     echo -e "${GREEN}[+] 节点安装成功${RESET}"
+  else
+    # 手动安装节点
+    echo -e "[*] 手动安装节点..."
+    cargo install --locked --force --path . --bin nockchain >/dev/null 2>&1 || true
   fi
   
   # 检查构建结果
   echo -e "[*] 检查构建结果..."
   binary_count=0
   
-  for binary in "nockchain-wallet" "nockchain"; do
+  for binary in "hoonc" "nockchain-wallet" "nockchain"; do
     if command -v "$binary" >/dev/null 2>&1; then
       echo -e "${GREEN}  ✓ $binary (PATH中可用)${RESET}"
       ((binary_count++))
@@ -461,13 +390,13 @@ EOF
 
 # ========= 主安装流程 =========
 function setup_all() {
-  echo -e "[*] 开始Error 101修复安装..."
+  echo -e "[*] 开始binary存在冲突修复安装..."
   
   check_system_requirements
-  install_build_tools_complete
+  install_dependencies
   setup_memory_optimization
   
-  if ! reset_rust_fix_error101; then
+  if ! setup_rust_fixed; then
     echo -e "${RED}[-] Rust环境设置失败${RESET}"
     pause_and_return
     return
@@ -479,17 +408,19 @@ function setup_all() {
     return
   fi
   
-  if build_fix_error101; then
-    echo -e "${GREEN}[+] ✅ Nockchain Error 101修复安装成功！${RESET}"
-    echo -e "${BLUE}[i] 已解决编译工具链和内存问题${RESET}"
+  if build_fix_binary_exists; then
+    echo -e "${GREEN}[+] ✅ Nockchain安装成功！${RESET}"
+    echo -e "${BLUE}[i] 已修复binary already exists问题${RESET}"
+    echo -e "${BLUE}[i] 使用--force参数解决cargo install冲突${RESET}"
   else
-    echo -e "${YELLOW}[!] 安装可能有部分问题，但通常可以继续使用${RESET}"
+    echo -e "${YELLOW}[!] 安装可能有部分问题${RESET}"
+    echo -e "${BLUE}[i] 通常可以继续使用${RESET}"
   fi
   
   pause_and_return
 }
 
-# ========= 钱包生成 =========
+# ========= 钱包操作 =========
 function generate_wallet() {
   echo -e "[*] 生成钱包..."
   cd "$NCK_DIR" || return 1
@@ -498,7 +429,7 @@ function generate_wallet() {
   source "$HOME/.cargo/env" 2>/dev/null || true
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 查找钱包二进制文件
+  # 查找钱包程序
   wallet_bin=""
   if command -v nockchain-wallet >/dev/null 2>&1; then
     wallet_bin="nockchain-wallet"
@@ -509,8 +440,8 @@ function generate_wallet() {
   fi
   
   if [ -z "$wallet_bin" ]; then
-    echo -e "${RED}[-] 未找到nockchain-wallet二进制文件${RESET}"
-    echo -e "${YELLOW}[!] 请先完成项目构建${RESET}"
+    echo -e "${RED}[-] 未找到nockchain-wallet程序${RESET}"
+    echo -e "${YELLOW}[!] 请先完成构建${RESET}"
     pause_and_return
     return
   fi
@@ -519,11 +450,11 @@ function generate_wallet() {
   
   # 生成钱包
   if ! "$wallet_bin" keygen; then
-    echo -e "${YELLOW}[!] 钱包生成遇到问题，请检查输出${RESET}"
+    echo -e "${YELLOW}[!] 钱包生成可能有问题${RESET}"
   fi
   
-  echo -e "${YELLOW}[!] 钱包生成完成，请复制上方公钥${RESET}"
-  echo -e "${BLUE}[i] 公钥格式为128位16进制字符串${RESET}"
+  echo -e "${YELLOW}[!] 请复制上方的公钥${RESET}"
+  echo -e "${BLUE}[i] 公钥格式：128位16进制${RESET}"
   pause_and_return
 }
 
@@ -544,14 +475,14 @@ function validate_pubkey() {
 }
 
 function set_pubkey_env() {
-  echo -e "[*] 设置 MINING_PUBKEY 到 .env..."
+  echo -e "[*] 设置挖矿公钥..."
   cd "$NCK_DIR" || return 1
 
-  echo -e "${BLUE}[i] 公钥格式要求：128位16进制字符串${RESET}"
+  echo -e "${BLUE}[i] 公钥格式：128位16进制字符串${RESET}"
   echo ""
   
   while true; do
-    read -p "请输入公钥 (MINING_PUBKEY): " pubkey
+    read -p "请输入公钥: " pubkey
     
     if [ -z "$pubkey" ]; then
       echo -e "${RED}[-] 公钥不能为空${RESET}"
@@ -573,10 +504,10 @@ function set_pubkey_env() {
       fi
       echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
       
-      echo -e "${GREEN}[+] 公钥已写入 .env 文件${RESET}"
+      echo -e "${GREEN}[+] 公钥已写入.env文件${RESET}"
       break
     else
-      echo -e "${YELLOW}[!] 请重新输入正确格式的公钥${RESET}"
+      echo -e "${YELLOW}[!] 公钥格式错误，请重新输入${RESET}"
     fi
   done
   
@@ -584,7 +515,7 @@ function set_pubkey_env() {
 }
 
 function export_keys() {
-  echo -e "[*] 导出钱包密钥..."
+  echo -e "[*] 导出密钥..."
   cd "$NCK_DIR" || return 1
   
   source "$HOME/.cargo/env" 2>/dev/null || true
@@ -611,7 +542,7 @@ function export_keys() {
 }
 
 function import_keys() {
-  echo -e "[*] 导入钱包密钥..."
+  echo -e "[*] 导入密钥..."
   cd "$NCK_DIR" || return 1
   
   source "$HOME/.cargo/env" 2>/dev/null || true
@@ -755,6 +686,16 @@ function check_status() {
     echo -e "${RED}[-] 节点未运行${RESET}"
   fi
   
+  # 显示已安装的组件
+  echo -e "${BLUE}[i] 已安装组件:${RESET}"
+  for binary in "hoonc" "nockchain-wallet" "nockchain"; do
+    if command -v "$binary" >/dev/null 2>&1; then
+      echo -e "${GREEN}  ✓ $binary${RESET}"
+    else
+      echo -e "${YELLOW}  ✗ $binary${RESET}"
+    fi
+  done
+  
   pause_and_return
 }
 
@@ -783,7 +724,7 @@ function pause_and_return() {
 function main_menu() {
   show_banner
   echo "请选择操作:"
-  echo "  1) 🚀 Error 101修复安装"
+  echo "  1) 🚀 修复安装 (解决binary exists问题)"
   echo "  2) 🔑 生成钱包"
   echo "  3) 📝 设置挖矿公钥"
   echo "  4) 💾 导出密钥"
@@ -794,8 +735,8 @@ function main_menu() {
   echo "  9) ⏹️  停止节点"
   echo "  0) 退出"
   echo ""
-  echo -e "${BLUE}💡 专门修复Error 101编译问题${RESET}"
-  echo -e "${BLUE}💡 完整C工具链 + 内存优化 + --locked参数${RESET}"
+  echo -e "${BLUE}💡 专门修复: binary already exists问题${RESET}"
+  echo -e "${BLUE}💡 使用--force参数 + 修复cargo配置${RESET}"
   echo ""
   read -p "请输入编号: " choice
 
