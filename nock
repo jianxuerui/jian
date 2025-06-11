@@ -2,7 +2,7 @@
 
 # ========= 容器化部署方案 =========
 NCK_DIR="$HOME/nockchain"
-DOCKER_IMAGE="ghcr.io/lpsm-dev/docker-crypto-miner:main"  # 已更换为可用的镜像源
+DOCKER_IMAGE="ghcr.io/lpsm-dev/docker-crypto-miner:main"
 VOLUME_MAP="-v $NCK_DIR:/nockchain"
 
 # ========= 色彩定义 =========
@@ -85,12 +85,14 @@ function deploy_container() {
       ;;
   esac
 
-  # 添加容器健康检查
+  # 添加健康检查和资源限制
   docker run -itd --restart always \
     --name nck-miner \
     $VOLUME_MAP \
     $gpu_opt \
     --network host \
+    --memory="32g" \
+    --cpus="$(($(nproc) - 1))" \
     $DOCKER_IMAGE \
     --config /nockchain/.env \
     --health-cmd="nck-top --check" \
@@ -120,9 +122,13 @@ function config_wizard() {
     fi
   done
 
+  # 自动优化线程数
+  OPTIMAL_THREADS=$(($(nproc) * 8 / 10))
+  [ $OPTIMAL_THREADS -lt 1 ] && OPTIMAL_THREADS=1
+
   cat > $NCK_DIR/.env <<EOF
 MINER_PUBKEY=$PUBKEY
-THREADS=$(($(nproc) * 9 / 10))
+THREADS=$OPTIMAL_THREADS
 EOF
 
   echo -e "${GREEN}✓ 配置文件已生成: $NCK_DIR/.env${RESET}"
@@ -132,7 +138,7 @@ EOF
 function main_menu() {
   clear
   echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 v3.1 ==="
+  echo "=== Nockchain矿工管理系统 v3.2 ==="
   echo -e "${RESET}"
   echo "1) 完整部署矿工"
   echo "2) 启动矿工容器"
