@@ -2,7 +2,7 @@
 
 # ========= 容器化部署方案 =========
 NCK_DIR="$HOME/nockchain"
-DOCKER_IMAGE="nockchain/miner:2.4.0"
+DOCKER_IMAGE="registry.gitlab.com/nockchain/miner:stable"
 VOLUME_MAP="-v $NCK_DIR:/nockchain"
 
 # ========= 色彩定义 =========
@@ -17,6 +17,7 @@ CYAN='\033[0;36m'
 function install_docker() {
   echo -e "${CYAN}[*] 开始安装Docker...${RESET}"
   
+  # 自动识别发行版
   if grep -qi "ubuntu" /etc/os-release; then
     sudo apt-get update
     sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
@@ -93,6 +94,17 @@ function deploy_container() {
       ;;
   esac
 
+  # 添加IPv4优先配置
+  sudo tee /etc/docker/daemon.json <<EOF
+{
+  "ipv6": false,
+  "default-address-pools": [
+    {"base": "172.80.0.0/16", "size": 24}
+  ]
+}
+EOF
+  sudo systemctl restart docker
+
   docker run -itd --restart always \
     --name nck-miner \
     $VOLUME_MAP \
@@ -136,7 +148,7 @@ EOF
 function main_menu() {
   clear
   echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 v2.4 ==="
+  echo "=== Nockchain矿工管理系统 v3.0 ==="
   echo -e "${RESET}"
   echo "1) 完整部署矿工"
   echo "2) 启动矿工容器"
