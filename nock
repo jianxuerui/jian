@@ -12,6 +12,11 @@ RED='\033[0;31m'
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
 
+# ========= 环境变量设置 =========
+export RUST_BACKTRACE=1
+export CARGO_NET_RETRY=10
+export CARGO_NET_TIMEOUT=60
+
 # ========= 工作目录修复 =========
 function fix_working_directory() {
   if ! pwd >/dev/null 2>&1; then
@@ -53,13 +58,13 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain 挖矿优化助手 v2.4"
+  echo "         Nockchain 挖矿优化助手 v2.5"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 优化版本: 修复构建问题 + Cargo缓存清理"
+  echo "⚡ 优化版本: 深度修复构建问题 + 缓存清理"
   echo "-----------------------------------------------"
   echo ""
 }
@@ -115,19 +120,42 @@ function install_dependencies() {
   if [[ "$OS" == "linux" ]]; then
     if command -v apt >/dev/null 2>&1; then
       sudo apt update -qq
-      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop unzip
+      # 安装更完整的依赖包，包括构建失败常见缺失的包
+      sudo apt install -y \
+        clang llvm-dev libclang-dev \
+        pkg-config pkgconf \
+        libssl-dev libssl3 \
+        build-essential cmake \
+        curl git make screen htop unzip \
+        libc6-dev gcc g++ \
+        libffi-dev \
+        python3-dev \
+        autoconf automake libtool
     elif command -v yum >/dev/null 2>&1; then
       sudo yum groupinstall -y "Development Tools"
-      sudo yum install -y clang llvm-devel openssl-devel cmake curl git make screen htop unzip
+      sudo yum install -y \
+        clang llvm-devel \
+        openssl-devel \
+        cmake curl git make screen htop unzip \
+        gcc gcc-c++ \
+        pkgconf-pkg-config \
+        libffi-devel \
+        python3-devel
     elif command -v pacman >/dev/null 2>&1; then
-      sudo pacman -S --noconfirm clang llvm pkg-config openssl cmake curl git make screen htop unzip
+      sudo pacman -S --noconfirm \
+        clang llvm \
+        pkg-config pkgconf \
+        openssl cmake curl git make screen htop unzip \
+        gcc \
+        libffi \
+        python
     else
       echo -e "${RED}[-] 未识别的包管理器，请手动安装依赖${RESET}"
       return 1
     fi
   elif [[ "$OS" == "macos" ]]; then
     if command -v brew >/dev/null 2>&1; then
-      brew install llvm openssl cmake curl git make screen htop unzip
+      brew install llvm openssl cmake curl git make screen htop unzip pkg-config
     else
       echo -e "${RED}[-] 请先安装 Homebrew${RESET}"
       return 1
@@ -138,39 +166,62 @@ function install_dependencies() {
   return 0
 }
 
-function clean_cargo_cache() {
-  echo -e "[*] 清理Cargo缓存..."
+function deep_clean_cargo() {
+  echo -e "[*] 深度清理Cargo环境..."
   
-  # 清理registry缓存
-  if [ -d "$HOME/.cargo/registry" ]; then
-    echo -e "${YELLOW}[*] 清理registry缓存...${RESET}"
-    rm -rf "$HOME/.cargo/registry/cache"
-    rm -rf "$HOME/.cargo/registry/src"
+  # 停止所有cargo进程
+  pkill -f cargo 2>/dev/null || true
+  sleep 2
+  
+  # 完全清理cargo目录
+  if [ -d "$HOME/.cargo" ]; then
+    echo -e "${YELLOW}[*] 备份并清理cargo缓存...${RESET}"
+    
+    # 备份config
+    if [ -f "$HOME/.cargo/config" ]; then
+      cp "$HOME/.cargo/config" "$HOME/.cargo/config.backup" 2>/dev/null || true
+    fi
+    if [ -f "$HOME/.cargo/config.toml" ]; then
+      cp "$HOME/.cargo/config.toml" "$HOME/.cargo/config.toml.backup" 2>/dev/null || true
+    fi
+    
+    # 删除可能损坏的缓存目录
+    rm -rf "$HOME/.cargo/registry" 2>/dev/null || true
+    rm -rf "$HOME/.cargo/git" 2>/dev/null || true
+    rm -rf "$HOME/.cargo/.global-cache" 2>/dev/null || true
+    
+    # 恢复config
+    if [ -f "$HOME/.cargo/config.backup" ]; then
+      mv "$HOME/.cargo/config.backup" "$HOME/.cargo/config" 2>/dev/null || true
+    fi
+    if [ -f "$HOME/.cargo/config.toml.backup" ]; then
+      mv "$HOME/.cargo/config.toml.backup" "$HOME/.cargo/config.toml" 2>/dev/null || true
+    fi
   fi
   
-  # 清理git缓存
-  if [ -d "$HOME/.cargo/git" ]; then
-    echo -e "${YELLOW}[*] 清理git缓存...${RESET}"
-    rm -rf "$HOME/.cargo/git/db"
-    rm -rf "$HOME/.cargo/git/checkouts"
-  fi
+  # 清理临时文件
+  rm -rf /tmp/cargo-* 2>/dev/null || true
   
-  # 更新cargo index
-  cargo search --limit 0 >/dev/null 2>&1 || true
-  
-  echo -e "${GREEN}[+] Cargo缓存清理完成${RESET}"
+  echo -e "${GREEN}[+] Cargo环境深度清理完成${RESET}"
 }
 
 function setup_rust() {
-  echo -e "[*] 安装 Rust 工具链..."
+  echo -e "[*] 设置 Rust 工具链..."
   
+  # 检查并安装Rust
   if ! command -v cargo &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    echo -e "[*] 安装Rust工具链..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
     source "$HOME/.cargo/env"
+  else
+    echo -e "[*] 检测到现有Rust安装，清理环境..."
+    deep_clean_cargo
   fi
 
-  # 更新Rust工具链
+  # 更新工具链
+  echo -e "[*] 更新Rust工具链..."
   rustup update stable >/dev/null 2>&1 || true
+  rustup default stable >/dev/null 2>&1 || true
   
   # 配置环境变量
   for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
@@ -183,10 +234,24 @@ function setup_rust() {
   export PATH="$HOME/.cargo/bin:$PATH"
   source "$HOME/.cargo/env" 2>/dev/null || true
   
-  # 清理缓存
-  clean_cargo_cache
+  # 设置cargo优化配置
+  mkdir -p "$HOME/.cargo"
+  cat > "$HOME/.cargo/config.toml" << 'EOF'
+[build]
+jobs = 4
+
+[net]
+retry = 10
+timeout = 60000
+
+[registry]
+default = "sparse"
+
+[source.crates-io]
+registry = "sparse+https://index.crates.io/"
+EOF
   
-  echo -e "${GREEN}[+] Rust工具链安装完成${RESET}"
+  echo -e "${GREEN}[+] Rust工具链设置完成${RESET}"
 }
 
 function safe_remove_directory() {
@@ -279,151 +344,163 @@ function clone_repository() {
   fi
 }
 
-function build_hoonc() {
-  echo -e "[*] 构建hoonc工具..."
+function build_hoonc_advanced() {
+  echo -e "[*] 高级构建hoonc工具..."
   
   cd_nck_dir
   
   # 检查hoonc目录
   if [ ! -d "crates/hoonc" ]; then
-    echo -e "${YELLOW}[!] 未找到hoonc源码目录${RESET}"
+    echo -e "${YELLOW}[!] 未找到hoonc源码目录，跳过hoonc构建${RESET}"
     return 1
   fi
-  
-  # 尝试多种方式构建hoonc
-  hoonc_success=false
-  
-  # 方法1: 直接cargo install
-  echo -e "[*] 尝试直接安装hoonc..."
-  if cargo install --path crates/hoonc --bin hoonc --force; then
-    hoonc_success=true
-    echo -e "${GREEN}[+] hoonc安装成功 (方法1)${RESET}"
-  else
-    echo -e "${YELLOW}[!] 方法1失败，尝试不使用锁定...${RESET}"
-    
-    # 方法2: 不使用locked参数
-    if cargo install --path crates/hoonc --bin hoonc --force --no-default-features; then
-      hoonc_success=true
-      echo -e "${GREEN}[+] hoonc安装成功 (方法2)${RESET}"
-    else
-      echo -e "${YELLOW}[!] 方法2失败，尝试本地构建...${RESET}"
-      
-      # 方法3: 本地构建
-      cd crates/hoonc
-      if cargo build --release --bin hoonc; then
-        # 手动复制到cargo bin目录
-        mkdir -p "$HOME/.cargo/bin"
-        cp target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null || {
-          cp ../../target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null
-        }
-        hoonc_success=true
-        echo -e "${GREEN}[+] hoonc构建成功 (方法3)${RESET}"
-      fi
-      cd "$NCK_DIR"
-    fi
-  fi
-  
-  # 验证hoonc是否可用
-  if command -v hoonc >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] hoonc工具验证成功${RESET}"
-    return 0
-  elif [ -f "$HOME/.cargo/bin/hoonc" ]; then
-    echo -e "${GREEN}[+] hoonc已安装到 $HOME/.cargo/bin/hoonc${RESET}"
-    return 0
-  else
-    echo -e "${YELLOW}[!] hoonc构建可能失败，但继续尝试主项目构建${RESET}"
-    return 1
-  fi
-}
-
-function build_project() {
-  echo -e "[*] 开始构建Nockchain项目..."
-  
-  cd_nck_dir
-  
-  # 设置优化编译参数
-  export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1"
-  if rustc --print target-features 2>/dev/null | grep -q lto; then
-    export RUSTFLAGS="$RUSTFLAGS -C lto=fat"
-    export CARGO_PROFILE_RELEASE_LTO=true
-  fi
-  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-  export CARGO_PROFILE_RELEASE_PANIC="abort"
-  
-  # 首先尝试构建hoonc
-  build_hoonc
-  
-  echo -e "[*] 构建主项目..."
   
   # 清理之前的构建
   cargo clean >/dev/null 2>&1 || true
+  rm -rf target/release/hoonc 2>/dev/null || true
+  rm -rf "$HOME/.cargo/bin/hoonc" 2>/dev/null || true
   
-  # 更新依赖
-  echo -e "[*] 更新项目依赖..."
-  cargo update >/dev/null 2>&1 || true
+  echo -e "[*] 尝试多种方法构建hoonc..."
   
-  # 尝试Cargo构建
-  if [ -f "Cargo.toml" ]; then
-    echo -e "[*] 使用Cargo构建项目..."
-    
-    # 尝试完整构建
-    if cargo build --release 2>/dev/null; then
-      echo -e "${GREEN}[+] 项目构建成功${RESET}"
-      
-      # 检查生成的二进制文件
-      if [ -f "target/release/nockchain-wallet" ]; then
-        echo -e "${GREEN}[+] 钱包程序构建成功${RESET}"
-      fi
-      
-      if [ -f "target/release/nockchain" ] || [ -f "target/release/nockchain-miner" ]; then
-        echo -e "${GREEN}[+] 节点程序构建成功${RESET}"
-      fi
-      
+  # 方法1: 简单构建
+  echo -e "[*] 方法1: 基础构建..."
+  if cargo build --release --bin hoonc 2>/dev/null; then
+    if [ -f "target/release/hoonc" ]; then
+      cp target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null || true
+      echo -e "${GREEN}[+] hoonc构建成功 (方法1)${RESET}"
       return 0
-    else
-      echo -e "${YELLOW}[!] 完整构建失败，尝试单独构建组件...${RESET}"
-      
-      # 尝试构建工作区中的所有包
-      for package in $(cargo metadata --format-version 1 2>/dev/null | grep '"name"' | cut -d'"' -f4 | head -10); do
-        echo -e "[*] 尝试构建包: $package"
-        cargo build --release --package "$package" 2>/dev/null && {
-          echo -e "${GREEN}[+] 包 $package 构建成功${RESET}"
-        } || {
-          echo -e "${YELLOW}[!] 包 $package 构建失败${RESET}"
-        }
-      done
     fi
   fi
   
-  # 尝试Makefile构建
-  if [ -f "Makefile" ]; then
-    echo -e "[*] 尝试使用Makefile构建..."
+  # 方法2: 直接在hoonc目录构建
+  echo -e "[*] 方法2: 目录构建..."
+  cd crates/hoonc
+  if cargo build --release 2>/dev/null; then
+    mkdir -p "$HOME/.cargo/bin"
+    if [ -f "target/release/hoonc" ]; then
+      cp target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null
+      echo -e "${GREEN}[+] hoonc构建成功 (方法2)${RESET}"
+      cd "$NCK_DIR"
+      return 0
+    fi
+  fi
+  cd "$NCK_DIR"
+  
+  # 方法3: 强制安装
+  echo -e "[*] 方法3: 强制安装..."
+  if cargo install --force --path crates/hoonc 2>/dev/null; then
+    echo -e "${GREEN}[+] hoonc安装成功 (方法3)${RESET}"
+    return 0
+  fi
+  
+  # 方法4: 无特性构建
+  echo -e "[*] 方法4: 最小化构建..."
+  if cargo install --force --path crates/hoonc --no-default-features 2>/dev/null; then
+    echo -e "${GREEN}[+] hoonc安装成功 (方法4)${RESET}"
+    return 0
+  fi
+  
+  echo -e "${YELLOW}[!] hoonc构建失败，但继续主项目构建${RESET}"
+  return 1
+}
+
+function build_project_advanced() {
+  echo -e "[*] 高级构建Nockchain项目..."
+  
+  cd_nck_dir
+  
+  # 设置环境变量
+  export RUST_BACKTRACE=1
+  export CARGO_INCREMENTAL=0
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+  
+  # 清理构建环境
+  echo -e "[*] 清理构建环境..."
+  cargo clean >/dev/null 2>&1 || true
+  rm -rf target/ 2>/dev/null || true
+  
+  # 首先尝试构建hoonc
+  build_hoonc_advanced
+  
+  echo -e "[*] 开始主项目构建..."
+  
+  # 更新依赖
+  echo -e "[*] 更新项目依赖..."
+  cargo update --aggressive >/dev/null 2>&1 || cargo update >/dev/null 2>&1 || true
+  
+  # 构建方法1: 完整构建
+  echo -e "[*] 尝试完整项目构建..."
+  if timeout 1800 cargo build --release --all 2>/dev/null; then
+    echo -e "${GREEN}[+] 完整项目构建成功${RESET}"
+    return 0
+  fi
+  
+  # 构建方法2: 分包构建
+  echo -e "[*] 尝试分包构建..."
+  success_count=0
+  
+  # 获取所有包
+  packages=$(cargo metadata --no-deps --format-version 1 2>/dev/null | grep '"name"' | cut -d'"' -f4 | head -20)
+  
+  for package in $packages; do
+    echo -e "[*] 构建包: $package"
+    if timeout 600 cargo build --release --package "$package" 2>/dev/null; then
+      echo -e "${GREEN}[+] 包 $package 构建成功${RESET}"
+      ((success_count++))
+    else
+      echo -e "${YELLOW}[!] 包 $package 构建失败${RESET}"
+    fi
+  done
+  
+  # 构建方法3: 核心二进制文件
+  echo -e "[*] 尝试构建核心二进制文件..."
+  
+  for binary in "nockchain-wallet" "nockchain" "nockchain-miner"; do
+    echo -e "[*] 构建二进制: $binary"
+    if timeout 600 cargo build --release --bin "$binary" 2>/dev/null; then
+      echo -e "${GREEN}[+] 二进制 $binary 构建成功${RESET}"
+      ((success_count++))
+    else
+      echo -e "${YELLOW}[!] 二进制 $binary 构建失败${RESET}"
+    fi
+  done
+  
+  # 构建方法4: Makefile
+  if [ -f "Makefile" ] && [ $success_count -lt 2 ]; then
+    echo -e "[*] 尝试Makefile构建..."
     
-    # 修复Makefile中的问题
+    # 修复Makefile
     if grep -q "cargo install --locked" Makefile; then
-      echo -e "[*] 修复Makefile中的锁定参数..."
       sed -i.bak 's/cargo install --locked/cargo install --force/g' Makefile 2>/dev/null || true
+      sed -i.bak 's/--locked//g' Makefile 2>/dev/null || true
     fi
     
-    for target in "build" "all" "release" "build-release" "install" "compile"; do
-      if make -n "$target" >/dev/null 2>&1; then
-        echo -e "[*] 尝试构建目标: $target"
-        if make "$target" 2>/dev/null; then
-          echo -e "${GREEN}[+] 构建成功 (目标: $target)${RESET}"
-          return 0
-        fi
+    for target in "build" "all" "release"; do
+      echo -e "[*] 尝试Makefile目标: $target"
+      if timeout 900 make "$target" 2>/dev/null; then
+        echo -e "${GREEN}[+] Makefile构建成功 (目标: $target)${RESET}"
+        ((success_count++))
+        break
       fi
     done
   fi
   
-  # 检查是否有任何二进制文件生成
-  if find . -name "nockchain*" -type f -executable 2>/dev/null | grep -q .; then
-    echo -e "${GREEN}[+] 发现已构建的二进制文件${RESET}"
-    return 0
-  fi
+  # 检查构建结果
+  binary_count=0
+  for path in "target/release/nockchain-wallet" "target/release/nockchain" "target/release/nockchain-miner"; do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+      echo -e "${GREEN}[+] 发现二进制文件: $path${RESET}"
+      ((binary_count++))
+    fi
+  done
   
-  echo -e "${YELLOW}[!] 构建可能有问题，但可以继续配置${RESET}"
-  return 1
+  if [ $binary_count -gt 0 ] || [ $success_count -gt 0 ]; then
+    echo -e "${GREEN}[+] 项目构建部分成功${RESET}"
+    return 0
+  else
+    echo -e "${YELLOW}[!] 构建可能有问题，但可以继续配置${RESET}"
+    return 1
+  fi
 }
 
 function setup_environment() {
@@ -444,6 +521,7 @@ function setup_environment() {
 # Nockchain Configuration
 MINING_PUBKEY=
 RUST_LOG=info
+RUST_BACKTRACE=1
 EOF
   fi
   
@@ -451,7 +529,7 @@ EOF
 }
 
 function setup_all() {
-  echo -e "[*] 开始优化安装流程..."
+  echo -e "[*] 开始深度优化安装流程..."
   
   fix_working_directory
   optimize_system
@@ -473,10 +551,22 @@ function setup_all() {
   
   setup_environment
   
-  if build_project; then
+  if build_project_advanced; then
     echo -e "${GREEN}[+] 项目安装完成！${RESET}"
+    
+    # 显示构建结果
+    echo -e "${BLUE}[i] 构建结果检查:${RESET}"
+    cd_nck_dir
+    for binary in "target/release/nockchain-wallet" "target/release/nockchain" "target/release/nockchain-miner"; do
+      if [ -f "$binary" ]; then
+        size=$(du -h "$binary" | cut -f1)
+        echo -e "${GREEN}  ✓ $binary (大小: $size)${RESET}"
+      else
+        echo -e "${YELLOW}  ✗ $binary (未找到)${RESET}"
+      fi
+    done
   else
-    echo -e "${YELLOW}[!] 构建可能有问题，请手动检查${RESET}"
+    echo -e "${YELLOW}[!] 构建可能有问题，请手动检查构建日志${RESET}"
   fi
   
   pause_and_return
@@ -804,5 +894,3 @@ function main_menu() {
 }
 
 main_menu
-
-
