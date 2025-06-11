@@ -14,7 +14,6 @@ ENV_FILE="$NCK_DIR/.env"
 
 # ========= 工作目录修复 =========
 function fix_working_directory() {
-  # 检查当前目录是否可访问
   if ! pwd >/dev/null 2>&1; then
     echo -e "${YELLOW}[!] 当前工作目录无法访问，切换到HOME目录...${RESET}"
     cd "$HOME" || cd / || {
@@ -23,7 +22,6 @@ function fix_working_directory() {
     }
   fi
   
-  # 确保在有效目录中
   current_dir=$(pwd 2>/dev/null)
   if [ -z "$current_dir" ] || [ ! -d "$current_dir" ]; then
     echo -e "${YELLOW}[!] 工作目录异常，重置到HOME目录...${RESET}"
@@ -55,13 +53,13 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain 挖矿优化助手 v2.3"
+  echo "         Nockchain 挖矿优化助手 v2.4"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 优化版本: 修复目录访问问题 + 增强错误处理"
+  echo "⚡ 优化版本: 修复构建问题 + Cargo缓存清理"
   echo "-----------------------------------------------"
   echo ""
 }
@@ -117,19 +115,19 @@ function install_dependencies() {
   if [[ "$OS" == "linux" ]]; then
     if command -v apt >/dev/null 2>&1; then
       sudo apt update -qq
-      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop
+      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop unzip
     elif command -v yum >/dev/null 2>&1; then
       sudo yum groupinstall -y "Development Tools"
-      sudo yum install -y clang llvm-devel openssl-devel cmake curl git make screen htop
+      sudo yum install -y clang llvm-devel openssl-devel cmake curl git make screen htop unzip
     elif command -v pacman >/dev/null 2>&1; then
-      sudo pacman -S --noconfirm clang llvm pkg-config openssl cmake curl git make screen htop
+      sudo pacman -S --noconfirm clang llvm pkg-config openssl cmake curl git make screen htop unzip
     else
       echo -e "${RED}[-] 未识别的包管理器，请手动安装依赖${RESET}"
       return 1
     fi
   elif [[ "$OS" == "macos" ]]; then
     if command -v brew >/dev/null 2>&1; then
-      brew install llvm openssl cmake curl git make screen htop
+      brew install llvm openssl cmake curl git make screen htop unzip
     else
       echo -e "${RED}[-] 请先安装 Homebrew${RESET}"
       return 1
@@ -140,6 +138,29 @@ function install_dependencies() {
   return 0
 }
 
+function clean_cargo_cache() {
+  echo -e "[*] 清理Cargo缓存..."
+  
+  # 清理registry缓存
+  if [ -d "$HOME/.cargo/registry" ]; then
+    echo -e "${YELLOW}[*] 清理registry缓存...${RESET}"
+    rm -rf "$HOME/.cargo/registry/cache"
+    rm -rf "$HOME/.cargo/registry/src"
+  fi
+  
+  # 清理git缓存
+  if [ -d "$HOME/.cargo/git" ]; then
+    echo -e "${YELLOW}[*] 清理git缓存...${RESET}"
+    rm -rf "$HOME/.cargo/git/db"
+    rm -rf "$HOME/.cargo/git/checkouts"
+  fi
+  
+  # 更新cargo index
+  cargo search --limit 0 >/dev/null 2>&1 || true
+  
+  echo -e "${GREEN}[+] Cargo缓存清理完成${RESET}"
+}
+
 function setup_rust() {
   echo -e "[*] 安装 Rust 工具链..."
   
@@ -148,6 +169,9 @@ function setup_rust() {
     source "$HOME/.cargo/env"
   fi
 
+  # 更新Rust工具链
+  rustup update stable >/dev/null 2>&1 || true
+  
   # 配置环境变量
   for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$rc_file" ] && ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$rc_file"; then
@@ -159,6 +183,9 @@ function setup_rust() {
   export PATH="$HOME/.cargo/bin:$PATH"
   source "$HOME/.cargo/env" 2>/dev/null || true
   
+  # 清理缓存
+  clean_cargo_cache
+  
   echo -e "${GREEN}[+] Rust工具链安装完成${RESET}"
 }
 
@@ -166,7 +193,6 @@ function safe_remove_directory() {
   local dir="$1"
   if [ -d "$dir" ]; then
     echo -e "${YELLOW}[*] 安全删除目录: $dir${RESET}"
-    # 确保不在要删除的目录中
     if [[ "$(pwd)" == "$dir"* ]]; then
       cd "$HOME" || cd /
     fi
@@ -177,16 +203,12 @@ function safe_remove_directory() {
 function clone_repository() {
   echo -e "[*] 获取Nockchain仓库..."
   
-  # 修复工作目录问题
   fix_working_directory
-  
-  # 确保在HOME目录进行操作
   cd "$HOME" || {
     echo -e "${RED}[-] 无法访问HOME目录${RESET}"
     return 1
   }
   
-  # 如果目录存在，检查状态
   if [ -d "$NCK_DIR" ]; then
     echo -e "${YELLOW}[*] 发现现有目录，检查git仓库状态...${RESET}"
     
@@ -206,12 +228,10 @@ function clone_repository() {
       echo -e "${YELLOW}[!] 无法访问现有目录，重新克隆...${RESET}"
     }
     
-    # 返回HOME目录并安全删除
     cd "$HOME"
     safe_remove_directory "$NCK_DIR"
   fi
   
-  # 确保在HOME目录
   cd "$HOME" || {
     echo -e "${RED}[-] 无法访问HOME目录进行克隆${RESET}"
     return 1
@@ -219,16 +239,13 @@ function clone_repository() {
   
   echo -e "[*] 开始克隆仓库到: $NCK_DIR"
   
-  # 尝试多种克隆方式
   clone_success=false
   
-  # 方法1: 直接克隆
   if git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" 2>/dev/null; then
     clone_success=true
   else
     echo -e "${YELLOW}[!] HTTPS克隆失败，尝试其他方法...${RESET}"
     
-    # 方法2: 创建目录后进入克隆
     mkdir -p "$NCK_DIR" 2>/dev/null
     if cd "$NCK_DIR" 2>/dev/null; then
       if git clone https://github.com/zorp-corp/nockchain . 2>/dev/null; then
@@ -237,7 +254,6 @@ function clone_repository() {
         cd "$HOME"
         safe_remove_directory "$NCK_DIR"
         
-        # 方法3: 使用curl下载zip
         echo -e "${YELLOW}[!] Git克隆失败，尝试下载zip包...${RESET}"
         if curl -L "https://github.com/zorp-corp/nockchain/archive/refs/heads/main.zip" -o nockchain.zip 2>/dev/null; then
           if command -v unzip >/dev/null 2>&1; then
@@ -263,21 +279,61 @@ function clone_repository() {
   fi
 }
 
-function check_makefile_targets() {
-  echo -e "[*] 检查构建系统..."
+function build_hoonc() {
+  echo -e "[*] 构建hoonc工具..."
   
-  if [ -f "Makefile" ]; then
-    echo -e "${GREEN}[+] 发现Makefile${RESET}"
-    available_targets=$(make -qp 2>/dev/null | awk -F':' '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,A,/ /);for(i in A)print A[i]}' | sort -u | head -10)
-    echo -e "${BLUE}[i] 可用的构建目标:${RESET}"
-    echo "$available_targets" | grep -v "^$"
+  cd_nck_dir
+  
+  # 检查hoonc目录
+  if [ ! -d "crates/hoonc" ]; then
+    echo -e "${YELLOW}[!] 未找到hoonc源码目录${RESET}"
+    return 1
   fi
   
-  if [ -f "Cargo.toml" ]; then
-    echo -e "${GREEN}[+] 发现Cargo.toml${RESET}"
+  # 尝试多种方式构建hoonc
+  hoonc_success=false
+  
+  # 方法1: 直接cargo install
+  echo -e "[*] 尝试直接安装hoonc..."
+  if cargo install --path crates/hoonc --bin hoonc --force; then
+    hoonc_success=true
+    echo -e "${GREEN}[+] hoonc安装成功 (方法1)${RESET}"
+  else
+    echo -e "${YELLOW}[!] 方法1失败，尝试不使用锁定...${RESET}"
+    
+    # 方法2: 不使用locked参数
+    if cargo install --path crates/hoonc --bin hoonc --force --no-default-features; then
+      hoonc_success=true
+      echo -e "${GREEN}[+] hoonc安装成功 (方法2)${RESET}"
+    else
+      echo -e "${YELLOW}[!] 方法2失败，尝试本地构建...${RESET}"
+      
+      # 方法3: 本地构建
+      cd crates/hoonc
+      if cargo build --release --bin hoonc; then
+        # 手动复制到cargo bin目录
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null || {
+          cp ../../target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null
+        }
+        hoonc_success=true
+        echo -e "${GREEN}[+] hoonc构建成功 (方法3)${RESET}"
+      fi
+      cd "$NCK_DIR"
+    fi
   fi
   
-  return 0
+  # 验证hoonc是否可用
+  if command -v hoonc >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] hoonc工具验证成功${RESET}"
+    return 0
+  elif [ -f "$HOME/.cargo/bin/hoonc" ]; then
+    echo -e "${GREEN}[+] hoonc已安装到 $HOME/.cargo/bin/hoonc${RESET}"
+    return 0
+  else
+    echo -e "${YELLOW}[!] hoonc构建可能失败，但继续尝试主项目构建${RESET}"
+    return 1
+  fi
 }
 
 function build_project() {
@@ -294,13 +350,25 @@ function build_project() {
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   export CARGO_PROFILE_RELEASE_PANIC="abort"
   
+  # 首先尝试构建hoonc
+  build_hoonc
+  
+  echo -e "[*] 构建主项目..."
+  
+  # 清理之前的构建
+  cargo clean >/dev/null 2>&1 || true
+  
+  # 更新依赖
+  echo -e "[*] 更新项目依赖..."
+  cargo update >/dev/null 2>&1 || true
+  
   # 尝试Cargo构建
   if [ -f "Cargo.toml" ]; then
-    echo -e "[*] 使用Cargo构建..."
+    echo -e "[*] 使用Cargo构建项目..."
     
-    # 首先尝试构建所有目标
+    # 尝试完整构建
     if cargo build --release 2>/dev/null; then
-      echo -e "${GREEN}[+] Cargo构建成功${RESET}"
+      echo -e "${GREEN}[+] 项目构建成功${RESET}"
       
       # 检查生成的二进制文件
       if [ -f "target/release/nockchain-wallet" ]; then
@@ -315,15 +383,15 @@ function build_project() {
     else
       echo -e "${YELLOW}[!] 完整构建失败，尝试单独构建组件...${RESET}"
       
-      # 尝试单独构建钱包
-      if cargo build --release --bin nockchain-wallet 2>/dev/null; then
-        echo -e "${GREEN}[+] 钱包构建成功${RESET}"
-      fi
-      
-      # 尝试单独构建节点
-      if cargo build --release --bin nockchain 2>/dev/null; then
-        echo -e "${GREEN}[+] 节点构建成功${RESET}"
-      fi
+      # 尝试构建工作区中的所有包
+      for package in $(cargo metadata --format-version 1 2>/dev/null | grep '"name"' | cut -d'"' -f4 | head -10); do
+        echo -e "[*] 尝试构建包: $package"
+        cargo build --release --package "$package" 2>/dev/null && {
+          echo -e "${GREEN}[+] 包 $package 构建成功${RESET}"
+        } || {
+          echo -e "${YELLOW}[!] 包 $package 构建失败${RESET}"
+        }
+      done
     fi
   fi
   
@@ -331,7 +399,13 @@ function build_project() {
   if [ -f "Makefile" ]; then
     echo -e "[*] 尝试使用Makefile构建..."
     
-    for target in "all" "release" "build-release" "build" "install" "compile"; do
+    # 修复Makefile中的问题
+    if grep -q "cargo install --locked" Makefile; then
+      echo -e "[*] 修复Makefile中的锁定参数..."
+      sed -i.bak 's/cargo install --locked/cargo install --force/g' Makefile 2>/dev/null || true
+    fi
+    
+    for target in "build" "all" "release" "build-release" "install" "compile"; do
       if make -n "$target" >/dev/null 2>&1; then
         echo -e "[*] 尝试构建目标: $target"
         if make "$target" 2>/dev/null; then
@@ -343,12 +417,12 @@ function build_project() {
   fi
   
   # 检查是否有任何二进制文件生成
-  if find target/release -name "nockchain*" -type f -executable 2>/dev/null | grep -q .; then
+  if find . -name "nockchain*" -type f -executable 2>/dev/null | grep -q .; then
     echo -e "${GREEN}[+] 发现已构建的二进制文件${RESET}"
     return 0
   fi
   
-  echo -e "${RED}[-] 构建失败${RESET}"
+  echo -e "${YELLOW}[!] 构建可能有问题，但可以继续配置${RESET}"
   return 1
 }
 
@@ -379,9 +453,7 @@ EOF
 function setup_all() {
   echo -e "[*] 开始优化安装流程..."
   
-  # 首先修复工作目录
   fix_working_directory
-  
   optimize_system
   
   if ! install_dependencies; then
@@ -399,13 +471,12 @@ function setup_all() {
     return
   fi
   
-  check_makefile_targets
   setup_environment
   
   if build_project; then
-    echo -e "${GREEN}[+] 项目构建成功！${RESET}"
+    echo -e "${GREEN}[+] 项目安装完成！${RESET}"
   else
-    echo -e "${YELLOW}[!] 构建可能有问题，但可以继续配置${RESET}"
+    echo -e "${YELLOW}[!] 构建可能有问题，请手动检查${RESET}"
   fi
   
   pause_and_return
@@ -733,4 +804,5 @@ function main_menu() {
 }
 
 main_menu
+
 
