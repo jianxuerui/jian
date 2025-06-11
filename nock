@@ -1,167 +1,263 @@
-#!/usr/bin/env bash
-
-# ========= 容器化部署方案 =========
-NCK_DIR="$HOME/nockchain"
-DOCKER_IMAGE="ghcr.io/lpsm-dev/docker-crypto-miner:main"
-VOLUME_MAP="-v $NCK_DIR:/nockchain"
+#!/bin/bash
 
 # ========= 色彩定义 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-CYAN='\033[0;36m'
 
-# ========= 系统初始化检查 =========
-function system_init() {
-  # 修复locale警告
-  export LC_ALL=C
-  # 创建必要目录
-  sudo mkdir -p /etc/docker
-  sudo chmod 755 /etc/docker
-  mkdir -p "$NCK_DIR"
-  touch "$NCK_DIR/container.log"
-  chmod 644 "$NCK_DIR/container.log"
+# ========= 项目路径 =========
+NCK_DIR="$HOME/nockchain"
+ENV_FILE="$NCK_DIR/.env"
+
+# ========= 横幅 =========
+function show_banner() {
+  clear
+  echo -e "${BOLD}${BLUE}"
+  echo "==============================================="
+  echo "         Nockchain 挖矿优化助手 v2.0"
+  echo "==============================================="
+  echo -e "${RESET}"
+  echo "📌 作者: K2 节点教程分享"
+  echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
+  echo "🐦 Twitter:  https://x.com/BtcK241918"
+  echo "⚡ 优化版本: 编译优化 + 性能调优"
+  echo "-----------------------------------------------"
+  echo ""
 }
 
-# ========= 内核优化预处理 =========
-function kernel_tuning() {
-  echo -e "${CYAN}[*] 应用内核优化参数...${RESET}"
-  sudo tee /etc/sysctl.d/99-nockchain.conf <<EOF
-vm.overcommit_memory=1
-vm.max_map_count=16777216
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-EOF
-  sudo sysctl -p /etc/sysctl.d/99-nockchain.conf
-}
-
-# ========= Docker安装模块 =========
-function install_docker() {
-  echo -e "${CYAN}[*] 开始安装Docker...${RESET}"
-  
-  if grep -qi "ubuntu" /etc/os-release; then
-    sudo apt-get update
-    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-    sudo apt-get update
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-    sudo usermod -aG docker $USER
-    newgrp docker
-  elif grep -qi "centos" /etc/os-release; then
-    sudo yum install -y yum-utils
-    sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-    sudo yum install -y docker-ce docker-ce-cli containerd.io
-    sudo systemctl start docker
-    sudo systemctl enable docker
-    sudo usermod -aG docker $USER
-    newgrp docker
+function cd_nck_dir() {
+  if [ -d "$NCK_DIR" ]; then
+    cd "$NCK_DIR" || exit 1
   else
-    echo -e "${RED}✗ 不支持的Linux发行版${RESET}"
-    echo -e "${YELLOW}请手动安装Docker：${RESET}"
-    echo "curl -fsSL https://get.docker.com | sudo bash"
-    exit 1
-  fi
-
-  # 二次验证
-  if ! command -v docker &>/dev/null; then
-    echo -e "${RED}✗ Docker安装失败，请手动执行：${RESET}"
-    echo "curl -fsSL https://get.docker.com | sudo bash"
+    echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
     exit 1
   fi
 }
 
-# ========= 容器部署引擎 =========
-function deploy_container() {
-  echo -e "${CYAN}[*] 启动Nockchain容器...${RESET}"
+function optimize_system() {
+  echo -e "${YELLOW}[*] 应用系统级性能优化...${RESET}"
   
-  # 自动资源分配
-  local CPU_CORES=$(($(nproc) - 1))
-  [ $CPU_CORES -lt 1 ] && CPU_CORES=1
-  local MEM_LIMIT=$(($(free -m | awk '/Mem:/{print $2}') * 85 / 100))m
-
-  docker run -itd --restart always \
-    --name nck-miner \
-    $VOLUME_MAP \
-    --cpus $CPU_CORES \
-    --memory $MEM_LIMIT \
-    --network host \
-    $DOCKER_IMAGE \
-    --config /nockchain/.env \
-    --health-cmd="nck-top --check" \
-    --health-interval=30s \
-    2>>$NCK_DIR/container.log
-
-  sleep 5
-  if ! docker ps | grep -q nck-miner; then
-    echo -e "${RED}✗ 容器启动失败，查看日志：${NCK_DIR}/container.log${RESET}"
-    exit 3
-  fi
-}
-
-# ========= 增强版公钥验证 =========
-function config_wizard() {
-  echo -e "${CYAN}>>> 容器配置向导 <<<${RESET}"
-  
-  while :; do
-    read -p "输入矿工公钥（128位十六进制）: " PUBKEY
-    PUBKEY=${PUBKEY#0x}  # 去除0x前缀
-    
-    if [[ "$PUBKEY" =~ ^[0-9a-fA-F]{128}$ ]]; then
-      PUBKEY=$(echo "$PUBKEY" | tr '[:upper:]' '[:lower:]')
-      break
-    else
-      echo -e "${RED}✗ 格式错误，示例：d24c0c53d1162325eba695f32b7194f4c9b2943441a3162837922d36f3325c341ce049e7b3992080a9603e91147e4529f79261a355e16570c975a6c0e81716e3${RESET}"
+  # CPU性能模式
+  for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null
+  do
+    if [ -w "$gov" ]; then
+      echo performance | sudo tee "$gov" >/dev/null 2>&1
     fi
   done
-
-  cat > $NCK_DIR/.env <<EOF
-MINER_PUBKEY=$PUBKEY
-THREADS=$(($(nproc) * 8 / 10))
-EOF
-
-  echo -e "${GREEN}✓ 配置文件已生成: $NCK_DIR/.env${RESET}"
+  
+  # 网络优化
+  sudo sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
+  sudo sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
+  
+  echo -e "${GREEN}[+] 系统优化完成${RESET}"
 }
 
-# ========= 主控界面 =========
-function main_menu() {
-  clear
-  echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 v4.0 ==="
-  echo -e "${RESET}"
-  echo "1) 完整部署矿工"
-  echo "2) 启动矿工容器"
-  echo "3) 停止矿工容器"
-  echo "4) 实时监控面板"
-  echo "5) 查看运行日志"
-  echo "6) 修改矿工公钥"
-  echo "0) 退出系统"
-  echo ""
+function setup_all() {
+  echo -e "[*] 开始优化安装流程..."
   
-  read -p "请选择操作: " choice
-  case $choice in
-    1) 
-      system_init
-      kernel_tuning
-      install_docker
-      config_wizard 
-      deploy_container
-      ;;
-    2) docker start nck-miner ;;
-    3) docker stop nck-miner ;;
-    4) watch -n1 "docker stats --no-stream nck-miner && echo && docker exec nck-miner nck-top" ;;
-    5) docker logs -f --tail 100 nck-miner ;;
-    6) config_wizard && docker restart nck-miner ;;
-    0) exit 0 ;;
-    *) echo -e "${RED}无效选择${RESET}"; sleep 1 ;;
+  # 系统优化
+  optimize_system
+  
+  echo -e "[*] 安装系统依赖..."
+  sudo apt update -qq
+  sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop
+
+  echo -e "[*] 安装 Rust 工具链..."
+  if ! command -v cargo &>/dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+  fi
+
+  RC_FILE="$HOME/.bashrc"
+  [[ "$SHELL" == *"zsh"* ]] && RC_FILE="$HOME/.zshrc"
+  if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$RC_FILE"; then
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$RC_FILE"
+  fi
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  echo -e "[*] 获取仓库..."
+  if [ -d "$NCK_DIR" ]; then
+    cd "$NCK_DIR" && git pull
+  else
+    git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
+  fi
+
+  cd_nck_dir
+
+  echo -e "[*] 设置环境配置..."
+  cp -n .env_example "$ENV_FILE"
+
+  echo -e "[*] 安装 hoonc..."
+  make install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; exit 1; }
+
+  echo -e "[*] 开始优化编译 Nockchain..."
+  # 高性能编译优化设置
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1 -C lto=fat"
+  export CARGO_PROFILE_RELEASE_LTO=true
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+  export CARGO_PROFILE_RELEASE_PANIC="abort"
+  
+  make build || { echo -e "${RED}[-] build 失败${RESET}"; exit 1; }
+
+  echo -e "[*] 安装钱包组件..."
+  make install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; exit 1; }
+
+  echo -e "[*] 安装节点组件..."
+  make install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; exit 1; }
+
+  echo -e "${GREEN}[+] 优化安装完成！${RESET}"
+  pause_and_return
+}
+
+function generate_wallet() {
+  echo -e "[*] 生成钱包..."
+  cd_nck_dir
+  ./target/release/nockchain-wallet keygen
+  echo -e "${YELLOW}[!] 钱包生成完成，请复制上方公钥到下一步设置中${RESET}"
+  pause_and_return
+}
+
+function set_pubkey_env() {
+  echo -e "[*] 设置 MINING_PUBKEY 到 .env..."
+  cd_nck_dir
+
+  read -p "请输入公钥 (MINING_PUBKEY): " pubkey
+  if [ -z "$pubkey" ]; then
+    echo -e "${RED}[-] 公钥不能为空${RESET}"
+    pause_and_return
+    return
+  fi
+
+  sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
+  echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
+
+  echo -e "${GREEN}[+] 已写入 MINING_PUBKEY 到 .env${RESET}"
+  pause_and_return
+}
+
+function export_keys() {
+  echo -e "[*] 导出钱包密钥..."
+  cd_nck_dir
+  ./target/release/nockchain-wallet export-keys
+  echo -e "${GREEN}[+] 密钥已导出到 keys.export${RESET}"
+  pause_and_return
+}
+
+function import_keys() {
+  echo -e "[*] 导入钱包密钥..."
+  cd_nck_dir
+  read -p "[?] 请输入密钥文件路径 (默认: ./keys.export): " keyfile
+  keyfile=${keyfile:-"./keys.export"}
+  ./target/release/nockchain-wallet import-keys --input "$keyfile"
+  echo -e "${GREEN}[+] 密钥已导入${RESET}"
+  pause_and_return
+}
+
+function start_node() {
+  echo -e "[*] 启动优化节点 (screen)..."
+  cd_nck_dir
+  source "$ENV_FILE"
+
+  chmod +x ./scripts/run_nockchain_miner.sh
+
+  if screen -list | grep -qw "nockchain"; then
+    echo "[*] 关闭旧的 screen 会话..."
+    screen -S nockchain -X quit
+    sleep 2
+  fi
+
+  # 使用高优先级启动
+  screen -dmS nockchain bash -c "cd $NCK_DIR && nice -n -10 ./scripts/run_nockchain_miner.sh"
+
+  sleep 3
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点已启动 (screen 会话名: nockchain)${RESET}"
+    echo -e "${YELLOW}[!] 使用 'screen -r nockchain' 查看日志${RESET}"
+  else
+    echo -e "${RED}[-] 节点启动失败${RESET}"
+    echo "请检查 $NCK_DIR/scripts/run_nockchain_miner.sh 脚本"
+  fi
+  pause_and_return
+}
+
+function view_logs() {
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${YELLOW}[!] 进入日志查看 (Ctrl+A+D 可退出)...${RESET}"
+    screen -r nockchain
+  else
+    echo -e "${RED}[-] 节点未运行${RESET}"
+  fi
+  pause_and_return
+}
+
+function check_status() {
+  echo -e "[*] 检查节点状态..."
+  
+  if screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点运行中${RESET}"
+    
+    # 显示CPU使用情况
+    if command -v htop >/dev/null; then
+      echo -e "${YELLOW}[*] CPU使用情况 (5秒后自动返回):${RESET}"
+      timeout 5 htop -d 1 || true
+    fi
+  else
+    echo -e "${RED}[-] 节点未运行${RESET}"
+  fi
+  
+  pause_and_return
+}
+
+function stop_node() {
+  echo -e "[*] 停止节点..."
+  if screen -list | grep -qw "nockchain"; then
+    screen -S nockchain -X quit
+    sleep 2
+    echo -e "${GREEN}[+] 节点已停止${RESET}"
+  else
+    echo -e "${YELLOW}[!] 节点未运行${RESET}"
+  fi
+  pause_and_return
+}
+
+function pause_and_return() {
+  echo ""
+  read -n1 -r -p "按任意键返回主菜单..." key
+  main_menu
+}
+
+function main_menu() {
+  show_banner
+  echo "请选择操作:"
+  echo "  1) 🚀 一键优化安装"
+  echo "  2) 🔑 生成钱包"
+  echo "  3) 📝 设置挖矿公钥"
+  echo "  4) 💾 导出密钥"
+  echo "  5) 📂 导入密钥"
+  echo "  6) ⚡ 启动节点"
+  echo "  7) 📊 查看日志"
+  echo "  8) 🔍 检查状态"
+  echo "  9) ⏹️  停止节点"
+  echo "  0) 退出"
+  echo ""
+  read -p "请输入编号: " choice
+
+  case "$choice" in
+    1) setup_all ;;
+    2) generate_wallet ;;
+    3) set_pubkey_env ;;
+    4) export_keys ;;
+    5) import_keys ;;
+    6) start_node ;;
+    7) view_logs ;;
+    8) check_status ;;
+    9) stop_node ;;
+    0) echo "退出脚本."; exit 0 ;;
+    *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
   esac
 }
 
-# ========= 初始化执行 =========
-trap "echo -e '${RED}强制退出!${RESET}'" SIGINT
-
-while true; do
-  main_menu
-done
+main_menu
