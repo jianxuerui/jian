@@ -1,167 +1,174 @@
 #!/usr/bin/env bash
 # nockchain_toolbox.sh
-# 版本: 2.1.0  (交互菜单 + 编译修复)
+# 版本 2.2 ‒ 保留数字菜单 + 自动处理 CUDA 检测问题
+# 适用于一键部署 / 更新 Nockchain-ethminer[1]
 
 set -euo pipefail
 IFS=$'\n\t'
 
-########################################
-# 全局变量
-########################################
+##############################################################################
+# 全局配置
+##############################################################################
 SRC_DIR="${HOME}/build/ethminer"
 INSTALL_PREFIX="/usr/local"
 JOBS="$(nproc)"
 LOG_FILE="${HOME}/nockchain.log"
+CONFIG_FILE="${HOME}/.nockchain.conf"
 
-########################################
-# 辅助输出
-########################################
-c_info()  { printf "\033[32m[INFO]\033[0m %s\n" "$*"; }
-c_warn()  { printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
-c_err()   { printf "\033[31m[ERR ]\033[0m %s\n" "$*"; }
+##############################################################################
+# 彩色输出
+##############################################################################
+info()  { printf "\033[32m[INFO]\033[0m %s\n" "$*"; }
+warn()  { printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+err()   { printf "\033[31m[ERR ]\033[0m %s\n" "$*"; exit 1; }
 
-########################################
-# 平台检测与依赖安装
-########################################
-detect_pkg_mgr() {
-    command -v apt-get >/dev/null 2>&1 && { echo apt; return; }
-    command -v dnf      >/dev/null 2>&1 && { echo dnf; return; }
-    command -v yum      >/dev/null 2>&1 && { echo yum; return; }
-    command -v apk      >/dev/null 2>&1 && { echo apk; return; }
-    c_err "未识别的 Linux 发行版，请手动安装依赖"; exit 1
+##############################################################################
+# 包管理器检测 & 依赖安装
+##############################################################################
+detect_pm() {
+    command -v apt-get >/dev/null && { echo apt; return; }
+    command -v dnf      >/dev/null && { echo dnf; return; }
+    command -v yum      >/dev/null && { echo yum; return; }
+    command -v apk      >/dev/null && { echo apk; return; }
+    err "未识别的 Linux 发行版，请手动安装依赖"
 }
 
 install_deps() {
-    local pm; pm="$(detect_pkg_mgr)"
-    c_info "使用包管理器 ${pm} 安装/更新依赖"
-
-    case "${pm}" in
-        apt)
-            sudo apt-get update
-            sudo apt-get install -y build-essential cmake git \
-                 libstdc++-dev libssl-dev pkg-config
-            ;;
-        dnf)
-            sudo dnf -y install gcc gcc-c++ cmake git \
-                 libstdc++-devel openssl-devel pkgconfig
-            ;;
-        yum)
-            sudo yum -y install gcc gcc-c++ cmake git \
-                 libstdc++-devel openssl-devel pkgconfig
-            ;;
-        apk)
-            sudo apk add --no-cache build-base cmake git \
-                 libstdc++ libstdc++-dev openssl-dev
-            ;;
+    local pm; pm="$(detect_pm)"
+    info "使用包管理器 ${pm} 安装依赖"
+    case "$pm" in
+        apt) sudo apt-get update &&
+             sudo apt-get install -y build-essential cmake git \
+                                      libstdc++-dev libssl-dev pkg-config ;;
+        dnf) sudo dnf -y install gcc gcc-c++ cmake git \
+                                 libstdc++-devel openssl-devel pkgconfig ;;
+        yum) sudo yum -y install gcc gcc-c++ cmake git \
+                                 libstdc++-devel openssl-devel pkgconfig ;;
+        apk) sudo apk add --no-cache build-base cmake git \
+                                 libstdc++ libstdc++-dev openssl-dev ;;
     esac
 }
 
-########################################
-# 克隆 / 更新 ethminer 源码
-########################################
+##############################################################################
+# 源码拉取 / 更新
+##############################################################################
 fetch_source() {
-    mkdir -p "$(dirname "${SRC_DIR}")"
-    if [[ -d "${SRC_DIR}/.git" ]]; then
-        c_info "ethminer 源码已存在，执行 git pull"
-        git -C "${SRC_DIR}" pull --rebase
+    mkdir -p "$(dirname "$SRC_DIR")"
+    if [[ -d "$SRC_DIR/.git" ]]; then
+        info "更新 ethminer 源码"
+        git -C "$SRC_DIR" pull --rebase
     else
-        c_info "克隆 ethminer 源码"
-        git clone --recursive https://github.com/ethereum-mining/ethminer.git "${SRC_DIR}"
+        info "克隆 ethminer 源码"
+        git clone --recursive https://github.com/ethereum-mining/ethminer.git "$SRC_DIR"
     fi
 }
 
-########################################
-# 轻量补丁
-########################################
-apply_patches() {
-    c_info "检查并注入 -Wno-deprecated-declarations 编译选项"
-    local cmake_file="${SRC_DIR}/CMakeLists.txt"
-    if ! grep -q "Wno-deprecated-declarations" "${cmake_file}"; then
-        sed -i '/CMAKE_CXX_STANDARD/a add_compile_options(-Wno-deprecated-declarations)' "${cmake_file}"
+##############################################################################
+# 注入补丁：消除 JsonCpp Reader 弃用告警
+##############################################################################
+patch_source() {
+    local cmake="$SRC_DIR/CMakeLists.txt"
+    if ! grep -q "Wno-deprecated-declarations" "$cmake"; then
+        info "向 CMakeLists.txt 添加 -Wno-deprecated-declarations"
+        sed -i '/CMAKE_CXX_STANDARD/a add_compile_options(-Wno-deprecated-declarations)' "$cmake"
     fi
 }
 
-########################################
-# 编译安装 ethminer
-########################################
+##############################################################################
+# CUDA 检测：如未找到则自动关闭 ETHASHCUDA
+##############################################################################
+detect_cuda() {
+    if command -v nvcc >/dev/null; then
+        echo "ON"
+        return
+    fi
+    [[ -x /usr/local/cuda/bin/nvcc ]] && echo "ON" && return
+    echo "OFF"
+}
+
+##############################################################################
+# 编译 ethminer
+##############################################################################
 build_ethminer() {
-    c_info "开始编译 ethminer (g++)"
-    cd "${SRC_DIR}"
+    local USE_CUDA; USE_CUDA="$(detect_cuda)"
+    if [[ "$USE_CUDA" == "OFF" ]]; then
+        warn "未检测到 CUDA，将以 ETHASHCUDA=OFF 编译"
+    else
+        info "检测到 CUDA 环境，启用 CUDA 支持"
+    fi
+
+    info "开始编译 ethminer"
+    cd "$SRC_DIR"
     mkdir -p build && cd build
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_COMPILER=g++ \
-        -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}"
-    make -j"${JOBS}"
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
+        -DETHASHCUDA="$USE_CUDA"
+    make -j"$JOBS"
     sudo make install
-    c_info "ethminer 已安装到 ${INSTALL_PREFIX}/bin/ethminer"
+    info "ethminer 已安装到 ${INSTALL_PREFIX}/bin/ethminer"
 }
 
-########################################
-# 业务逻辑：修改公钥、启动节点、查看日志
-########################################
-CONFIG_FILE="${HOME}/.nockchain.conf"
-
+##############################################################################
+# 钱包配置
+##############################################################################
 change_wallet() {
-    read -rp "请输入新的挖矿钱包地址: " NEW_WALLET
-    [[ -z "${NEW_WALLET}" ]] && { c_warn "钱包地址为空，已取消操作"; return; }
-    echo "WALLET=${NEW_WALLET}" > "${CONFIG_FILE}"
-    c_info "钱包地址已更新并写入 ${CONFIG_FILE}"
+    read -rp "请输入新的挖矿钱包地址: " WALLET
+    [[ -z "$WALLET" ]] && { warn "钱包地址为空，操作取消"; return; }
+    echo "WALLET=$WALLET" > "$CONFIG_FILE"
+    info "钱包地址已写入 $CONFIG_FILE"
 }
 
-start_node() {
-    WALLET_ADDR="$(grep -E "^WALLET=" "${CONFIG_FILE}" 2>/dev/null | cut -d= -f2 || true)"
-    if [[ -z "${WALLET_ADDR}" ]]; then
-        c_warn "未配置钱包地址，请先执行 2) 修改挖矿钱包"
-        return
-    fi
-    nohup ethminer -P "stratum1+tcp://${WALLET_ADDR}@eth.pool.example:4444" \
-          &>> "${LOG_FILE}" &
-    c_info "挖矿节点已启动，日志写入 ${LOG_FILE}"
+##############################################################################
+# 启动 & 日志
+##############################################################################
+start_mining() {
+    local WALLET
+    WALLET="$(grep -E "^WALLET=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || true)"
+    [[ -z "$WALLET" ]] && { warn "未配置钱包，请先选择菜单 2"; return; }
+
+    nohup ethminer -P "stratum1+tcp://${WALLET}@eth.pool.example:4444" \
+          &>> "$LOG_FILE" &
+    info "挖矿进程已启动，日志写入 $LOG_FILE"
 }
 
 view_log() {
-    [[ -f "${LOG_FILE}" ]] || { c_warn "日志文件不存在"; return; }
-    tail -n 50 -F "${LOG_FILE}"
+    [[ -f "$LOG_FILE" ]] || { warn "暂无日志"; return; }
+    tail -n 50 -F "$LOG_FILE"
 }
 
-########################################
-# 菜单系统  (保持之前的数字交互设计)
-########################################
-show_menu() {
+##############################################################################
+# 菜单 UI
+##############################################################################
+menu() {
 cat <<EOF
 
-=========== Nockchain 工具箱 ===========
+========== Nockchain 工具箱 ==========
 1) 安装 / 更新 ethminer
 2) 修改挖矿钱包
 3) 启动挖矿节点
 4) 查看运行日志
 5) 退出
-
 EOF
 }
 
-main_loop() {
+##############################################################################
+# 主循环
+##############################################################################
+main() {
     while true; do
-        show_menu
-        read -rp "请选择操作 [1-5]: " choice
-        case "${choice}" in
-            1)
-                install_deps
-                fetch_source
-                apply_patches
-                build_ethminer
-                ;;
+        menu
+        read -rp "请选择 [1-5] : " ch
+        case "$ch" in
+            1) install_deps; fetch_source; patch_source; build_ethminer ;;
             2) change_wallet ;;
-            3) start_node   ;;
-            4) view_log     ;;
-            5) c_info "Bye"; exit 0 ;;
-            *) c_warn "无效输入，请重新选择" ;;
+            3) start_mining  ;;
+            4) view_log      ;;
+            5) info "Bye"; exit 0 ;;
+            *) warn "无效选项，请重试" ;;
         esac
     done
 }
 
-########################################
-# 入口
-########################################
-main_loop
+main "$@"
