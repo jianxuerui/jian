@@ -117,24 +117,64 @@ function generate_wallet() {
   cd_nck_dir
   ./target/release/nockchain-wallet keygen
   echo -e "${YELLOW}[!] 钱包生成完成，请复制上方公钥到下一步设置中${RESET}"
+  echo -e "${BLUE}[i] 公钥格式为128位16进制字符串${RESET}"
   pause_and_return
+}
+
+function validate_pubkey() {
+  local pubkey="$1"
+  
+  # 检查长度是否为128位
+  if [ ${#pubkey} -ne 128 ]; then
+    echo -e "${RED}[-] 公钥长度错误！应为128位，当前为${#pubkey}位${RESET}"
+    return 1
+  fi
+  
+  # 检查是否为有效的16进制字符
+  if [[ ! "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
+    echo -e "${RED}[-] 公钥格式错误！只能包含0-9和a-f字符${RESET}"
+    return 1
+  fi
+  
+  return 0
 }
 
 function set_pubkey_env() {
   echo -e "[*] 设置 MINING_PUBKEY 到 .env..."
   cd_nck_dir
 
-  read -p "请输入公钥 (MINING_PUBKEY): " pubkey
-  if [ -z "$pubkey" ]; then
-    echo -e "${RED}[-] 公钥不能为空${RESET}"
-    pause_and_return
-    return
-  fi
-
-  sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
-  echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
-
-  echo -e "${GREEN}[+] 已写入 MINING_PUBKEY 到 .env${RESET}"
+  echo -e "${BLUE}[i] 公钥格式要求：128位16进制字符串${RESET}"
+  echo -e "${BLUE}[i] 示例格式：d24c0c53d1162325eba695f32b7194f4c9b2943441a3162837922d36f3325c341ce049e7b3992080a9603e91147e4529f79261a355e16570c975a6c0e81716e3${RESET}"
+  echo ""
+  
+  while true; do
+    read -p "请输入公钥 (MINING_PUBKEY): " pubkey
+    
+    if [ -z "$pubkey" ]; then
+      echo -e "${RED}[-] 公钥不能为空${RESET}"
+      continue
+    fi
+    
+    # 去除可能的空格
+    pubkey=$(echo "$pubkey" | tr -d ' ')
+    
+    # 验证公钥格式
+    if validate_pubkey "$pubkey"; then
+      # 转换为小写
+      pubkey=$(echo "$pubkey" | tr '[:upper:]' '[:lower:]')
+      
+      # 写入环境文件
+      sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
+      echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
+      
+      echo -e "${GREEN}[+] 公钥格式验证通过，已写入 .env 文件${RESET}"
+      echo -e "${GREEN}[+] 公钥: $pubkey${RESET}"
+      break
+    else
+      echo -e "${YELLOW}[!] 请重新输入正确格式的公钥${RESET}"
+    fi
+  done
+  
   pause_and_return
 }
 
@@ -161,6 +201,13 @@ function start_node() {
   cd_nck_dir
   source "$ENV_FILE"
 
+  # 检查是否已设置公钥
+  if [ -z "$MINING_PUBKEY" ]; then
+    echo -e "${RED}[-] 未设置 MINING_PUBKEY，请先设置挖矿公钥${RESET}"
+    pause_and_return
+    return
+  fi
+
   chmod +x ./scripts/run_nockchain_miner.sh
 
   if screen -list | grep -qw "nockchain"; then
@@ -175,6 +222,7 @@ function start_node() {
   sleep 3
   if screen -list | grep -qw "nockchain"; then
     echo -e "${GREEN}[+] 节点已启动 (screen 会话名: nockchain)${RESET}"
+    echo -e "${GREEN}[+] 使用公钥: $MINING_PUBKEY${RESET}"
     echo -e "${YELLOW}[!] 使用 'screen -r nockchain' 查看日志${RESET}"
   else
     echo -e "${RED}[-] 节点启动失败${RESET}"
@@ -195,6 +243,17 @@ function view_logs() {
 
 function check_status() {
   echo -e "[*] 检查节点状态..."
+  
+  # 显示当前公钥配置
+  cd_nck_dir
+  if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+    if [ -n "$MINING_PUBKEY" ]; then
+      echo -e "${GREEN}[+] 已配置公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}${RESET}"
+    else
+      echo -e "${YELLOW}[!] 未设置挖矿公钥${RESET}"
+    fi
+  fi
   
   if screen -list | grep -qw "nockchain"; then
     echo -e "${GREEN}[+] 节点运行中${RESET}"
@@ -234,7 +293,7 @@ function main_menu() {
   echo "请选择操作:"
   echo "  1) 🚀 一键优化安装"
   echo "  2) 🔑 生成钱包"
-  echo "  3) 📝 设置挖矿公钥"
+  echo "  3) 📝 设置挖矿公钥 (128位16进制)"
   echo "  4) 💾 导出密钥"
   echo "  5) 📂 导入密钥"
   echo "  6) ⚡ 启动节点"
