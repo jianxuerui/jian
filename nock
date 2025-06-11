@@ -1,313 +1,112 @@
 #!/usr/bin/env bash
-# nockchain_toolbox.sh 终极修复版 v8.0
-# 集成libstdc++修复 + Git冲突处理 + 智能硬件适配
+# nockchain_toolbox.sh 终极兼容版 v8.0
+# 支持CentOS/Ubuntu系统 + 自动修复libstdc++错误
 
 set -euo pipefail
 IFS=$'\n\t'
 
-###############################
 # 全局配置
-###############################
 SRC_DIR="${HOME}/build/ethminer"
 INSTALL_PREFIX="/usr/local"
-JOBS="$(nproc)"
 LOG_FILE="${HOME}/nockchain.log"
 CONFIG_FILE="${HOME}/.nockchain.conf"
 
-###############################
-# 输出颜色定义
-###############################
-c_info() { 
-    printf "\033[32m[INFO]\033[0m %s\n" "$*"
-}
+# 颜色输出函数
+c_info() { printf "\033[32m[INFO]\033[0m %s\n" "$*"; }
+c_warn() { printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+c_err()  { printf "\033[31m[ERR]\033[0m %s\n" "$*"; exit 1; }
 
-c_warn() { 
-    printf "\033[33m[WARN]\033[0m %s\n" "$*"
-}
-
-c_err() { 
-    printf "\033[31m[ERR]\033[0m %s\n" "$*"
-    exit 1
-}
-
-###############################
 # 系统检测
-###############################
-detect_pkg_mgr() {
-    if command -v dnf >/dev/null 2>&1; then
-        echo "dnf"
-    elif command -v yum >/dev/null 2>&1; then
-        echo "yum"
-    elif command -v apt-get >/dev/null 2>&1; then
-        echo "apt"
+detect_os() {
+    if grep -qEi "(centos|redhat)" /etc/*-release; then
+        echo "centos"
+    elif grep -qEi "debian|ubuntu" /etc/*-release; then
+        echo "debian"
     else
-        c_err "不支持的包管理器"
+        c_err "不支持的Linux发行版"
     fi
 }
 
-###############################
-# 修复libstdc++链接问题的核心函数
-###############################
+# 修复libstdc++问题
 fix_libstdc() {
-    local pm
-    pm=$(detect_pkg_mgr)
-    
-    c_info "修复libstdc++链接问题..."
-    
-    case "$pm" in
-        dnf|yum)
-            # 安装C++开发包
-            sudo "$pm" install -y gcc-c++ libstdc++-devel libstdc++-static
-            
-            # 检查并创建符号链接
-            if [[ ! -f /usr/lib64/libstdc++.so ]] && [[ -f /usr/lib64/libstdc++.so.6 ]]; then
-                sudo ln -sf /usr/lib64/libstdc++.so.6 /usr/lib64/libstdc++.so
-            fi
+    case $(detect_os) in
+        centos)
+            sudo yum install -y gcc-c++ libstdc++-devel
+            [[ ! -f /usr/lib64/libstdc++.so ]] && \
+            sudo ln -sv /usr/lib64/libstdc++.so.6 /usr/lib64/libstdc++.so
             ;;
-        apt)
+        debian)
             sudo apt-get update
-            sudo apt-get install -y g++ libstdc++-dev libstdc++-static
+            sudo apt-get install -y g++ libstdc++6 libstdc++-dev
             ;;
     esac
-    
-    # 更新动态库缓存
     sudo ldconfig
-    
-    # 验证修复
-    if ldconfig -p | grep -q libstdc++; then
-        c_info "libstdc++修复成功"
-    else
-        c_err "libstdc++修复失败"
-    fi
 }
 
-###############################
-# 安装编译依赖
-###############################
+# 安装依赖
 install_deps() {
-    local pm
-    pm=$(detect_pkg_mgr)
-    c_info "检测到包管理器: ${pm}"
-
-    # 先修复libstdc++问题
     fix_libstdc
-
-    # 启用必要仓库
-    if [[ "$pm" =~ ^(dnf|yum)$ ]]; then
-        c_info "配置EPEL和CRB仓库..."
-        sudo "$pm" install -y epel-release
-        sudo "$pm" config-manager --set-enabled crb 2>/dev/null || \
-        sudo "$pm" config-manager --set-enabled powertools 2>/dev/null || true
-        sudo "$pm" makecache
-    fi
-
-    # 安装开发工具组
-    c_info "安装开发工具组..."
-    case "$pm" in
-        dnf|yum)
-            sudo "$pm" groupinstall -y "Development Tools"
-            sudo "$pm" install -y \
-                openssl-devel \
-                ocl-icd-devel \
-                opencl-headers \
-                mesa-libGL-devel \
-                mesa-libGLU-devel \
-                pkgconfig \
-                cmake \
-                git
-            ;;
-        apt)
-            sudo apt-get install -y \
-                build-essential \
-                cmake \
-                git \
-                libssl-dev \
-                ocl-icd-opencl-dev \
-                opencl-headers \
-                mesa-common-dev \
-                pkg-config
-            ;;
+    
+    case $(detect_os) in
+        centos)
+            sudo yum install -y epel-release
+            sudo yum groupinstall -y "Development Tools"
+            sudo yum install -y cmake git openssl-devel ocl-icd-devel opencl-headers ;;
+        debian)
+            sudo apt-get install -y build-essential cmake git libssl-dev ocl-icd-opencl-dev ;;
     esac
-
-    # 强制更新动态库链接
-    sudo ldconfig
 }
 
-###############################
-# 源码管理（Git冲突智能处理）
-###############################
+# 源码管理
 fetch_source() {
-    mkdir -p "$(dirname "$SRC_DIR")"
-    
     if [[ -d "$SRC_DIR/.git" ]]; then
-        c_info "智能更新源码..."
-        
-        # 自动储藏本地修改
-        if ! git -C "$SRC_DIR" diff --quiet; then
-            c_warn "检测到未提交修改，执行自动储藏..."
-            git -C "$SRC_DIR" stash push -m "auto_stash_$(date +%s)"
-        fi
-        
-        # 强制清理编译残留
-        git -C "$SRC_DIR" reset --hard HEAD
-        git -C "$SRC_DIR" clean -dfx
-        
-        # 拉取更新
-        if ! git -C "$SRC_DIR" pull --rebase; then
-            c_err "源码更新失败，请手动处理冲突后重试"
-        fi
-        
-        # 恢复储藏内容（如有）
-        if git -C "$SRC_DIR" stash list | grep -q "auto_stash"; then
-            git -C "$SRC_DIR" stash pop
-        fi
+        git -C "$SRC_DIR" stash push -m "auto_stash_$(date +%s)"
+        git -C "$SRC_DIR" pull --rebase
+        git -C "$SRC_DIR" stash pop || true
     else
-        c_info "克隆ethminer仓库..."
         git clone --recursive https://github.com/ethereum-mining/ethminer.git "$SRC_DIR"
     fi
 }
 
-###############################
-# 应用源码补丁
-###############################
+# 应用补丁
 apply_patches() {
-    # 修复JSONCPP弃用警告
-    local cmake_file="$SRC_DIR/CMakeLists.txt"
-    if ! grep -q "Wno-deprecated-declarations" "$cmake_file"; then
-        c_info "注入编译选项到CMakeLists.txt"
-        sed -i '/CMAKE_CXX_STANDARD/a add_compile_options(-Wno-deprecated-declarations)' "$cmake_file"
-    fi
-
-    # 强制使用系统OpenCL
-    local libethash_cmake="$SRC_DIR/libethash-cl/CMakeLists.txt"
-    if [[ -f "$libethash_cmake" ]]; then
-        sed -i 's/if(USE_SYS_OPENCL)/if(TRUE)/g' "$libethash_cmake"
-    fi
+    sed -i '/CMAKE_CXX_STANDARD/a add_compile_options(-Wno-deprecated-declarations)' \
+        "$SRC_DIR/CMakeLists.txt"
 }
 
-###############################
-# CUDA自动检测
-###############################
-detect_cuda() {
-    if command -v nvcc >/dev/null 2>&1 || [[ -d "/usr/local/cuda" ]]; then
-        echo "ON"
-    else
-        echo "OFF"
-    fi
-}
-
-###############################
-# 编译安装（增强版）
-###############################
+# 编译安装
 build_ethminer() {
-    local use_cuda
-    use_cuda=$(detect_cuda)
-    c_info "CUDA支持状态: ${use_cuda}"
-
-    cd "$SRC_DIR"
+    mkdir -p "$SRC_DIR/build"
+    cd "$SRC_DIR/build"
     
-    # 清理旧构建
-    rm -rf build
-    mkdir build && cd build
-
-    # 配置CMake（增强链接参数）
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_COMPILER=g++ \
-        -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath=/usr/lib64 -L/usr/lib64" \
-        -DETHASHCUDA="$use_cuda" \
         -DUSE_SYS_OPENCL=ON
-
-    # 编译
-    make -j"$JOBS"
     
-    # 验证可执行文件
-    if [[ -x "./ethminer/ethminer" ]]; then
-        c_info "编译成功，正在安装..."
-        sudo make install
-        c_info "ethminer 编译安装完成"
-    else
-        c_err "编译失败，未生成可执行文件"
-    fi
+    make -j$(nproc)
+    sudo make install
 }
 
-###############################
-# 钱包配置管理
-###############################
+# 钱包管理
 manage_wallet() {
-    local wallet
-    read -rp "输入新钱包地址: " wallet
-    
-    if [[ -z "$wallet" ]]; then
-        c_warn "操作取消"
-        return 0
-    fi
-    
+    read -rp "输入钱包地址: " wallet
     echo "WALLET=$wallet" > "$CONFIG_FILE"
-    c_info "钱包地址已更新"
 }
 
-###############################
 # 节点控制
-###############################
 start_node() {
-    local wallet
-    
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        c_warn "请先配置钱包"
-        return 0
-    fi
-    
-    wallet=$(grep -Po 'WALLET=\K.*' "$CONFIG_FILE" 2>/dev/null || true)
-    
-    if [[ -z "$wallet" ]]; then
-        c_warn "请先配置钱包"
-        return 0
-    fi
-
-    # 检查ethminer是否已安装
-    if ! command -v ethminer >/dev/null 2>&1; then
-        c_warn "ethminer未安装，请先执行选项1"
-        return 0
-    fi
-
-    nohup ethminer -P "stratum1+tcp://${wallet}@eth.pool.example:4444" &>> "$LOG_FILE" &
-    c_info "节点已启动 | 日志: tail -f $LOG_FILE"
+    [[ -f "$CONFIG_FILE" ]] || { c_warn "请先配置钱包"; return; }
+    . "$CONFIG_FILE"
+    nohup ethminer -P "stratum1+tcp://${WALLET}@eth.pool.example:4444" &>> "$LOG_FILE" &
 }
 
+# 日志查看
 view_logs() {
-    if [[ ! -f "$LOG_FILE" ]]; then
-        c_warn "日志文件不存在"
-        return 0
-    fi
-    
     tail -n 50 -f "$LOG_FILE"
 }
 
-###############################
-# 系统信息显示
-###############################
-show_system_info() {
-    c_info "========== 系统信息 =========="
-    echo "主机名: $(hostname)"
-    echo "系统: $(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)"
-    echo "CPU核心: $(nproc)"
-    echo "内存: $(free -h | awk '/^Mem:/ {print $2}')"
-    echo "CUDA: $(detect_cuda)"
-    
-    if command -v ethminer >/dev/null 2>&1; then
-        echo "ethminer: $(ethminer --version 2>&1 | head -n1 || echo '已安装')"
-    else
-        echo "ethminer: 未安装"
-    fi
-    
-    read -rp "按回车返回主菜单..."
-}
-
-###############################
-# 用户界面
-###############################
+# 主菜单
 show_menu() {
     clear
     echo -e "\n========== Nockchain 管理终端 =========="
@@ -315,53 +114,23 @@ show_menu() {
     echo "2) 配置钱包地址"
     echo "3) 启动挖矿节点"
     echo "4) 查看实时日志"
-    echo "5) 系统信息"
-    echo "6) 退出"
-    echo -e "=======================================\n"
+    echo "5) 退出"
 }
 
-###############################
-# 主循环
-###############################
 main() {
-    # 错误捕获
-    trap 'c_err "脚本执行被中断"' INT TERM
-    
     while true; do
         show_menu
-        read -rp "请选择操作 [1-6]: " choice
-        
+        read -rp "请选择操作 [1-5]: " choice
         case $choice in
-            1)
-                install_deps
-                fetch_source
-                apply_patches
-                build_ethminer
-                ;;
-            2)
-                manage_wallet
-                ;;
-            3)
-                start_node
-                ;;
-            4)
-                view_logs
-                ;;
-            5)
-                show_system_info
-                ;;
-            6)
-                c_info "感谢使用！"
-                exit 0
-                ;;
-            *)
-                c_warn "无效选项，请重新选择"
-                ;;
+            1) install_deps; fetch_source; apply_patches; build_ethminer ;;
+            2) manage_wallet ;;
+            3) start_node ;;
+            4) view_logs ;;
+            5) exit 0 ;;
+            *) c_warn "无效选项" ;;
         esac
-        
         read -rp "按回车继续..."
     done
 }
 
-# 脚本入口点
 main "$@"
