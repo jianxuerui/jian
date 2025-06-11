@@ -2,7 +2,7 @@
 
 # ========= 容器化部署方案 =========
 NCK_DIR="$HOME/nockchain"
-DOCKER_IMAGE="nockchain/miner:2.2.1"
+DOCKER_IMAGE="nockchain/miner:2.3.1"
 VOLUME_MAP="-v $NCK_DIR:/nockchain"
 
 # ========= 色彩定义 =========
@@ -136,7 +136,7 @@ EOF
 function main_menu() {
   clear
   echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 v2.3 ==="
+  echo "=== Nockchain矿工管理系统 v2.4 ==="
   echo -e "${RESET}"
   echo "1) 完整部署矿工"
   echo "2) 启动矿工容器"
@@ -165,4 +165,9 @@ mkdir -p "$NCK_DIR"
 touch "$NCK_DIR/container.log"
 chmod 644 "$NCK_DIR/container.log"
 
-trap "echo -e '${RED}强制
+# 修复引号闭合问题
+trap "echo -e '${RED}强制退出!${RESET}'" SIGINT
+
+while true; do
+  main_menu
+done
