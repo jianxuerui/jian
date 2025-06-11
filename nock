@@ -1,209 +1,167 @@
 #!/usr/bin/env bash
-# Ethminer 矿工专业工具 v9.3 (终极依赖修复版)
-# 策略：在 v9.2 的基础上，将编译时所需的 libstdc++ 开发库 (libstdc++-dev /
-#      libstdc++-devel) 直接加入到依赖安装列表中。这解决了在某些精简
-#      系统中因缺失 C++ 标准库而导致的链接失败问题。
+# nockchain_toolbox.sh
+# 版本: 2.1.0  (交互菜单 + 编译修复)
 
 set -euo pipefail
-IFS=$'\n\t' # 更加标准的 IFS 设置
+IFS=$'\n\t'
 
-# --- 全局配置 ---
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ethminer-tool"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ethminer-tool"
-REPO_PATH="$HOME/ethminer"
+########################################
+# 全局变量
+########################################
+SRC_DIR="${HOME}/build/ethminer"
+INSTALL_PREFIX="/usr/local"
+JOBS="$(nproc)"
+LOG_FILE="${HOME}/nockchain.log"
 
-LOG_FILE="$CACHE_DIR/miner.log"
-CONFIG_FILE="$CONFIG_DIR/ethminer.conf"
-PID_FILE="$CACHE_DIR/miner.pid"
+########################################
+# 辅助输出
+########################################
+c_info()  { printf "\033[32m[INFO]\033[0m %s\n" "$*"; }
+c_warn()  { printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+c_err()   { printf "\033[31m[ERR ]\033[0m %s\n" "$*"; }
 
-# --- 动态命令配置 ---
-SUDO_CMD=""
-if [ "$(id -u)" -ne 0 ]; then
-  SUDO_CMD="sudo"
-fi
-
-# --- 环境与依赖 ---
-
-get_cpu_cores() {
-  case "$(uname -s)" in
-    Linux*)  nproc 2>/dev/null || echo "2" ;;
-    *)       echo "2" ;;
-  esac
+########################################
+# 平台检测与依赖安装
+########################################
+detect_pkg_mgr() {
+    command -v apt-get >/dev/null 2>&1 && { echo apt; return; }
+    command -v dnf      >/dev/null 2>&1 && { echo dnf; return; }
+    command -v yum      >/dev/null 2>&1 && { echo yum; return; }
+    command -v apk      >/dev/null 2>&1 && { echo apk; return; }
+    c_err "未识别的 Linux 发行版，请手动安装依赖"; exit 1
 }
 
-init_environment() {
-  mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
-  if [ ! -f "$CONFIG_FILE" ]; then
-    echo "▶ 首次运行，正在创建默认配置文件..."
-    cat > "$CONFIG_FILE" <<EOF
-# ethminer 配置文件
-MINING_ADDRESS="0x0000000000000000000000000000000000000000"
-POOL_URL="stratum+tcp://etc.2miners.com:1010"
-WORKER_NAME="myrig1"
-EOF
-    echo "✔ 默认配置已创建于: $CONFIG_FILE"
-    echo "请务必通过菜单选项 '2' 或 '3' 修改您的挖矿地址和矿池！"
-    sleep 3
-  fi
-}
+install_deps() {
+    local pm; pm="$(detect_pkg_mgr)"
+    c_info "使用包管理器 ${pm} 安装/更新依赖"
 
-# --- 编译与安装核心流程 (终极版) ---
-install_ethminer() {
-  PKG_MANAGER=""
-  while [ -z "$PKG_MANAGER" ]; do
-    clear; echo "为正确安装依赖，请选择您的操作系统包管理器："; echo "-----------------------------------------------"; echo "  1) apt (适用于 Debian, Ubuntu 等)"; echo "  2) dnf/yum (适用于 Fedora, CentOS, RHEL)"; echo "-----------------------------------------------"; printf "请输入您的选择 [1-2]: "; read -r sys_choice
-    case $sys_choice in 1) PKG_MANAGER="apt" ;; 2) PKG_MANAGER="dnf" ;; *) echo "输入无效。" && sleep 1 ;; esac
-  done
-
-  echo "✔ 系统选择完成: $PKG_MANAGER"
-  
-  echo "▶ 步骤 1/5: 安装基础编译工具及依赖库..."
-  case "$PKG_MANAGER" in
-    apt)
-      $SUDO_CMD apt-get update
-      # *** 修复点：添加 libstdc++-dev ***
-      $SUDO_CMD apt-get install -y git cmake build-essential curl sha1sum libstdc++-dev
-      ;;
-    dnf)
-      # *** 修复点：添加 libstdc++-devel ***
-      $SUDO_CMD dnf install -y git cmake gcc-c++ make curl openssl libstdc++-devel
-      ;;
-  esac
-  echo "✔ 基础编译工具及依赖库安装完成。"
-
-  echo "▶ 步骤 2/5: 清理旧环境并为 Hunter 准备依赖..."
-  
-  echo "--> 切换到安全的主目录..."
-  cd "$HOME"
-  
-  echo "--> 正在清理旧文件..."
-  rm -rf "$REPO_PATH" "$HOME/.hunter"
-  if [ -n "$SUDO_CMD" ]; then
-    $SUDO_CMD rm -rf "/root/.hunter"
-  fi
-  
-  BOOST_VERSION="1.66.0"
-  BOOST_SHA1="075d0b43980614054b1f1bafd189f863bba6600e"
-  BOOST_FILENAME="boost_1_66_0.7z"
-  BOOST_URL="https://sourceforge.net/projects/boost/files/boost/${BOOST_VERSION}/${BOOST_FILENAME}/download"
-  
-  HUNTER_USER_CACHE_DIR="$HOME/.hunter"
-  if [ "$(id -u)" -eq 0 ]; then
-      HUNTER_USER_CACHE_DIR="/root/.hunter"
-  fi
-  HUNTER_CACHE_DIR="$HUNTER_USER_CACHE_DIR/_Base/Download/Boost/${BOOST_VERSION}/${BOOST_SHA1:0:7}"
-  
-  echo "--> [投喂 Hunter] 正在准备依赖: Boost v${BOOST_VERSION}"
-  mkdir -p "$HUNTER_CACHE_DIR"
-  
-  if [ -f "$HUNTER_CACHE_DIR/$BOOST_FILENAME" ]; then
-      echo "--> Boost 缓存已存在，跳过下载。"
-  else
-      echo "--> 正在从备用源下载 Boost (此步较慢，约100MB)..."
-      if ! curl -L --progress-bar -o "$HUNTER_CACHE_DIR/$BOOST_FILENAME" "$BOOST_URL"; then
-          echo "!! 致命错误: 下载 Boost 失败。请检查网络或 URL: $BOOST_URL"
-          exit 1
-      fi
-  fi
-
-  echo "--> 正在校验下载的 Boost 文件..."
-  if command -v sha1sum >/dev/null; then
-    DOWNLOADED_SHA1=$(sha1sum "$HUNTER_CACHE_DIR/$BOOST_FILENAME" | awk '{print $1}')
-  else
-    DOWNLOADED_SHA1=$(openssl dgst -sha1 "$HUNTER_CACHE_DIR/$BOOST_FILENAME" | awk '{print $2}')
-  fi
-
-  if [ "$DOWNLOADED_SHA1" != "$BOOST_SHA1" ]; then
-      echo "!! 致命错误: Boost 文件校验失败！"
-      echo "   期望 SHA1: $BOOST_SHA1"
-      echo "   实际 SHA1: $DOWNLOADED_SHA1"
-      rm -f "$HUNTER_CACHE_DIR/$BOOST_FILENAME"
-      exit 1
-  fi
-  echo "✔ Boost 依赖准备就绪！"
-
-  echo "▶ 步骤 3/5: 完整克隆 ethminer 源码..."
-  echo "--> 正在以 --recursive 模式完整克隆 ethminer..."
-  if ! git clone --recursive https://github.com/ethereum-mining/ethminer.git "$REPO_PATH"; then
-    echo "!! 克隆失败，请检查网络连接。" >&2; exit 1;
-  fi
-  echo "✔ 源码及所有依赖子模块已完整下载。"
-  
-  echo "▶ 步骤 4/5: 配置项目 (Hunter 将使用我们准备好的本地缓存)..."
-  (
-    cd "$REPO_PATH"
-    mkdir -p build
-    cd build
-    cmake .. -DETHASHCL=OFF -DETHASHCUDA=OFF
-  ) || { echo "!! 致命错误：CMake 配置失败。请检查上面的错误日志。"; exit 1; }
-  echo "✔ 所有依赖已通过 Hunter 配置完成！"
-  
-  echo "▶ 步骤 5/5: 正在编译 ethminer 主程序..."
-  (
-    cd "$REPO_PATH/build"
-    make -j"$(get_cpu_cores)"
-  ) || { echo "!! 致命错误：编译 ethminer 失败。请检查以上日志。"; exit 1; }
-  echo "✔ 编译完成！"
-
-  echo "▶ 安装程序..."
-  mkdir -p "${HOME}/.local/bin"
-  install -m755 "$REPO_PATH/build/ethminer/ethminer" "${HOME}/.local/bin/"
-  echo "✔ ethminer 已成功安装到 ${HOME}/.local/bin/"
-
-  if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-    echo "----------------------------------------------------------------------"
-    echo "重要提示: '${HOME}/.local/bin' 不在你的 PATH 环境变量中。"
-    echo "请重新登录或运行以下命令，然后再次运行本脚本："
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo "----------------------------------------------------------------------"
-  fi
-  echo "按任意键返回主菜单..."
-  read -n 1 -s -r
-}
-
-# --- 日常管理功能 ---
-change_mining_address(){ . "$CONFIG_FILE"; echo "--- 更改挖矿地址 ---"; echo "当前挖矿地址: $MINING_ADDRESS"; printf "➤ 请输入新的挖矿地址 (或直接回车取消): "; read -r new_address; if [ -z "$new_address" ]; then echo "操作已取消。"; sleep 2; return; fi; if ! echo "$new_address" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then echo "✘ 错误：地址格式无效。"; sleep 3; return 1; fi; sed -i.bak "s|^MINING_ADDRESS=.*|MINING_ADDRESS=\"$new_address\"|" "$CONFIG_FILE"; rm -f "${CONFIG_FILE}.bak"; echo "✔ 挖矿地址已成功更新！"; sleep 2; }
-edit_config(){ echo "▶ 打开配置文件进行编辑..."; if [ -n "$EDITOR" ]; then "$EDITOR" "$CONFIG_FILE"; elif command -v nano >/dev/null; then nano "$CONFIG_FILE"; elif command -v vi >/dev/null; then vi "$CONFIG_FILE"; else echo "未找到编辑器。请手动编辑: $CONFIG_FILE"; fi; echo "配置完成。"; sleep 2; }
-start_miner(){ if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then echo "矿机已经在运行 (PID: $(cat "$PID_FILE"))。"; sleep 2; return; fi; echo "▶ 正在启动矿机..."; if ! command -v ethminer >/dev/null; then echo "错误: 'ethminer' 命令未找到。请先安装(选项 1)。"; sleep 2; return 1; fi; . "$CONFIG_FILE"; POOL_HOST_PORT=$(echo "$POOL_URL" | sed 's|stratum+tcp://||'); STRATUM_URI="stratum+tcp://${MINING_ADDRESS}.${WORKER_NAME}@${POOL_HOST_PORT}"; echo "使用的矿池地址: $STRATUM_URI"; echo "日志文件位于: $LOG_FILE"; nohup ethminer -P "$STRATUM_URI" >"$LOG_FILE" 2>&1 & MINER_PID=$!; echo "$MINER_PID" > "$PID_FILE"; sleep 1; if ps -p "$MINER_PID" > /dev/null; then echo "✔ 矿机已启动，进程ID: $MINER_PID"; else echo "✘ 矿机启动失败，请查看日志: $LOG_FILE"; rm -f "$PID_FILE"; fi; sleep 2; }
-stop_miner(){ if [ ! -f "$PID_FILE" ]; then echo "矿机未在运行。"; sleep 2; return; fi; PID=$(cat "$PID_FILE"); if ps -p "$PID" > /dev/null; then echo "▶ 正在停止矿机 (PID: $PID)..."; kill "$PID"; sleep 2; if ! ps -p "$PID" > /dev/null; then echo "✔ 矿机已停止。"; rm -f "$PID_FILE"; else echo "等待超时，强制停止..."; kill -9 "$PID"; rm -f "$PID_FILE"; fi; else echo "PID $PID 不存在。清理PID文件..."; rm -f "$PID_FILE"; fi; sleep 2; }
-show_monitor(){ if [ -f "$LOG_FILE" ]; then echo "▶ 实时监控日志 (按 Ctrl+C 退出)..."; tail -f "$LOG_FILE"; else echo "日志文件不存在。"; sleep 2; fi; }
-
-show_menu() {
-  while true; do
-    if [ -f "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
-    clear
-    cat << "EOF"
-╔════════════════════════════════════════════════╗
-║           Ethminer 矿工专业工具 v9.3           ║
-╠════════════════════════════════════════════════╣
-║ 1) 安装/更新 ethminer  2) 更改挖矿地址          ║
-║ 3) 编辑矿池配置      4) 启动/停止矿机          ║
-║ 5) 查看实时日志      0) 退出                   ║
-╚════════════════════════════════════════════════╝
-EOF
-    echo
-    if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then 
-        echo "当前状态: 运行中 (PID: $(cat "$PID_FILE"))"
-    else 
-        echo "当前状态: 已停止"
-    fi
-    echo "挖矿地址: ${MINING_ADDRESS:-未设置}"
-    echo "矿池地址: ${POOL_URL:-未设置}"
-    echo
-    printf "➤ 请输入选项 [0-5]: "
-    read -r choice
-    case $choice in
-      1) install_ethminer ;; 2) change_mining_address ;; 3) edit_config ;;
-      4) if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then stop_miner; else start_miner; fi ;;
-      5) show_monitor ;; 0) echo "感谢使用，再见！"; exit 0 ;; *) echo "无效选项。"; sleep 1 ;;
+    case "${pm}" in
+        apt)
+            sudo apt-get update
+            sudo apt-get install -y build-essential cmake git \
+                 libstdc++-dev libssl-dev pkg-config
+            ;;
+        dnf)
+            sudo dnf -y install gcc gcc-c++ cmake git \
+                 libstdc++-devel openssl-devel pkgconfig
+            ;;
+        yum)
+            sudo yum -y install gcc gcc-c++ cmake git \
+                 libstdc++-devel openssl-devel pkgconfig
+            ;;
+        apk)
+            sudo apk add --no-cache build-base cmake git \
+                 libstdc++ libstdc++-dev openssl-dev
+            ;;
     esac
-  done
 }
 
-# --- 主程序入口 ---
-main() {
-  init_environment
-  show_menu
+########################################
+# 克隆 / 更新 ethminer 源码
+########################################
+fetch_source() {
+    mkdir -p "$(dirname "${SRC_DIR}")"
+    if [[ -d "${SRC_DIR}/.git" ]]; then
+        c_info "ethminer 源码已存在，执行 git pull"
+        git -C "${SRC_DIR}" pull --rebase
+    else
+        c_info "克隆 ethminer 源码"
+        git clone --recursive https://github.com/ethereum-mining/ethminer.git "${SRC_DIR}"
+    fi
 }
 
-main "$@"
+########################################
+# 轻量补丁
+########################################
+apply_patches() {
+    c_info "检查并注入 -Wno-deprecated-declarations 编译选项"
+    local cmake_file="${SRC_DIR}/CMakeLists.txt"
+    if ! grep -q "Wno-deprecated-declarations" "${cmake_file}"; then
+        sed -i '/CMAKE_CXX_STANDARD/a add_compile_options(-Wno-deprecated-declarations)' "${cmake_file}"
+    fi
+}
+
+########################################
+# 编译安装 ethminer
+########################################
+build_ethminer() {
+    c_info "开始编译 ethminer (g++)"
+    cd "${SRC_DIR}"
+    mkdir -p build && cd build
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_COMPILER=g++ \
+        -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}"
+    make -j"${JOBS}"
+    sudo make install
+    c_info "ethminer 已安装到 ${INSTALL_PREFIX}/bin/ethminer"
+}
+
+########################################
+# 业务逻辑：修改公钥、启动节点、查看日志
+########################################
+CONFIG_FILE="${HOME}/.nockchain.conf"
+
+change_wallet() {
+    read -rp "请输入新的挖矿钱包地址: " NEW_WALLET
+    [[ -z "${NEW_WALLET}" ]] && { c_warn "钱包地址为空，已取消操作"; return; }
+    echo "WALLET=${NEW_WALLET}" > "${CONFIG_FILE}"
+    c_info "钱包地址已更新并写入 ${CONFIG_FILE}"
+}
+
+start_node() {
+    WALLET_ADDR="$(grep -E "^WALLET=" "${CONFIG_FILE}" 2>/dev/null | cut -d= -f2 || true)"
+    if [[ -z "${WALLET_ADDR}" ]]; then
+        c_warn "未配置钱包地址，请先执行 2) 修改挖矿钱包"
+        return
+    fi
+    nohup ethminer -P "stratum1+tcp://${WALLET_ADDR}@eth.pool.example:4444" \
+          &>> "${LOG_FILE}" &
+    c_info "挖矿节点已启动，日志写入 ${LOG_FILE}"
+}
+
+view_log() {
+    [[ -f "${LOG_FILE}" ]] || { c_warn "日志文件不存在"; return; }
+    tail -n 50 -F "${LOG_FILE}"
+}
+
+########################################
+# 菜单系统  (保持之前的数字交互设计)
+########################################
+show_menu() {
+cat <<EOF
+
+=========== Nockchain 工具箱 ===========
+1) 安装 / 更新 ethminer
+2) 修改挖矿钱包
+3) 启动挖矿节点
+4) 查看运行日志
+5) 退出
+
+EOF
+}
+
+main_loop() {
+    while true; do
+        show_menu
+        read -rp "请选择操作 [1-5]: " choice
+        case "${choice}" in
+            1)
+                install_deps
+                fetch_source
+                apply_patches
+                build_ethminer
+                ;;
+            2) change_wallet ;;
+            3) start_node   ;;
+            4) view_log     ;;
+            5) c_info "Bye"; exit 0 ;;
+            *) c_warn "无效输入，请重新选择" ;;
+        esac
+    done
+}
+
+########################################
+# 入口
+########################################
+main_loop
