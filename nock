@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 
-# ========= 智能环境检测 =========
-OS_TYPE=$(awk -F= '/^ID=/{print $2}' /etc/os-release | tr -d '"')
-ARCH_TYPE=$(uname -m)
-GPU_TYPE=$(lspci -nn | awk -F'\\[|\\]' '/VGA/{print $2}')
-
-# ========= 动态参数配置 =========
+# ========= 容器化部署方案 =========
 NCK_DIR="$HOME/nockchain"
-ENV_FILE="$NCK_DIR/.env"
-LOG_FILE="$NCK_DIR/nck_miner.log"
+DOCKER_IMAGE="nockchain/miner:latest"
+VOLUME_MAP="-v $NCK_DIR:/nockchain"
 
 # ========= 色彩定义 =========
 RESET='\033[0m'
@@ -18,89 +13,74 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 
-# ========= 智能依赖安装 =========
-function install_dependencies() {
-  echo -e "${CYAN}[*] 检测并安装系统依赖...${RESET}"
-  
-  declare -A PKG_MAP=(
-    [ubuntu]="libhwloc-dev ocl-icd-opencl-dev numactl jq"
-    [debian]="hwloc-nox libopencl-dev numactl"
-    [centos]="hwloc-devel openssl-devel numactl"
-    [arch]="opencl-mesa hwloc numactl"
-  )
-
-  sudo ${PKG_MAP[$OS_TYPE]} &>>$LOG_FILE || {
-    echo -e "${RED}✗ 依赖安装失败，详见 $LOG_FILE${RESET}"
-    exit 1
-  }
+# ========= 容器运行时检查 =========
+function check_docker() {
+  if ! command -v docker &>/dev/null; then
+    echo -e "${RED}✗ Docker未安装，开始自动安装...${RESET}"
+    install_docker
+  fi
 }
 
-# ========= 硬件优化引擎 =========
-function hardware_tuning() {
-  echo -e "${CYAN}[*] 启动硬件优化引擎...${RESET}"
+# ========= Docker安装模块 =========
+function install_docker() {
+  # 自动识别发行版
+  if grep -q "ubuntu" /etc/os-release; then
+    sudo apt-get update
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+    sudo usermod -aG docker $USER
+    newgrp docker
+  elif grep -q "centos" /etc/os-release; then
+    sudo yum install -y yum-utils
+    sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    sudo yum install -y docker-ce docker-ce-cli containerd.io
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    sudo usermod -aG docker $USER
+    newgrp docker
+  else
+    echo -e "${RED}✗ 不支持的Linux发行版${RESET}"
+    exit 1
+  fi
+}
+
+# ========= 容器化部署引擎 =========
+function deploy_container() {
+  echo -e "${CYAN}[*] 启动Nockchain容器...${RESET}"
   
-  # NUMA架构优化
-  if numactl --hardware | grep -q "node 1"; then
-    sudo sysctl -w vm.zone_reclaim_mode=0
-    NUMACTL_OPT="numactl --interleave=all"
+  # GPU自动检测
+  GPU_OPT=""
+  if lspci | grep -qi "nvidia"; then
+    GPU_OPT="--gpus all"
+  elif lspci | grep -qi "amd"; then
+    GPU_OPT="--device=/dev/kfd --device=/dev/dri"
   fi
 
-  # GPU加速层
-  case "$GPU_TYPE" in
-    10de*) export CUDA_VISIBLE_DEVICES=0 ;;
-    1002*) export GPU_ACCELERATION="opencl" ;;
-    8086*) export GPU_ACCELERATION="vaapi" ;;
-  esac
-
-  # 内存优化
-  TOTAL_MEM=$(free -m | awk '/Mem:/{print $2}')
-  HUGEPAGES=$((TOTAL_MEM * 9 / 10240))
-  sudo sysctl -w vm.nr_hugepages=$HUGEPAGES &>>$LOG_FILE
-}
-
-# ========= 智能编译系统 =========
-function adaptive_compile() {
-  echo -e "${CYAN}[*] 执行自适应编译...${RESET}"
-  
-  CPU_FLAGS="-march=native"
-  case "$ARCH_TYPE" in
-    x86_64)
-      if grep -q "avx2" /proc/cpuinfo; then
-        CPU_FLAGS+=" -mavx2"
-      fi
-      ;;
-    aarch64)
-      CPU_FLAGS="-mcpu=native"
-      ;;
-  esac
-
-  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
-  export CFLAGS="$CPU_FLAGS -O3"
-  export CXXFLAGS="$CFLAGS"
-  
-  cargo build --release &>>$LOG_FILE || {
-    echo -e "${RED}✗ 编译失败，检查 $LOG_FILE${RESET}"
-    exit 2
-  }
+  docker run -itd --restart always \
+    --name nck-miner \
+    $VOLUME_MAP \
+    $GPU_OPT \
+    --network host \
+    $DOCKER_IMAGE
 }
 
 # ========= 矿工控制中心 =========
 function miner_control() {
   case "$1" in
     start)
-      echo -e "${GREEN}✓ 启动矿工服务...${RESET}"
-      $NUMACTL_OPT ./target/release/nck-miner --config $ENV_FILE &>>$LOG_FILE &
+      docker start nck-miner
       ;;
     stop)
-      echo -e "${YELLOW}➜ 停止运行中的矿工...${RESET}"
-      pkill -f nck-miner
+      docker stop nck-miner
       ;;
     status)
-      if pgrep -x "nck-miner" >/dev/null; then
-        echo -e "${GREEN}✓ 矿工运行中${RESET}"
-      else
-        echo -e "${RED}✗ 矿工未运行${RESET}"
-      fi
+      docker ps -f name=nck-miner --format "table {{.ID}}\t{{.Status}}\t{{.Image}}"
+      ;;
+    logs)
+      docker logs -f nck-miner
       ;;
   esac
 }
@@ -108,19 +88,17 @@ function miner_control() {
 # ========= 动态监控面板 =========
 function live_dashboard() {
   watch -n1 -c "
-    echo -e '${CYAN}=== 实时监控 ===${RESET}'
-    printf 'CPU负载: %s\n' \"$(uptime | awk -F'[a-z]:' '{print $2}')\"
-    printf '内存使用: %s/%s MB\n' \"$(free -m | awk '/Mem/{print $3}')\" \"$(free -m | awk '/Mem/{print $2}')\"
-    if [ -f $ENV_FILE ]; then
-      echo '当前公钥: $(awk -F= '/PUBKEY/{print $2}' $ENV_FILE)'
-    fi
-    echo -e '${CYAN}================${RESET}'
+    echo -e '${CYAN}=== 容器监控 ===${RESET}'
+    docker exec nck-miner nck-top
+    echo -e '\n${CYAN}=== 硬件状态 ===${RESET}'
+    docker exec nck-miner nvidia-smi || echo '无GPU设备'
+    echo -e '\n${YELLOW}按 Ctrl+C 返回主菜单${RESET}'
   "
 }
 
 # ========= 配置向导 =========
 function config_wizard() {
-  echo -e "${CYAN}>>> 配置向导 <<<${RESET}"
+  echo -e "${CYAN}>>> 容器配置向导 <<<${RESET}"
   
   # 公钥验证
   while :; do
@@ -130,36 +108,37 @@ function config_wizard() {
   done
 
   # 生成配置文件
-  cat > $ENV_FILE <<EOF
+  cat > $NCK_DIR/.env <<EOF
 MINER_PUBKEY=$PUBKEY
 THREADS=$(nproc)
-GPU_ENABLED=$([ -n "$GPU_TYPE" ] && echo true || echo false)
 EOF
 
-  echo -e "${GREEN}✓ 配置文件已生成: $ENV_FILE${RESET}"
+  echo -e "${GREEN}✓ 配置文件已生成: $NCK_DIR/.env${RESET}"
 }
 
 # ========= 主控界面 =========
 function main_menu() {
   clear
   echo -e "${BOLD}${CYAN}"
-  echo "=== Nockchain矿工管理系统 ==="
+  echo "=== Nockchain容器化管理系统 ==="
   echo -e "${RESET}"
-  echo "1) 完整安装配置"
-  echo "2) 启动矿工服务"
-  echo "3) 停止矿工服务"
+  echo "1) 完整部署矿工"
+  echo "2) 启动矿工容器"
+  echo "3) 停止矿工容器"
   echo "4) 实时监控面板"
-  echo "5) 修改矿工公钥"
+  echo "5) 查看运行日志"
+  echo "6) 修改矿工公钥"
   echo "0) 退出系统"
   echo ""
   
   read -p "请选择操作: " choice
   case $choice in
-    1) install_dependencies && hardware_tuning && adaptive_compile && config_wizard ;;
+    1) check_docker && config_wizard && deploy_container ;;
     2) miner_control start ;;
     3) miner_control stop ;;
     4) live_dashboard ;;
-    5) config_wizard ;;
+    5) miner_control logs ;;
+    6) config_wizard ;;
     0) exit 0 ;;
     *) echo -e "${RED}无效选择${RESET}"; sleep 1 ;;
   esac
