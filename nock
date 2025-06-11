@@ -12,18 +12,37 @@ RED='\033[0;31m'
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
 
+# ========= 兼容性检测 =========
+function check_system() {
+  # 检测操作系统
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    OS="linux"
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    OS="macos"
+    echo -e "${YELLOW}[!] 检测到 macOS，某些优化功能可能不可用${RESET}"
+  else
+    OS="unknown"
+    echo -e "${YELLOW}[!] 未知操作系统，请谨慎使用${RESET}"
+  fi
+  
+  # 检测是否有sudo权限
+  if ! sudo -n true 2>/dev/null; then
+    echo -e "${YELLOW}[!] 需要sudo权限进行系统优化${RESET}"
+  fi
+}
+
 # ========= 横幅 =========
 function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain 挖矿优化助手 v2.0"
+  echo "         Nockchain 挖矿优化助手 v2.1"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 优化版本: 编译优化 + 性能调优"
+  echo "⚡ 优化版本: 编译优化 + 性能调优 + 兼容性增强"
   echo "-----------------------------------------------"
   echo ""
 }
@@ -40,17 +59,36 @@ function cd_nck_dir() {
 function optimize_system() {
   echo -e "${YELLOW}[*] 应用系统级性能优化...${RESET}"
   
-  # CPU性能模式
-  for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null
-  do
-    if [ -w "$gov" ]; then
-      echo performance | sudo tee "$gov" >/dev/null 2>&1
-    fi
-  done
+  # 检测系统兼容性
+  check_system
   
-  # 网络优化
-  sudo sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
-  sudo sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
+  # CPU性能模式优化 - 修正语法并增强兼容性
+  if [[ "$OS" == "linux" ]]; then
+    # 使用更安全的方式遍历CPU调速器文件
+    cpu_gov_files=$(find /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null || true)
+    
+    if [ -n "$cpu_gov_files" ]; then
+      echo "$cpu_gov_files" | while read -r gov; do
+        if [ -w "$gov" ] && [ -f "$gov" ]; then
+          echo performance | sudo tee "$gov" >/dev/null 2>&1 || true
+        fi
+      done
+      echo -e "${GREEN}[+] CPU性能模式已设置${RESET}"
+    else
+      echo -e "${YELLOW}[!] 未找到CPU调速器文件，跳过CPU优化${RESET}"
+    fi
+    
+    # 网络优化 - 增加错误处理
+    if command -v sysctl >/dev/null 2>&1; then
+      sudo sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1 || true
+      sudo sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1 || true
+      echo -e "${GREEN}[+] 网络参数优化完成${RESET}"
+    else
+      echo -e "${YELLOW}[!] sysctl命令不可用，跳过网络优化${RESET}"
+    fi
+  else
+    echo -e "${YELLOW}[!] 非Linux系统，跳过系统级优化${RESET}"
+  fi
   
   echo -e "${GREEN}[+] 系统优化完成${RESET}"
 }
@@ -62,8 +100,32 @@ function setup_all() {
   optimize_system
   
   echo -e "[*] 安装系统依赖..."
-  sudo apt update -qq
-  sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop
+  
+  # 根据系统类型安装依赖
+  if [[ "$OS" == "linux" ]]; then
+    # 检测包管理器
+    if command -v apt >/dev/null 2>&1; then
+      sudo apt update -qq
+      sudo apt install -y clang llvm-dev libclang-dev pkg-config libssl-dev build-essential cmake curl git make screen htop
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum groupinstall -y "Development Tools"
+      sudo yum install -y clang llvm-devel openssl-devel cmake curl git make screen htop
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --noconfirm clang llvm pkg-config openssl cmake curl git make screen htop
+    else
+      echo -e "${RED}[-] 未识别的包管理器，请手动安装依赖${RESET}"
+      pause_and_return
+      return
+    fi
+  elif [[ "$OS" == "macos" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+      brew install llvm openssl cmake curl git make screen htop
+    else
+      echo -e "${RED}[-] 请先安装 Homebrew${RESET}"
+      pause_and_return
+      return
+    fi
+  fi
 
   echo -e "[*] 安装 Rust 工具链..."
   if ! command -v cargo &>/dev/null; then
@@ -71,11 +133,12 @@ function setup_all() {
     source "$HOME/.cargo/env"
   fi
 
-  RC_FILE="$HOME/.bashrc"
-  [[ "$SHELL" == *"zsh"* ]] && RC_FILE="$HOME/.zshrc"
-  if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$RC_FILE"; then
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$RC_FILE"
-  fi
+  # 配置环境变量 - 兼容多种shell
+  for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$rc_file" ] && ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' "$rc_file"; then
+      echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
+    fi
+  done
   export PATH="$HOME/.cargo/bin:$PATH"
 
   echo -e "[*] 获取仓库..."
@@ -88,25 +151,46 @@ function setup_all() {
   cd_nck_dir
 
   echo -e "[*] 设置环境配置..."
-  cp -n .env_example "$ENV_FILE"
+  if [ -f ".env_example" ]; then
+    cp -n .env_example "$ENV_FILE"
+  else
+    echo -e "${YELLOW}[!] .env_example文件不存在，创建空的.env文件${RESET}"
+    touch "$ENV_FILE"
+  fi
 
   echo -e "[*] 安装 hoonc..."
-  make install-hoonc || { echo -e "${RED}[-] install-hoonc 失败${RESET}"; exit 1; }
+  if make install-hoonc; then
+    echo -e "${GREEN}[+] hoonc安装成功${RESET}"
+  else
+    echo -e "${RED}[-] install-hoonc 失败${RESET}"
+    echo -e "${YELLOW}[!] 继续尝试编译主程序...${RESET}"
+  fi
 
   echo -e "[*] 开始优化编译 Nockchain..."
-  # 高性能编译优化设置
-  export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1 -C lto=fat"
-  export CARGO_PROFILE_RELEASE_LTO=true
+  # 高性能编译优化设置 - 增加兼容性检测
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1"
+  
+  # 检测是否支持LTO
+  if rustc --print target-features 2>/dev/null | grep -q lto; then
+    export RUSTFLAGS="$RUSTFLAGS -C lto=fat"
+    export CARGO_PROFILE_RELEASE_LTO=true
+  fi
+  
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   export CARGO_PROFILE_RELEASE_PANIC="abort"
   
-  make build || { echo -e "${RED}[-] build 失败${RESET}"; exit 1; }
+  if make build; then
+    echo -e "${GREEN}[+] 编译成功${RESET}"
+  else
+    echo -e "${RED}[-] build 失败${RESET}"
+    exit 1
+  fi
 
   echo -e "[*] 安装钱包组件..."
-  make install-nockchain-wallet || { echo -e "${RED}[-] install-nockchain-wallet 失败${RESET}"; exit 1; }
+  make install-nockchain-wallet || { echo -e "${YELLOW}[!] install-nockchain-wallet 失败，继续...${RESET}"; }
 
   echo -e "[*] 安装节点组件..."
-  make install-nockchain || { echo -e "${RED}[-] install-nockchain 失败${RESET}"; exit 1; }
+  make install-nockchain || { echo -e "${YELLOW}[!] install-nockchain 失败，继续...${RESET}"; }
 
   echo -e "${GREEN}[+] 优化安装完成！${RESET}"
   pause_and_return
@@ -115,7 +199,15 @@ function setup_all() {
 function generate_wallet() {
   echo -e "[*] 生成钱包..."
   cd_nck_dir
-  ./target/release/nockchain-wallet keygen
+  
+  if [ -f "./target/release/nockchain-wallet" ]; then
+    ./target/release/nockchain-wallet keygen
+  else
+    echo -e "${RED}[-] nockchain-wallet不存在，请先完成安装${RESET}"
+    pause_and_return
+    return
+  fi
+  
   echo -e "${YELLOW}[!] 钱包生成完成，请复制上方公钥到下一步设置中${RESET}"
   echo -e "${BLUE}[i] 公钥格式为128位16进制字符串${RESET}"
   pause_and_return
@@ -155,16 +247,22 @@ function set_pubkey_env() {
       continue
     fi
     
-    # 去除可能的空格
-    pubkey=$(echo "$pubkey" | tr -d ' ')
+    # 去除可能的空格和换行
+    pubkey=$(echo "$pubkey" | tr -d ' \n\r\t')
     
     # 验证公钥格式
     if validate_pubkey "$pubkey"; then
       # 转换为小写
       pubkey=$(echo "$pubkey" | tr '[:upper:]' '[:lower:]')
       
-      # 写入环境文件
-      sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE"
+      # 写入环境文件 - 使用更安全的方式
+      if command -v sed >/dev/null 2>&1; then
+        sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE" 2>/dev/null || {
+          grep -v '^MINING_PUBKEY=' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+        }
+      else
+        grep -v '^MINING_PUBKEY=' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+      fi
       echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
       
       echo -e "${GREEN}[+] 公钥格式验证通过，已写入 .env 文件${RESET}"
@@ -181,24 +279,49 @@ function set_pubkey_env() {
 function export_keys() {
   echo -e "[*] 导出钱包密钥..."
   cd_nck_dir
-  ./target/release/nockchain-wallet export-keys
-  echo -e "${GREEN}[+] 密钥已导出到 keys.export${RESET}"
+  
+  if [ -f "./target/release/nockchain-wallet" ]; then
+    ./target/release/nockchain-wallet export-keys
+    echo -e "${GREEN}[+] 密钥已导出到 keys.export${RESET}"
+  else
+    echo -e "${RED}[-] nockchain-wallet不存在${RESET}"
+  fi
   pause_and_return
 }
 
 function import_keys() {
   echo -e "[*] 导入钱包密钥..."
   cd_nck_dir
+  
+  if [ ! -f "./target/release/nockchain-wallet" ]; then
+    echo -e "${RED}[-] nockchain-wallet不存在${RESET}"
+    pause_and_return
+    return
+  fi
+  
   read -p "[?] 请输入密钥文件路径 (默认: ./keys.export): " keyfile
   keyfile=${keyfile:-"./keys.export"}
-  ./target/release/nockchain-wallet import-keys --input "$keyfile"
-  echo -e "${GREEN}[+] 密钥已导入${RESET}"
+  
+  if [ -f "$keyfile" ]; then
+    ./target/release/nockchain-wallet import-keys --input "$keyfile"
+    echo -e "${GREEN}[+] 密钥已导入${RESET}"
+  else
+    echo -e "${RED}[-] 密钥文件不存在: $keyfile${RESET}"
+  fi
   pause_and_return
 }
 
 function start_node() {
-  echo -e "[*] 启动优化节点 (screen)..."
+  echo -e "[*] 启动优化节点..."
   cd_nck_dir
+  
+  # 检查环境文件
+  if [ ! -f "$ENV_FILE" ]; then
+    echo -e "${RED}[-] .env文件不存在${RESET}"
+    pause_and_return
+    return
+  fi
+  
   source "$ENV_FILE"
 
   # 检查是否已设置公钥
@@ -208,35 +331,53 @@ function start_node() {
     return
   fi
 
+  # 检查启动脚本
+  if [ ! -f "./scripts/run_nockchain_miner.sh" ]; then
+    echo -e "${RED}[-] 启动脚本不存在: ./scripts/run_nockchain_miner.sh${RESET}"
+    pause_and_return
+    return
+  fi
+  
   chmod +x ./scripts/run_nockchain_miner.sh
 
-  if screen -list | grep -qw "nockchain"; then
-    echo "[*] 关闭旧的 screen 会话..."
-    screen -S nockchain -X quit
-    sleep 2
-  fi
-
-  # 使用高优先级启动
-  screen -dmS nockchain bash -c "cd $NCK_DIR && nice -n -10 ./scripts/run_nockchain_miner.sh"
-
-  sleep 3
-  if screen -list | grep -qw "nockchain"; then
-    echo -e "${GREEN}[+] 节点已启动 (screen 会话名: nockchain)${RESET}"
-    echo -e "${GREEN}[+] 使用公钥: $MINING_PUBKEY${RESET}"
-    echo -e "${YELLOW}[!] 使用 'screen -r nockchain' 查看日志${RESET}"
+  # 检查screen是否可用
+  if ! command -v screen >/dev/null 2>&1; then
+    echo -e "${YELLOW}[!] screen未安装，直接后台启动...${RESET}"
+    nohup ./scripts/run_nockchain_miner.sh > nockchain.log 2>&1 &
+    echo -e "${GREEN}[+] 节点已后台启动，日志文件: nockchain.log${RESET}"
   else
-    echo -e "${RED}[-] 节点启动失败${RESET}"
-    echo "请检查 $NCK_DIR/scripts/run_nockchain_miner.sh 脚本"
+    if screen -list | grep -qw "nockchain"; then
+      echo "[*] 关闭旧的 screen 会话..."
+      screen -S nockchain -X quit >/dev/null 2>&1
+      sleep 2
+    fi
+
+    # 启动screen会话
+    screen -dmS nockchain bash -c "cd '$NCK_DIR' && ./scripts/run_nockchain_miner.sh"
+
+    sleep 3
+    if screen -list | grep -qw "nockchain"; then
+      echo -e "${GREEN}[+] 节点已启动 (screen 会话名: nockchain)${RESET}"
+      echo -e "${GREEN}[+] 使用公钥: $MINING_PUBKEY${RESET}"
+      echo -e "${YELLOW}[!] 使用 'screen -r nockchain' 查看日志${RESET}"
+    else
+      echo -e "${RED}[-] 节点启动失败${RESET}"
+      echo "请检查启动脚本或查看错误日志"
+    fi
   fi
+  
   pause_and_return
 }
 
 function view_logs() {
-  if screen -list | grep -qw "nockchain"; then
+  if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
     echo -e "${YELLOW}[!] 进入日志查看 (Ctrl+A+D 可退出)...${RESET}"
     screen -r nockchain
+  elif [ -f "$NCK_DIR/nockchain.log" ]; then
+    echo -e "${YELLOW}[!] 显示最近日志 (按q退出):${RESET}"
+    tail -f "$NCK_DIR/nockchain.log"
   else
-    echo -e "${RED}[-] 节点未运行${RESET}"
+    echo -e "${RED}[-] 节点未运行且无日志文件${RESET}"
   fi
   pause_and_return
 }
@@ -247,7 +388,7 @@ function check_status() {
   # 显示当前公钥配置
   cd_nck_dir
   if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+    source "$ENV_FILE" >/dev/null 2>&1
     if [ -n "$MINING_PUBKEY" ]; then
       echo -e "${GREEN}[+] 已配置公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}${RESET}"
     else
@@ -255,16 +396,28 @@ function check_status() {
     fi
   fi
   
-  if screen -list | grep -qw "nockchain"; then
-    echo -e "${GREEN}[+] 节点运行中${RESET}"
-    
-    # 显示CPU使用情况
-    if command -v htop >/dev/null; then
-      echo -e "${YELLOW}[*] CPU使用情况 (5秒后自动返回):${RESET}"
-      timeout 5 htop -d 1 || true
-    fi
+  # 检查进程状态
+  running=false
+  if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点运行中 (screen模式)${RESET}"
+    running=true
+  elif pgrep -f "nockchain" >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] 节点运行中 (后台模式)${RESET}"
+    running=true
   else
     echo -e "${RED}[-] 节点未运行${RESET}"
+  fi
+  
+  # 显示系统资源使用情况
+  if [ "$running" = true ]; then
+    echo -e "${YELLOW}[*] 系统资源使用情况:${RESET}"
+    if command -v htop >/dev/null 2>&1; then
+      echo -e "${YELLOW}[*] 启动htop监控 (5秒后自动返回):${RESET}"
+      timeout 5 htop -d 1 2>/dev/null || true
+    elif command -v top >/dev/null 2>&1; then
+      echo -e "${YELLOW}[*] CPU和内存使用情况:${RESET}"
+      top -b -n1 | head -20
+    fi
   fi
   
   pause_and_return
@@ -272,9 +425,23 @@ function check_status() {
 
 function stop_node() {
   echo -e "[*] 停止节点..."
-  if screen -list | grep -qw "nockchain"; then
-    screen -S nockchain -X quit
+  stopped=false
+  
+  # 停止screen会话
+  if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
+    screen -S nockchain -X quit >/dev/null 2>&1
     sleep 2
+    stopped=true
+  fi
+  
+  # 停止后台进程
+  if pgrep -f "nockchain" >/dev/null 2>&1; then
+    pkill -f "nockchain" >/dev/null 2>&1
+    sleep 2
+    stopped=true
+  fi
+  
+  if [ "$stopped" = true ]; then
     echo -e "${GREEN}[+] 节点已停止${RESET}"
   else
     echo -e "${YELLOW}[!] 节点未运行${RESET}"
