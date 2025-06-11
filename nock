@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# nockchain_toolbox_fixed.sh
-# 终极修复版：彻底解决 libstdc++ 链接问题
+# nockchain_toolbox.sh 终极修复版 v9.0
+# 特性：菜单交互 + 智能依赖修复 + 全发行版支持
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -75,15 +75,18 @@ rebuild_project() {
 }
 
 ###############################
-# 主菜单系统
+# 增强版菜单系统
 ###############################
 show_menu() {
     clear
     echo -e "\n========== Nockchain 终极修复工具 =========="
     echo "1) 自动修复系统依赖"
     echo "2) 强制重新编译"
-    echo "3) 验证编译环境"
-    echo "4) 退出"
+    echo "3) 配置钱包地址"
+    echo "4) 启动挖矿节点"
+    echo "5) 查看实时日志"
+    echo "6) 系统信息"
+    echo "7) 退出"
     echo -e "==========================================\n"
 }
 
@@ -95,20 +98,57 @@ validate_environment() {
     echo -e "===================\n"
 }
 
+###############################
+# 钱包管理
+###############################
+manage_wallet() {
+    read -rp "请输入新的挖矿钱包地址: " wallet
+    [[ -z "$wallet" ]] && { c_warn "钱包地址为空，已取消操作"; return; }
+    echo "WALLET=${wallet}" > "${CONFIG_FILE}"
+    c_info "钱包地址已更新并写入 ${CONFIG_FILE}"
+}
+
+###############################
+# 节点控制
+###############################
+start_mining() {
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        c_warn "未配置钱包地址，请先执行选项3"
+        return
+    fi
+    
+    local wallet=$(grep -E "^WALLET=" "${CONFIG_FILE}" 2>/dev/null | cut -d= -f2)
+    nohup ethminer -P "stratum1+tcp://${wallet}@eth.pool.example:4444" &>> "${LOG_FILE}" &
+    c_info "挖矿节点已启动，日志写入 ${LOG_FILE}"
+}
+
+view_logs() {
+    [[ -f "${LOG_FILE}" ]] || { c_warn "日志文件不存在"; return; }
+    tail -n 50 -f "${LOG_FILE}"
+}
+
+###############################
+# 主控制流程
+###############################
 main() {
+    trap 'c_err "用户中断操作，退出脚本"' INT TERM
+    
     while true; do
         show_menu
-        read -rp "请选择操作 [1-4]: " choice
+        read -rp "请输入选项 [1-7]: " choice
         case $choice in
             1) fix_system_deps ;;
             2) rebuild_project ;;
-            3) validate_environment ;;
-            4) c_info "感谢使用！"; exit 0 ;;
-            *) c_warn "无效输入，请输入数字 1-4" ;;
+            3) manage_wallet ;;
+            4) start_mining ;;
+            5) view_logs ;;
+            6) validate_environment ;;
+            7) c_info "感谢使用！"; exit 0 ;;
+            *) c_warn "无效输入，请重新选择" ;;
         esac
         read -rp "按回车返回主菜单..."
     done
 }
 
-# 执行入口
+# 脚本入口
 main "$@"
