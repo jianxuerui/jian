@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# nockchain_toolbox.sh 完整修复版 v3.0
-# 特性：自动处理CUDA/OpenCL依赖 + 修复JSONCPP弃用警告 + 智能编译配置
+# nockchain_toolbox.sh 完整修复版 v4.0
+# 适配RHEL/CentOS系统 + 自动处理CUDA/OpenCL依赖 + 智能仓库配置
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -19,55 +19,51 @@ CONFIG_FILE="${HOME}/.nockchain.conf"
 ###############################
 c_info()  { printf "\033[32m[INFO]\033[0m %s\n" "$*"; }
 c_warn()  { printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
-c_err()   { printf "\031[31m[ERR]\033[0m %s\n" "$*"; exit 1; }
+c_err()   { printf "\033[31m[ERR]\033[0m %s\n" "$*"; exit 1; }
 
 ###############################
 # 系统包管理器检测
 ###############################
 detect_pkg_mgr() {
-    if command -v apt-get >/dev/null; then
-        echo "apt"
-    elif command -v dnf >/dev/null; then
+    if command -v dnf >/dev/null; then
         echo "dnf"
     elif command -v yum >/dev/null; then
         echo "yum"
-    elif command -v apk >/dev/null; then
-        echo "apk"
     else
-        c_err "不支持的Linux发行版"
+        c_err "不支持的包管理器"
     fi
 }
 
 ###############################
-# 安装编译依赖
+# 安装编译依赖 (RHEL/CentOS专用)
 ###############################
 install_deps() {
     local pm=$(detect_pkg_mgr)
     c_info "检测到包管理器: ${pm}"
 
-    # 公共依赖
-    local common_deps=(
-        "build-essential" "cmake" "git" 
-        "libssl-dev" "pkg-config" 
-        "ocl-icd-opencl-dev" "mesa-common-dev"
-    )
+    # 启用必要仓库
+    c_info "配置EPEL和PowerTools仓库..."
+    sudo $pm install -y epel-release
+    sudo $pm config-manager --set-enabled powertools 2>/dev/null || true
+    sudo $pm makecache
 
-    # 发行版特定依赖
-    case "$pm" in
-        apt)
-            sudo apt-get update
-            sudo apt-get install -y "${common_deps[@]}" libstdc++-dev
-            ;;
-        dnf|yum)
-            sudo $pm install -y "${common_deps[@]}" libstdc++-devel
-            ;;
-        apk)
-            sudo apk add --no-cache "${common_deps[@]}" libstdc++-dev
-            ;;
-    esac
+    # 安装开发工具组
+    c_info "安装开发工具组..."
+    sudo $pm groupinstall -y "Development Tools"
 
-    # 强制链接OpenCL库
-    sudo ldconfig /usr/lib/libOpenCL* || true
+    # 安装特定依赖
+    c_info "安装编译依赖..."
+    sudo $pm install -y \
+        openssl-devel \
+        ocl-icd-devel \
+        opencl-headers \
+        mesa-libGL-devel \
+        mesa-libGLU-devel \
+        pkgconfig \
+        libstdc++-devel
+
+    # 强制更新动态库链接
+    sudo ldconfig
 }
 
 ###############################
