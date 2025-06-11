@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# nockchain_toolbox.sh 最终修复版 v5.0
-# 适配RHEL/CentOS系统 + 自动处理CUDA/OpenCL依赖 + 智能仓库配置
+# nockchain_toolbox.sh 终极修复版 v6.0
+# 集成全自动错误处理 + Git冲突解决 + 智能硬件适配
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -68,13 +68,32 @@ install_deps() {
 }
 
 ###############################
-# 源码管理
+# 源码管理（集成Git冲突解决）
 ###############################
 fetch_source() {
     mkdir -p "$(dirname "$SRC_DIR")"
     if [[ -d "$SRC_DIR/.git" ]]; then
-        c_info "更新ethminer源码..."
-        git -C "$SRC_DIR" pull --rebase
+        c_info "智能更新源码..."
+        # 自动储藏本地修改
+        if ! git -C "$SRC_DIR" diff --quiet; then
+            c_warn "检测到未提交修改，执行自动储藏..."
+            git -C "$SRC_DIR" stash push -m "auto_stash_$(date +%s)"
+        fi
+        
+        # 强制清理编译残留
+        git -C "$SRC_DIR" reset --hard HEAD
+        git -C "$SRC_DIR" clean -dfx
+        
+        # 拉取更新
+        if ! git -C "$SRC_DIR" pull --rebase; then
+            c_err "源码更新失败，请手动处理冲突后重试"
+            exit 1
+        fi
+        
+        # 恢复储藏内容（如有）
+        if git -C "$SRC_DIR" stash list | grep -q "auto_stash"; then
+            git -C "$SRC_DIR" stash pop
+        fi
     else
         c_info "克隆ethminer仓库..."
         git clone --recursive https://github.com/ethereum-mining/ethminer.git "$SRC_DIR"
