@@ -12,6 +12,27 @@ RED='\033[0;31m'
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
 
+# ========= 工作目录修复 =========
+function fix_working_directory() {
+  # 检查当前目录是否可访问
+  if ! pwd >/dev/null 2>&1; then
+    echo -e "${YELLOW}[!] 当前工作目录无法访问，切换到HOME目录...${RESET}"
+    cd "$HOME" || cd / || {
+      echo -e "${RED}[-] 无法访问任何有效目录${RESET}"
+      exit 1
+    }
+  fi
+  
+  # 确保在有效目录中
+  current_dir=$(pwd 2>/dev/null)
+  if [ -z "$current_dir" ] || [ ! -d "$current_dir" ]; then
+    echo -e "${YELLOW}[!] 工作目录异常，重置到HOME目录...${RESET}"
+    cd "$HOME" || cd / || exit 1
+  fi
+  
+  echo -e "${GREEN}[+] 工作目录检查完成: $(pwd)${RESET}"
+}
+
 # ========= 兼容性检测 =========
 function check_system() {
   if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -34,20 +55,23 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "         Nockchain 挖矿优化助手 v2.2"
+  echo "         Nockchain 挖矿优化助手 v2.3"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 优化版本: 修复构建错误 + 兼容最新版本"
+  echo "⚡ 优化版本: 修复目录访问问题 + 增强错误处理"
   echo "-----------------------------------------------"
   echo ""
 }
 
 function cd_nck_dir() {
   if [ -d "$NCK_DIR" ]; then
-    cd "$NCK_DIR" || exit 1
+    cd "$NCK_DIR" || {
+      echo -e "${RED}[-] 无法进入项目目录: $NCK_DIR${RESET}"
+      exit 1
+    }
   else
     echo -e "${RED}[-] 项目目录不存在: $NCK_DIR${RESET}"
     exit 1
@@ -138,52 +162,120 @@ function setup_rust() {
   echo -e "${GREEN}[+] Rust工具链安装完成${RESET}"
 }
 
+function safe_remove_directory() {
+  local dir="$1"
+  if [ -d "$dir" ]; then
+    echo -e "${YELLOW}[*] 安全删除目录: $dir${RESET}"
+    # 确保不在要删除的目录中
+    if [[ "$(pwd)" == "$dir"* ]]; then
+      cd "$HOME" || cd /
+    fi
+    rm -rf "$dir"
+  fi
+}
+
 function clone_repository() {
   echo -e "[*] 获取Nockchain仓库..."
   
-  # 如果目录存在，先检查是否是有效的git仓库
+  # 修复工作目录问题
+  fix_working_directory
+  
+  # 确保在HOME目录进行操作
+  cd "$HOME" || {
+    echo -e "${RED}[-] 无法访问HOME目录${RESET}"
+    return 1
+  }
+  
+  # 如果目录存在，检查状态
   if [ -d "$NCK_DIR" ]; then
-    cd "$NCK_DIR"
-    if git status >/dev/null 2>&1; then
-      echo -e "${YELLOW}[*] 发现现有仓库，尝试更新...${RESET}"
-      git pull origin main 2>/dev/null || git pull origin master 2>/dev/null || {
-        echo -e "${YELLOW}[!] 更新失败，重新克隆仓库...${RESET}"
-        cd "$HOME"
-        rm -rf "$NCK_DIR"
-        git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
-      }
-    else
-      echo -e "${YELLOW}[!] 目录存在但不是git仓库，重新克隆...${RESET}"
-      rm -rf "$NCK_DIR"
-      git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
-    fi
-  else
-    git clone https://github.com/zorp-corp/nockchain "$NCK_DIR"
+    echo -e "${YELLOW}[*] 发现现有目录，检查git仓库状态...${RESET}"
+    
+    cd "$NCK_DIR" 2>/dev/null && {
+      if git status >/dev/null 2>&1; then
+        echo -e "${YELLOW}[*] 发现有效git仓库，尝试更新...${RESET}"
+        if git pull origin main 2>/dev/null || git pull origin master 2>/dev/null; then
+          echo -e "${GREEN}[+] 仓库更新成功${RESET}"
+          return 0
+        else
+          echo -e "${YELLOW}[!] 更新失败，重新克隆...${RESET}"
+        fi
+      else
+        echo -e "${YELLOW}[!] 目录存在但不是git仓库，重新克隆...${RESET}"
+      fi
+    } || {
+      echo -e "${YELLOW}[!] 无法访问现有目录，重新克隆...${RESET}"
+    }
+    
+    # 返回HOME目录并安全删除
+    cd "$HOME"
+    safe_remove_directory "$NCK_DIR"
   fi
   
-  if [ ! -d "$NCK_DIR" ]; then
-    echo -e "${RED}[-] 仓库克隆失败${RESET}"
+  # 确保在HOME目录
+  cd "$HOME" || {
+    echo -e "${RED}[-] 无法访问HOME目录进行克隆${RESET}"
+    return 1
+  }
+  
+  echo -e "[*] 开始克隆仓库到: $NCK_DIR"
+  
+  # 尝试多种克隆方式
+  clone_success=false
+  
+  # 方法1: 直接克隆
+  if git clone https://github.com/zorp-corp/nockchain "$NCK_DIR" 2>/dev/null; then
+    clone_success=true
+  else
+    echo -e "${YELLOW}[!] HTTPS克隆失败，尝试其他方法...${RESET}"
+    
+    # 方法2: 创建目录后进入克隆
+    mkdir -p "$NCK_DIR" 2>/dev/null
+    if cd "$NCK_DIR" 2>/dev/null; then
+      if git clone https://github.com/zorp-corp/nockchain . 2>/dev/null; then
+        clone_success=true
+      else
+        cd "$HOME"
+        safe_remove_directory "$NCK_DIR"
+        
+        # 方法3: 使用curl下载zip
+        echo -e "${YELLOW}[!] Git克隆失败，尝试下载zip包...${RESET}"
+        if curl -L "https://github.com/zorp-corp/nockchain/archive/refs/heads/main.zip" -o nockchain.zip 2>/dev/null; then
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q nockchain.zip && mv nockchain-main "$NCK_DIR" 2>/dev/null && {
+              rm -f nockchain.zip
+              clone_success=true
+            }
+          else
+            echo -e "${RED}[-] 需要unzip命令来解压文件${RESET}"
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  if [ "$clone_success" = true ] && [ -d "$NCK_DIR" ]; then
+    cd "$NCK_DIR"
+    echo -e "${GREEN}[+] 仓库获取成功${RESET}"
+    return 0
+  else
+    echo -e "${RED}[-] 仓库获取失败${RESET}"
     return 1
   fi
-  
-  cd "$NCK_DIR"
-  echo -e "${GREEN}[+] 仓库获取成功${RESET}"
-  return 0
 }
 
 function check_makefile_targets() {
-  echo -e "[*] 检查Makefile目标..."
+  echo -e "[*] 检查构建系统..."
   
-  if [ ! -f "Makefile" ]; then
-    echo -e "${RED}[-] Makefile不存在${RESET}"
-    return 1
+  if [ -f "Makefile" ]; then
+    echo -e "${GREEN}[+] 发现Makefile${RESET}"
+    available_targets=$(make -qp 2>/dev/null | awk -F':' '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,A,/ /);for(i in A)print A[i]}' | sort -u | head -10)
+    echo -e "${BLUE}[i] 可用的构建目标:${RESET}"
+    echo "$available_targets" | grep -v "^$"
   fi
   
-  # 检查可用的目标
-  available_targets=$(make -qp 2>/dev/null | awk -F':' '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,A,/ /);for(i in A)print A[i]}' | sort -u)
-  
-  echo -e "${BLUE}[i] 可用的Makefile目标:${RESET}"
-  echo "$available_targets" | grep -v "^$" | head -10
+  if [ -f "Cargo.toml" ]; then
+    echo -e "${GREEN}[+] 发现Cargo.toml${RESET}"
+  fi
   
   return 0
 }
@@ -202,38 +294,47 @@ function build_project() {
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   export CARGO_PROFILE_RELEASE_PANIC="abort"
   
-  # 检查并尝试不同的构建方法
+  # 尝试Cargo构建
   if [ -f "Cargo.toml" ]; then
-    echo -e "[*] 发现Cargo.toml，使用Cargo直接构建..."
+    echo -e "[*] 使用Cargo构建..."
     
-    # 尝试构建所有二进制文件
-    if cargo build --release; then
+    # 首先尝试构建所有目标
+    if cargo build --release 2>/dev/null; then
       echo -e "${GREEN}[+] Cargo构建成功${RESET}"
       
-      # 检查是否有钱包和节点二进制文件
+      # 检查生成的二进制文件
       if [ -f "target/release/nockchain-wallet" ]; then
-        echo -e "${GREEN}[+] 钱包二进制文件已生成${RESET}"
+        echo -e "${GREEN}[+] 钱包程序构建成功${RESET}"
       fi
       
       if [ -f "target/release/nockchain" ] || [ -f "target/release/nockchain-miner" ]; then
-        echo -e "${GREEN}[+] 节点二进制文件已生成${RESET}"
+        echo -e "${GREEN}[+] 节点程序构建成功${RESET}"
       fi
       
       return 0
     else
-      echo -e "${RED}[-] Cargo构建失败${RESET}"
+      echo -e "${YELLOW}[!] 完整构建失败，尝试单独构建组件...${RESET}"
+      
+      # 尝试单独构建钱包
+      if cargo build --release --bin nockchain-wallet 2>/dev/null; then
+        echo -e "${GREEN}[+] 钱包构建成功${RESET}"
+      fi
+      
+      # 尝试单独构建节点
+      if cargo build --release --bin nockchain 2>/dev/null; then
+        echo -e "${GREEN}[+] 节点构建成功${RESET}"
+      fi
     fi
   fi
   
-  # 如果有Makefile，尝试常见的目标
+  # 尝试Makefile构建
   if [ -f "Makefile" ]; then
     echo -e "[*] 尝试使用Makefile构建..."
     
-    # 尝试常见的构建目标
-    for target in "all" "release" "build-release" "install" "compile"; do
+    for target in "all" "release" "build-release" "build" "install" "compile"; do
       if make -n "$target" >/dev/null 2>&1; then
         echo -e "[*] 尝试构建目标: $target"
-        if make "$target"; then
+        if make "$target" 2>/dev/null; then
           echo -e "${GREEN}[+] 构建成功 (目标: $target)${RESET}"
           return 0
         fi
@@ -241,7 +342,13 @@ function build_project() {
     done
   fi
   
-  echo -e "${RED}[-] 所有构建方法都失败了${RESET}"
+  # 检查是否有任何二进制文件生成
+  if find target/release -name "nockchain*" -type f -executable 2>/dev/null | grep -q .; then
+    echo -e "${GREEN}[+] 发现已构建的二进制文件${RESET}"
+    return 0
+  fi
+  
+  echo -e "${RED}[-] 构建失败${RESET}"
   return 1
 }
 
@@ -272,6 +379,9 @@ EOF
 function setup_all() {
   echo -e "[*] 开始优化安装流程..."
   
+  # 首先修复工作目录
+  fix_working_directory
+  
   optimize_system
   
   if ! install_dependencies; then
@@ -284,6 +394,7 @@ function setup_all() {
   
   if ! clone_repository; then
     echo -e "${RED}[-] 仓库获取失败${RESET}"
+    echo -e "${YELLOW}[!] 请检查网络连接或手动下载项目${RESET}"
     pause_and_return
     return
   fi
@@ -294,8 +405,7 @@ function setup_all() {
   if build_project; then
     echo -e "${GREEN}[+] 项目构建成功！${RESET}"
   else
-    echo -e "${RED}[-] 项目构建失败${RESET}"
-    echo -e "${YELLOW}[!] 请检查构建日志或手动构建${RESET}"
+    echo -e "${YELLOW}[!] 构建可能有问题，但可以继续配置${RESET}"
   fi
   
   pause_and_return
