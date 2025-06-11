@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# nockchain_toolbox.sh 语法修复版 v7.0
-# 集成全自动错误处理 + Git冲突解决 + 智能硬件适配
+# nockchain_toolbox.sh 终极修复版 v8.0
+# 集成libstdc++修复 + Git冲突处理 + 智能硬件适配
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -31,47 +31,103 @@ c_err() {
 }
 
 ###############################
-# 系统包管理器检测
+# 系统检测
 ###############################
 detect_pkg_mgr() {
     if command -v dnf >/dev/null 2>&1; then
         echo "dnf"
     elif command -v yum >/dev/null 2>&1; then
         echo "yum"
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "apt"
     else
         c_err "不支持的包管理器"
     fi
 }
 
 ###############################
-# 安装编译依赖 (RHEL/CentOS专用)
+# 修复libstdc++链接问题的核心函数
+###############################
+fix_libstdc() {
+    local pm
+    pm=$(detect_pkg_mgr)
+    
+    c_info "修复libstdc++链接问题..."
+    
+    case "$pm" in
+        dnf|yum)
+            # 安装C++开发包
+            sudo "$pm" install -y gcc-c++ libstdc++-devel libstdc++-static
+            
+            # 检查并创建符号链接
+            if [[ ! -f /usr/lib64/libstdc++.so ]] && [[ -f /usr/lib64/libstdc++.so.6 ]]; then
+                sudo ln -sf /usr/lib64/libstdc++.so.6 /usr/lib64/libstdc++.so
+            fi
+            ;;
+        apt)
+            sudo apt-get update
+            sudo apt-get install -y g++ libstdc++-dev libstdc++-static
+            ;;
+    esac
+    
+    # 更新动态库缓存
+    sudo ldconfig
+    
+    # 验证修复
+    if ldconfig -p | grep -q libstdc++; then
+        c_info "libstdc++修复成功"
+    else
+        c_err "libstdc++修复失败"
+    fi
+}
+
+###############################
+# 安装编译依赖
 ###############################
 install_deps() {
     local pm
     pm=$(detect_pkg_mgr)
     c_info "检测到包管理器: ${pm}"
 
+    # 先修复libstdc++问题
+    fix_libstdc
+
     # 启用必要仓库
-    c_info "配置EPEL和PowerTools仓库..."
-    sudo "$pm" install -y epel-release
-    sudo "$pm" config-manager --set-enabled crb 2>/dev/null || true
-    sudo "$pm" makecache
+    if [[ "$pm" =~ ^(dnf|yum)$ ]]; then
+        c_info "配置EPEL和CRB仓库..."
+        sudo "$pm" install -y epel-release
+        sudo "$pm" config-manager --set-enabled crb 2>/dev/null || \
+        sudo "$pm" config-manager --set-enabled powertools 2>/dev/null || true
+        sudo "$pm" makecache
+    fi
 
     # 安装开发工具组
     c_info "安装开发工具组..."
-    sudo "$pm" groupinstall -y "Development Tools"
-
-    # 安装特定依赖
-    c_info "安装编译依赖..."
-    sudo "$pm" install -y \
-        openssl-devel \
-        ocl-icd-devel \
-        opencl-headers \
-        mesa-libGL-devel \
-        mesa-libGLU-devel \
-        pkgconfig \
-        libstdc++-devel \
-        gcc-c++
+    case "$pm" in
+        dnf|yum)
+            sudo "$pm" groupinstall -y "Development Tools"
+            sudo "$pm" install -y \
+                openssl-devel \
+                ocl-icd-devel \
+                opencl-headers \
+                mesa-libGL-devel \
+                mesa-libGLU-devel \
+                pkgconfig \
+                cmake \
+                git
+            ;;
+        apt)
+            sudo apt-get install -y \
+                build-essential \
+                cmake \
+                git \
+                libssl-dev \
+                ocl-icd-opencl-dev \
+                opencl-headers \
+                mesa-common-dev \
+                pkg-config
+            ;;
+    esac
 
     # 强制更新动态库链接
     sudo ldconfig
@@ -141,7 +197,7 @@ detect_cuda() {
 }
 
 ###############################
-# 编译安装
+# 编译安装（增强版）
 ###############################
 build_ethminer() {
     local use_cuda
@@ -149,19 +205,31 @@ build_ethminer() {
     c_info "CUDA支持状态: ${use_cuda}"
 
     cd "$SRC_DIR"
-    mkdir -p build && cd build
+    
+    # 清理旧构建
+    rm -rf build
+    mkdir build && cd build
 
+    # 配置CMake（增强链接参数）
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_COMPILER=g++ \
         -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath=/usr/lib64 -L/usr/lib64" \
         -DETHASHCUDA="$use_cuda" \
         -DUSE_SYS_OPENCL=ON
 
+    # 编译
     make -j"$JOBS"
-    sudo make install
     
-    c_info "ethminer 编译安装完成"
+    # 验证可执行文件
+    if [[ -x "./ethminer/ethminer" ]]; then
+        c_info "编译成功，正在安装..."
+        sudo make install
+        c_info "ethminer 编译安装完成"
+    else
+        c_err "编译失败，未生成可执行文件"
+    fi
 }
 
 ###############################
@@ -198,6 +266,12 @@ start_node() {
         return 0
     fi
 
+    # 检查ethminer是否已安装
+    if ! command -v ethminer >/dev/null 2>&1; then
+        c_warn "ethminer未安装，请先执行选项1"
+        return 0
+    fi
+
     nohup ethminer -P "stratum1+tcp://${wallet}@eth.pool.example:4444" &>> "$LOG_FILE" &
     c_info "节点已启动 | 日志: tail -f $LOG_FILE"
 }
@@ -212,6 +286,26 @@ view_logs() {
 }
 
 ###############################
+# 系统信息显示
+###############################
+show_system_info() {
+    c_info "========== 系统信息 =========="
+    echo "主机名: $(hostname)"
+    echo "系统: $(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)"
+    echo "CPU核心: $(nproc)"
+    echo "内存: $(free -h | awk '/^Mem:/ {print $2}')"
+    echo "CUDA: $(detect_cuda)"
+    
+    if command -v ethminer >/dev/null 2>&1; then
+        echo "ethminer: $(ethminer --version 2>&1 | head -n1 || echo '已安装')"
+    else
+        echo "ethminer: 未安装"
+    fi
+    
+    read -rp "按回车返回主菜单..."
+}
+
+###############################
 # 用户界面
 ###############################
 show_menu() {
@@ -221,7 +315,8 @@ show_menu() {
     echo "2) 配置钱包地址"
     echo "3) 启动挖矿节点"
     echo "4) 查看实时日志"
-    echo "5) 退出"
+    echo "5) 系统信息"
+    echo "6) 退出"
     echo -e "=======================================\n"
 }
 
@@ -229,9 +324,12 @@ show_menu() {
 # 主循环
 ###############################
 main() {
+    # 错误捕获
+    trap 'c_err "脚本执行被中断"' INT TERM
+    
     while true; do
         show_menu
-        read -rp "请选择操作 [1-5]: " choice
+        read -rp "请选择操作 [1-6]: " choice
         
         case $choice in
             1)
@@ -250,11 +348,14 @@ main() {
                 view_logs
                 ;;
             5)
-                c_info "再见！"
+                show_system_info
+                ;;
+            6)
+                c_info "感谢使用！"
                 exit 0
                 ;;
             *)
-                c_warn "无效选项"
+                c_warn "无效选项，请重新选择"
                 ;;
         esac
         
