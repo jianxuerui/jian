@@ -13,6 +13,18 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 
+# ========= 系统初始化检查 =========
+function system_init() {
+  # 修复locale警告
+  export LC_ALL=C
+  # 创建必要目录
+  sudo mkdir -p /etc/docker
+  sudo chmod 755 /etc/docker
+  mkdir -p "$NCK_DIR"
+  touch "$NCK_DIR/container.log"
+  chmod 644 "$NCK_DIR/container.log"
+}
+
 # ========= 内核优化预处理 =========
 function kernel_tuning() {
   echo -e "${CYAN}[*] 应用内核优化参数...${RESET}"
@@ -131,6 +143,7 @@ function main_menu() {
   read -p "请选择操作: " choice
   case $choice in
     1) 
+      system_init
       kernel_tuning
       install_docker
       config_wizard 
@@ -147,10 +160,6 @@ function main_menu() {
 }
 
 # ========= 初始化执行 =========
-mkdir -p "$NCK_DIR"
-touch "$NCK_DIR/container.log"
-chmod 644 "$NCK_DIR/container.log"
-
 trap "echo -e '${RED}强制退出!${RESET}'" SIGINT
 
 while true; do
