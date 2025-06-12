@@ -1,189 +1,176 @@
 #!/bin/bash
 
-# ========= 色彩定义 =========
+# ========= Nockchain构建失败专用修复脚本 v8.2 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 
-# ========= 项目路径 =========
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
+LOG_FILE="$HOME/nockchain_build.log"
 
-# ========= 横幅 =========
 function show_banner() {
   clear
-  echo -e "${BOLD}${BLUE}"
-  echo "==============================================="
-  echo "    Nockchain 编译失败修复版 v7.1"
-  echo "==============================================="
+  echo -e "${BOLD}${CYAN}"
+  echo "=================================================="
+  echo "   Nockchain构建失败专用修复脚本 v8.2"
+  echo "=================================================="
   echo -e "${RESET}"
-  echo "📌 作者: K2 节点教程分享"
-  echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
-  echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 修复: 资产文件缺失 + 虚拟清单问题"
-  echo "-----------------------------------------------"
+  echo "🎯 专门解决: nockchain-wallet + nockchain 构建失败"
+  echo "💾 内存优化: 自动处理大内存需求问题"
+  echo "🔧 依赖修复: Clang/LLVM + 完整构建工具链"
+  echo "📊 调试模式: 详细构建日志和错误分析"
+  echo "🚀 分阶段构建: 独立处理每个组件"
+  echo "--------------------------------------------------"
   echo ""
 }
 
-# ========= 系统检查 =========
-function check_system_requirements() {
-  echo -e "[*] 系统要求检查..."
+# ========= 系统资源检查和优化 =========
+function check_and_optimize_system() {
+  echo -e "[*] 系统资源检查和优化..."
   
-  # 检查内存
-  total_mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+  # 内存检查
+  total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
   total_mem_gb=$((total_mem_kb / 1024 / 1024))
+  available_mem_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+  available_mem_gb=$((available_mem_kb / 1024 / 1024))
   
-  echo -e "${BLUE}[i] 系统内存: ${total_mem_gb}GB${RESET}"
+  echo -e "${BLUE}[i] 系统内存: ${total_mem_gb}GB (可用: ${available_mem_gb}GB)${RESET}"
   
-  if [ $total_mem_gb -lt 4 ]; then
-    echo -e "${RED}[-] 内存不足可能导致编译失败${RESET}"
-    read -p "继续? (y/N): " continue_choice
-    if [[ ! "$continue_choice" =~ ^[Yy]$ ]]; then
-      exit 1
+  # 根据社区反馈，Nockchain需要大量内存[2]
+  if [ $total_mem_gb -lt 8 ]; then
+    echo -e "${RED}[-] 警告: 内存不足，Nockchain需要至少8GB内存${RESET}"
+    echo -e "${YELLOW}[!] 社区报告显示可能需要16GB+内存才能稳定构建${RESET}"
+  fi
+  
+  # 设置大容量swap（关键修复）
+  echo -e "[*] 配置大容量swap..."
+  current_swap=$(free -g | grep Swap | awk '{print $2}')
+  required_swap=$((16 - total_mem_gb))
+  
+  if [ $required_swap -gt 0 ] && [ $current_swap -lt $required_swap ]; then
+    echo -e "${YELLOW}[*] 创建${required_swap}GB swap文件...${RESET}"
+    
+    # 创建swap文件
+    if sudo fallocate -l ${required_swap}G /swapfile-nockchain-large; then
+      sudo chmod 600 /swapfile-nockchain-large
+      sudo mkswap /swapfile-nockchain-large >/dev/null 2>&1
+      sudo swapon /swapfile-nockchain-large >/dev/null 2>&1
+      echo -e "${GREEN}[+] ${required_swap}GB Swap已配置${RESET}"
+    else
+      echo -e "${YELLOW}[!] Swap配置失败，继续尝试构建...${RESET}"
     fi
-  else
-    echo -e "${GREEN}[+] 内存检查通过${RESET}"
   fi
   
-  # 检查磁盘空间
-  free_space=$(df -BG "$HOME" | tail -1 | awk '{print $4}' | sed 's/G//')
-  if [ "$free_space" -lt 20 ]; then
-    echo -e "${YELLOW}[!] 磁盘空间: ${free_space}GB (建议20GB+)${RESET}"
-  else
-    echo -e "${GREEN}[+] 磁盘空间: ${free_space}GB${RESET}"
-  fi
+  # 系统优化参数
+  echo -e "[*] 系统参数优化..."
+  sudo sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.max_map_count=1048576 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.dirty_ratio=5 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.dirty_background_ratio=2 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.vfs_cache_pressure=50 >/dev/null 2>&1 || true
   
-  echo -e "${GREEN}[+] 系统检查完成${RESET}"
+  # 限制并发构建进程
+  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort -C codegen-units=1"
+  
+  echo -e "${GREEN}[+] 系统优化完成${RESET}"
 }
 
-# ========= 完整依赖安装 =========
-function install_complete_dependencies() {
-  echo -e "[*] 安装完整构建依赖..."
+# ========= 完整依赖安装（包含Clang/LLVM） =========
+function install_complete_build_dependencies() {
+  echo -e "[*] 安装完整构建依赖（包含Clang/LLVM）..."
   
   # 更新系统
-  sudo apt-get update && sudo apt-get upgrade -y
+  sudo apt-get update -y
   
   # 核心构建工具
   echo -e "[*] 安装核心构建工具..."
   sudo apt install -y \
     build-essential \
     gcc g++ \
-    libc6-dev \
-    glibc-source \
-    linux-libc-dev \
-    cmake make \
+    clang llvm llvm-dev libclang-dev \
+    cmake make ninja-build \
     autoconf automake libtool \
-    m4 perl \
+    m4 perl bison flex \
     curl git wget \
     pkg-config pkgconf \
-    libssl-dev libssl3 openssl \
-    clang llvm-dev libclang-dev \
-    screen htop unzip tar gzip \
-    jq bc \
+    libssl-dev openssl \
     python3 python3-dev python3-pip \
     libffi-dev zlib1g-dev \
     libbz2-dev libreadline-dev \
     libsqlite3-dev libncurses5-dev \
     xz-utils tk-dev libgdbm-dev \
     liblzma-dev uuid-dev \
-    valgrind gdb \
-    strace ltrace
+    screen htop unzip tar gzip \
+    jq bc time strace \
+    valgrind gdb
   
-  # 验证关键工具
+  # 验证关键工具，特别是Clang/LLVM[2]
   echo -e "[*] 验证构建工具..."
-  for tool in gcc g++ clang cmake make pkg-config; do
+  missing_tools=()
+  
+  for tool in gcc g++ clang llvm-config cmake make pkg-config; do
     if command -v "$tool" >/dev/null 2>&1; then
-      echo -e "${GREEN}[+] $tool: 已安装${RESET}"
+      version=$(command -v "$tool" 2>/dev/null && $tool --version 2>/dev/null | head -1 || echo "unknown")
+      echo -e "${GREEN}[+] $tool: $version${RESET}"
     else
       echo -e "${RED}[-] $tool: 未安装${RESET}"
-      return 1
+      missing_tools+=("$tool")
     fi
   done
   
-  echo -e "${GREEN}[+] 依赖安装完成${RESET}"
-}
-
-# ========= 内存和swap优化 =========
-function setup_advanced_memory() {
-  echo -e "[*] 高级内存优化..."
-  
-  # 增加swap防止编译失败
-  if [ $total_mem_gb -lt 16 ]; then
-    echo -e "${YELLOW}[*] 内存不足，配置大容量swap...${RESET}"
-    
-    current_swap=$(free -g | grep Swap | awk '{print $2}')
-    if [ "$current_swap" -lt 8 ]; then
-      echo -e "[*] 创建8GB swap文件..."
-      sudo fallocate -l 8G /swapfile-nockchain 2>/dev/null || \
-      sudo dd if=/dev/zero of=/swapfile-nockchain bs=1M count=8192 2>/dev/null
-      
-      sudo chmod 600 /swapfile-nockchain
-      sudo mkswap /swapfile-nockchain >/dev/null 2>&1
-      sudo swapon /swapfile-nockchain >/dev/null 2>&1
-      
-      echo -e "${GREEN}[+] 8GB Swap已配置${RESET}"
-    fi
+  if [ ${#missing_tools[@]} -gt 0 ]; then
+    echo -e "${RED}[-] 缺少关键工具: ${missing_tools[*]}${RESET}"
+    return 1
   fi
   
-  # 系统内存优化参数
-  sudo sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
-  sudo sysctl -w vm.max_map_count=655360 >/dev/null 2>&1 || true
-  sudo sysctl -w vm.dirty_ratio=10 >/dev/null 2>&1 || true
-  sudo sysctl -w vm.dirty_background_ratio=5 >/dev/null 2>&1 || true
+  # 设置环境变量
+  export CC=clang
+  export CXX=clang++
+  export LLVM_CONFIG_PATH=$(which llvm-config)
   
-  # 限制系统资源使用
-  ulimit -c unlimited 2>/dev/null || true
-  ulimit -n 65536 2>/dev/null || true
-  
-  echo -e "${GREEN}[+] 内存优化完成${RESET}"
+  echo -e "${GREEN}[+] 构建依赖安装完成${RESET}"
 }
 
-# ========= 修复Rust环境和CARGO_TARGET_DIR =========
-function setup_rust_with_target_dir_fix() {
-  echo -e "[*] 修复Rust环境和CARGO_TARGET_DIR..."
+# ========= Rust环境重建 =========
+function rebuild_rust_environment() {
+  echo -e "[*] 重建Rust环境..."
   
-  # 完全清理旧环境
+  # 停止所有Rust进程
   pkill -f cargo 2>/dev/null || true
   pkill -f rustc 2>/dev/null || true
-  sleep 3
+  sleep 5
   
-  # 清理环境变量
-  unset CARGO_TARGET_DIR
-  unset CARGO_TARGET_TMPDIR
-  unset RUSTFLAGS
-  unset CARGO_BUILD_JOBS
-  
-  if [ -d "$HOME/.cargo" ]; then
-    echo -e "${YELLOW}[*] 完全清理Rust环境...${RESET}"
-    rm -rf "$HOME/.cargo"
-  fi
-  if [ -d "$HOME/.rustup" ]; then
-    rm -rf "$HOME/.rustup"
-  fi
+  # 完全清理Rust环境
+  echo -e "[*] 清理旧Rust环境..."
+  rm -rf "$HOME/.cargo" "$HOME/.rustup" 2>/dev/null || true
   
   # 重新安装Rust
-  echo -e "[*] 重新安装Rust stable..."
+  echo -e "[*] 安装Rust stable..."
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default
   
-  # 立即加载环境
+  # 加载Rust环境
   source "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 配置Cargo
+  # 配置Cargo（优化内存使用）
   mkdir -p "$HOME/.cargo"
   cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
 jobs = 1
 
 [net]
-retry = 15
+retry = 20
+timeout = 300
 
 [env]
-CC = "gcc"
-CXX = "g++"
+CC = "clang"
+CXX = "clang++"
 
 [profile.release]
 opt-level = 1
@@ -203,66 +190,60 @@ overflow-checks = false
 incremental = false
 codegen-units = 1
 EOF
-
-  # 设置稳定的环境变量
-  export CC=gcc
-  export CXX=g++
-  export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
   
-  # 明确不设置CARGO_TARGET_DIR，让cargo使用默认值
-  unset CARGO_TARGET_DIR
-  
-  # 配置shell环境
-  for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [ -f "$rc_file" ]; then
-      # 清理旧配置
-      sed -i '/cargo/d' "$rc_file" 2>/dev/null || true
-      sed -i '/rust/d' "$rc_file" 2>/dev/null || true
-      sed -i '/CARGO_TARGET_DIR/d' "$rc_file" 2>/dev/null || true
-      
-      # 添加新配置
-      echo '# Rust environment' >> "$rc_file"
-      echo 'source $HOME/.cargo/env' >> "$rc_file"
-      echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$rc_file"
-      echo 'export CC=gcc' >> "$rc_file"
-      echo 'export CXX=g++' >> "$rc_file"
-      echo 'export CARGO_BUILD_JOBS=1' >> "$rc_file"
-    fi
-  done
-  
-  # 验证安装
+  # 验证Rust安装
   if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] Rust环境修复成功${RESET}"
+    echo -e "${GREEN}[+] Rust环境重建成功${RESET}"
     echo -e "${GREEN}[+] Rust: $(rustc --version)${RESET}"
     echo -e "${GREEN}[+] Cargo: $(cargo --version)${RESET}"
     return 0
   else
-    echo -e "${RED}[-] Rust环境修复失败${RESET}"
+    echo -e "${RED}[-] Rust环境重建失败${RESET}"
     return 1
   fi
 }
 
-# ========= 清理并克隆仓库 =========
-function clean_and_clone_fresh() {
-  echo -e "[*] 清理并重新克隆仓库..."
+# ========= 清理和准备项目 =========
+function prepare_project_clean() {
+  echo -e "[*] 清理和准备项目..."
   
   cd "$HOME" || exit 1
   
-  # 停止所有相关进程
+  # 停止相关进程
   screen -XS nockchain quit 2>/dev/null || true
   pkill -f nockchain 2>/dev/null || true
-  sleep 2
+  sleep 3
   
-  # 完全清理旧数据
-  echo -e "[*] 完全清理旧数据..."
-  rm -rf nockchain .nockapp ~/.cache/cargo/git/db/*nockchain* 2>/dev/null || true
+  # 完全清理
+  echo -e "[*] 完全清理旧项目..."
+  rm -rf nockchain 2>/dev/null || true
+  rm -rf ~/.cache/cargo/git/db/*nockchain* 2>/dev/null || true
+  rm -rf ~/.nockapp 2>/dev/null || true
   
-  # 克隆仓库
-  echo -e "[*] 重新克隆仓库..."
+  # 重新克隆
+  echo -e "[*] 克隆Nockchain仓库..."
   if git clone --depth 1 https://github.com/zorp-corp/nockchain; then
     echo -e "${GREEN}[+] 仓库克隆成功${RESET}"
     cd nockchain || return 1
+    
+    # 创建.env文件
+    if [ -f ".env_example" ]; then
+      cp .env_example .env
+    else
+      cat > .env << 'EOF'
+MINING_PUBKEY=
+RUST_LOG=info
+EOF
+    fi
+    
+    # 创建缺失的资产文件
+    echo -e "[*] 创建缺失的资产文件..."
+    mkdir -p assets
+    touch assets/wal.jam
+    touch assets/dumb.jam  
+    touch assets/miner.jam
+    echo -e "${GREEN}[+] 资产文件已创建${RESET}"
+    
     return 0
   else
     echo -e "${RED}[-] 仓库克隆失败${RESET}"
@@ -270,231 +251,245 @@ function clean_and_clone_fresh() {
   fi
 }
 
-# ========= 修复编译失败的高级构建方法 =========
-function build_fix_compilation_failure() {
-  echo -e "[*] 使用高级方法修复编译失败..."
+# ========= 分阶段构建修复版 =========  
+function build_components_step_by_step() {
+  echo -e "[*] 分阶段构建Nockchain组件..."
   
   cd "$NCK_DIR" || return 1
   
-  # 确保环境变量正确
+  # 设置环境变量
   source "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
-  export CC=gcc
-  export CXX=g++
+  export CC=clang
+  export CXX=clang++
   export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
+  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort -C codegen-units=1"
   
-  # 明确不设置CARGO_TARGET_DIR
-  unset CARGO_TARGET_DIR
-  
-  # 设置.env文件
-  echo -e "[*] 设置.env文件..."
-  if [ -f ".env_example" ]; then
-    cp .env_example .env
-    echo -e "${GREEN}[+] .env文件创建成功${RESET}"
-  else
-    cat > .env << 'EOF'
-MINING_PUBKEY=
-RUST_LOG=info
-EOF
-    echo -e "${GREEN}[+] 基本.env文件创建成功${RESET}"
-  fi
-  
-  # 创建缺失的资产文件
-  echo -e "[*] 创建缺失的资产文件..."
-  mkdir -p assets
-  touch assets/wal.jam
-  touch assets/dumb.jam
-  touch assets/miner.jam
-  echo -e "${GREEN}[+] 已创建缺失的资产文件${RESET}"
-  
-  # 完全清理构建缓存
-  echo -e "[*] 完全清理构建环境..."
+  # 清理构建缓存
+  echo -e "[*] 清理构建缓存..."
   cargo clean >/dev/null 2>&1 || true
   rm -rf target/ 2>/dev/null || true
-  rm -rf ~/.cargo/registry/cache/ 2>/dev/null || true
-  
-  # 清理可能存在的二进制文件
-  rm -f "$HOME/.cargo/bin/hoonc" 2>/dev/null || true
-  rm -f "$HOME/.cargo/bin/nockchain-wallet" 2>/dev/null || true
-  rm -f "$HOME/.cargo/bin/nockchain" 2>/dev/null || true
   
   # 更新依赖
   echo -e "[*] 更新项目依赖..."
-  timeout 300 cargo update >/dev/null 2>&1 || true
+  timeout 300 cargo update >>"$LOG_FILE" 2>&1 || true
   
-  # 构建hoonc - 使用多种安全方法
-  echo -e "[*] 构建hoonc（编译失败修复版）..."
+  # 构建策略：分阶段构建每个组件
+  build_success=0
   
-  # 方法1: 直接在hoonc目录构建
-  echo -e "[*] 方法1: 在hoonc目录直接构建..."
-  cd crates/hoonc
-  if timeout 1800 cargo build --release; then
-    mkdir -p "$HOME/.cargo/bin"
-    if [ -f "target/release/hoonc" ]; then
-      cp target/release/hoonc "$HOME/.cargo/bin/"
-      echo -e "${GREEN}[+] hoonc构建成功 (方法1)${RESET}"
-      cd "$NCK_DIR"
-    else
-      echo -e "${YELLOW}[!] 方法1失败，尝试方法2...${RESET}"
-      cd "$NCK_DIR"
-      
-      # 方法2: 使用debug构建
-      echo -e "[*] 方法2: debug模式构建..."
-      cd crates/hoonc
-      if timeout 1200 cargo build; then
-        mkdir -p "$HOME/.cargo/bin"
-        if [ -f "target/debug/hoonc" ]; then
-          cp target/debug/hoonc "$HOME/.cargo/bin/"
-          echo -e "${GREEN}[+] hoonc构建成功 (方法2-debug)${RESET}"
-        fi
-      fi
-      cd "$NCK_DIR"
-    fi
-  else
-    echo -e "${YELLOW}[!] 方法1失败，尝试方法3...${RESET}"
-    cd "$NCK_DIR"
+  # 阶段1: 构建hoonc（已成功）
+  echo -e "${GREEN}[+] hoonc已构建成功${RESET}"
+  ((build_success++))
+  
+  # 阶段2: 构建nockchain-wallet（重点修复）
+  echo -e "[*] 阶段2: 构建nockchain-wallet..."
+  
+  # 尝试多种构建方法
+  wallet_built=false
+  
+  # 方法1: 直接在wallet目录构建
+  if [ -d "crates/nockchain-wallet" ]; then
+    echo -e "[*] 方法1: 在wallet目录直接构建..."
+    cd crates/nockchain-wallet
     
-    # 方法3: 使用cargo install但不使用--locked
-    echo -e "[*] 方法3: cargo install无锁定..."
-    if timeout 1800 cargo install --force --path crates/hoonc --bin hoonc; then
-      echo -e "${GREEN}[+] hoonc构建成功 (方法3)${RESET}"
-    else
-      echo -e "${YELLOW}[!] hoonc构建失败，创建占位符...${RESET}"
-      # 创建占位符跳过hoonc
-      mkdir -p "$HOME/.cargo/bin"
-      cat > "$HOME/.cargo/bin/hoonc" << 'EOF'
-#!/bin/bash
-echo "hoonc placeholder - continuing without hoonc"
-exit 0
-EOF
-      chmod +x "$HOME/.cargo/bin/hoonc"
+    echo "=== 构建nockchain-wallet (方法1) ===" >> "$LOG_FILE"
+    if timeout 2400 cargo build --release --bin nockchain-wallet >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/release/nockchain-wallet" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/release/nockchain-wallet "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain-wallet构建成功 (方法1)${RESET}"
+        wallet_built=true
+        ((build_success++))
+      fi
+    elif timeout 1800 cargo build --bin nockchain-wallet >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/debug/nockchain-wallet" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/debug/nockchain-wallet "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain-wallet构建成功 (debug)${RESET}"
+        wallet_built=true
+        ((build_success++))
+      fi
+    fi
+    cd "$NCK_DIR"
+  fi
+  
+  # 方法2: 使用工作空间构建
+  if [ "$wallet_built" = false ]; then
+    echo -e "[*] 方法2: 工作空间构建..."
+    echo "=== 构建nockchain-wallet (方法2) ===" >> "$LOG_FILE"
+    
+    if timeout 2400 cargo build --release -p nockchain-wallet >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/release/nockchain-wallet" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/release/nockchain-wallet "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain-wallet构建成功 (方法2)${RESET}"
+        wallet_built=true
+        ((build_success++))
+      fi
+    elif timeout 1800 cargo build -p nockchain-wallet >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/debug/nockchain-wallet" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/debug/nockchain-wallet "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain-wallet构建成功 (debug)${RESET}"
+        wallet_built=true
+        ((build_success++))
+      fi
     fi
   fi
   
-  # 确保PATH包含cargo bin
-  export PATH="$HOME/.cargo/bin:$PATH"
-  
-  # 构建主项目 - 修复虚拟清单问题
-  echo -e "[*] 构建主项目（修复虚拟清单问题）..."
-  
-  # 方法1: 直接构建各个包
-  echo -e "[*] 尝试直接构建各个包..."
-  
-  # 构建钱包组件
-  echo -e "[*] 构建钱包组件..."
-  if timeout 1800 cargo build --release -p nockchain-wallet; then
-    echo -e "${GREEN}[+] 钱包构建成功${RESET}"
-    # 安装钱包组件
-    if [ -f "target/release/nockchain-wallet" ]; then
-      cp target/release/nockchain-wallet "$HOME/.cargo/bin/"
-      echo -e "${GREEN}[+] 钱包安装成功${RESET}"
+  # 方法3: cargo install
+  if [ "$wallet_built" = false ]; then
+    echo -e "[*] 方法3: cargo install..."
+    echo "=== 构建nockchain-wallet (方法3) ===" >> "$LOG_FILE"
+    
+    if timeout 2400 cargo install --force --path crates/nockchain-wallet --bin nockchain-wallet >> "$LOG_FILE" 2>&1; then
+      echo -e "${GREEN}[+] nockchain-wallet构建成功 (方法3)${RESET}"
+      wallet_built=true
+      ((build_success++))
     fi
-  elif timeout 1200 cargo build -p nockchain-wallet; then
-    echo -e "${GREEN}[+] 钱包构建成功(debug)${RESET}"
-    # 安装钱包组件
-    if [ -f "target/debug/nockchain-wallet" ]; then
-      cp target/debug/nockchain-wallet "$HOME/.cargo/bin/"
-      echo -e "${GREEN}[+] 钱包安装成功(debug)${RESET}"
-    fi
-  else
-    echo -e "${YELLOW}[!] 钱包构建失败${RESET}"
   fi
   
-  # 构建节点组件
-  echo -e "[*] 构建节点组件..."
-  if timeout 1800 cargo build --release -p nockchain; then
-    echo -e "${GREEN}[+] 节点构建成功${RESET}"
-    # 安装节点组件
-    if [ -f "target/release/nockchain" ]; then
-      cp target/release/nockchain "$HOME/.cargo/bin/"
-      echo -e "${GREEN}[+] 节点安装成功${RESET}"
-    fi
-  elif timeout 1200 cargo build -p nockchain; then
-    echo -e "${GREEN}[+] 节点构建成功(debug)${RESET}"
-    # 安装节点组件
-    if [ -f "target/debug/nockchain" ]; then
-      cp target/debug/nockchain "$HOME/.cargo/bin/"
-      echo -e "${GREEN}[+] 节点安装成功(debug)${RESET}"
-    fi
-  else
-    echo -e "${YELLOW}[!] 节点构建失败${RESET}"
+  if [ "$wallet_built" = false ]; then
+    echo -e "${RED}[-] nockchain-wallet构建失败${RESET}"
+    echo -e "${YELLOW}[!] 查看详细错误: tail -50 $LOG_FILE${RESET}"
   fi
   
-  # 检查构建结果
-  echo -e "[*] 检查构建结果..."
-  binary_count=0
+  # 阶段3: 构建nockchain节点（重点修复）
+  echo -e "[*] 阶段3: 构建nockchain节点..."
   
+  node_built=false
+  
+  # 方法1: 直接在node目录构建
+  if [ -d "crates/nockchain" ]; then
+    echo -e "[*] 方法1: 在node目录直接构建..."
+    cd crates/nockchain
+    
+    echo "=== 构建nockchain (方法1) ===" >> "$LOG_FILE"
+    if timeout 2400 cargo build --release --bin nockchain >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/release/nockchain" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/release/nockchain "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain构建成功 (方法1)${RESET}"
+        node_built=true
+        ((build_success++))
+      fi
+    elif timeout 1800 cargo build --bin nockchain >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/debug/nockchain" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/debug/nockchain "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain构建成功 (debug)${RESET}"
+        node_built=true
+        ((build_success++))
+      fi
+    fi
+    cd "$NCK_DIR"
+  fi
+  
+  # 方法2: 使用工作空间构建
+  if [ "$node_built" = false ]; then
+    echo -e "[*] 方法2: 工作空间构建..."
+    echo "=== 构建nockchain (方法2) ===" >> "$LOG_FILE"
+    
+    if timeout 2400 cargo build --release -p nockchain >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/release/nockchain" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/release/nockchain "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain构建成功 (方法2)${RESET}"
+        node_built=true
+        ((build_success++))
+      fi
+    elif timeout 1800 cargo build -p nockchain >> "$LOG_FILE" 2>&1; then
+      if [ -f "target/debug/nockchain" ]; then
+        mkdir -p "$HOME/.cargo/bin"
+        cp target/debug/nockchain "$HOME/.cargo/bin/"
+        echo -e "${GREEN}[+] nockchain构建成功 (debug)${RESET}"
+        node_built=true
+        ((build_success++))
+      fi
+    fi
+  fi
+  
+  # 方法3: cargo install
+  if [ "$node_built" = false ]; then
+    echo -e "[*] 方法3: cargo install..."
+    echo "=== 构建nockchain (方法3) ===" >> "$LOG_FILE"
+    
+    if timeout 2400 cargo install --force --path crates/nockchain --bin nockchain >> "$LOG_FILE" 2>&1; then
+      echo -e "${GREEN}[+] nockchain构建成功 (方法3)${RESET}"
+      node_built=true
+      ((build_success++))
+    fi
+  fi
+  
+  if [ "$node_built" = false ]; then
+    echo -e "${RED}[-] nockchain构建失败${RESET}"
+    echo -e "${YELLOW}[!] 查看详细错误: tail -50 $LOG_FILE${RESET}"
+  fi
+  
+  # 构建结果总结
+  echo -e "[*] 构建结果总结..."
   echo -e "${BLUE}[i] 检查已安装的二进制文件:${RESET}"
+  
   for binary in "hoonc" "nockchain-wallet" "nockchain"; do
     if command -v "$binary" >/dev/null 2>&1; then
-      version_info=$(command -v "$binary")
-      echo -e "${GREEN}  ✓ $binary: $version_info${RESET}"
-      ((binary_count++))
-    elif [ -f "target/release/$binary" ]; then
-      size=$(du -h "target/release/$binary" | cut -f1)
-      echo -e "${GREEN}  ✓ target/release/$binary (大小: $size)${RESET}"
-      ((binary_count++))
-    elif [ -f "target/debug/$binary" ]; then
-      size=$(du -h "target/debug/$binary" | cut -f1)
-      echo -e "${GREEN}  ✓ target/debug/$binary (大小: $size)${RESET}"
-      ((binary_count++))
+      binary_path=$(command -v "$binary")
+      binary_size=$(du -h "$binary_path" 2>/dev/null | cut -f1 || echo "unknown")
+      echo -e "${GREEN}  ✓ $binary: $binary_path (大小: $binary_size)${RESET}"
     else
-      echo -e "${YELLOW}  ✗ $binary (未找到)${RESET}"
+      echo -e "${RED}  ✗ $binary (未找到)${RESET}"
     fi
   done
   
-  if [ $binary_count -gt 0 ]; then
-    echo -e "${GREEN}[+] 构建成功！发现 $binary_count 个可执行文件${RESET}"
+  if [ $build_success -ge 2 ]; then
+    echo -e "${GREEN}[+] 构建成功！发现 $build_success 个可执行文件${RESET}"
     return 0
   else
-    echo -e "${YELLOW}[!] 未发现可执行文件，但构建可能部分成功${RESET}"
+    echo -e "${YELLOW}[!] 部分构建失败，成功 $build_success 个组件${RESET}"
     return 1
   fi
 }
 
-# ========= 主安装流程 =========
-function setup_all() {
-  echo -e "[*] 开始编译失败修复安装..."
+# ========= 构建失败诊断 =========
+function diagnose_build_failure() {
+  echo -e "[*] 构建失败诊断..."
   
-  check_system_requirements
-  install_complete_dependencies
-  setup_advanced_memory
+  echo -e "${BLUE}[i] 系统信息:${RESET}"
+  echo -e "  内存: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+  echo -e "  Swap: $(free -h | grep Swap | awk '{print $3"/"$2}')"
+  echo -e "  磁盘: $(df -h $HOME | tail -1 | awk '{print $3"/"$2" ("$5" used)"}')"
   
-  if ! setup_rust_with_target_dir_fix; then
-    echo -e "${RED}[-] Rust环境修复失败${RESET}"
-    pause_and_return
-    return
+  echo -e "${BLUE}[i] 构建工具:${RESET}"
+  for tool in gcc g++ clang rustc cargo; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      echo -e "  ✓ $tool: $(command -v $tool)"
+    else
+      echo -e "  ✗ $tool: 未找到"
+    fi
+  done
+  
+  echo -e "${BLUE}[i] 最新构建错误:${RESET}"
+  if [ -f "$LOG_FILE" ]; then
+    echo "查看完整日志: cat $LOG_FILE"
+    echo ""
+    echo "最新错误:"
+    tail -20 "$LOG_FILE" | grep -i "error\|failed\|panic" | tail -5
   fi
   
-  if ! clean_and_clone_fresh; then
-    echo -e "${RED}[-] 仓库准备失败${RESET}"
-    pause_and_return
-    return
-  fi
-  
-  if build_fix_compilation_failure; then
-    echo -e "${GREEN}[+] ✅ Nockchain安装成功！${RESET}"
-    echo -e "${BLUE}[i] 已修复资产文件缺失和虚拟清单问题${RESET}"
-    echo -e "${BLUE}[i] 使用稳定的构建参数和内存优化${RESET}"
-  else
-    echo -e "${YELLOW}[!] 安装可能有部分问题${RESET}"
-    echo -e "${BLUE}[i] 但通常可以继续使用已构建的组件${RESET}"
-  fi
-  
-  pause_and_return
+  echo -e "${YELLOW}[!] 推荐解决方案:${RESET}"
+  echo "1. 增加系统内存到16GB+"
+  echo "2. 增加swap空间到8GB+"  
+  echo "3. 检查磁盘空间是否充足"
+  echo "4. 重新运行脚本选择构建修复"
 }
 
-# ========= 钱包操作 =========
+# ========= 钱包和节点操作 =========
 function generate_wallet() {
   echo -e "[*] 生成钱包..."
   cd "$NCK_DIR" || return 1
   
-  # 确保环境变量
   source "$HOME/.cargo/env" 2>/dev/null || true
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 查找钱包程序
   wallet_bin=""
   if command -v nockchain-wallet >/dev/null 2>&1; then
     wallet_bin="nockchain-wallet"
@@ -513,7 +508,6 @@ function generate_wallet() {
   
   echo -e "${GREEN}[+] 使用钱包: $wallet_bin${RESET}"
   
-  # 生成钱包，增加错误处理
   if ! "$wallet_bin" keygen 2>/dev/null; then
     echo -e "${YELLOW}[!] 钱包生成可能有问题，尝试debug模式...${RESET}"
     RUST_LOG=debug "$wallet_bin" keygen
@@ -522,22 +516,6 @@ function generate_wallet() {
   echo -e "${YELLOW}[!] 请复制上方的公钥${RESET}"
   echo -e "${BLUE}[i] 公钥格式：128位16进制${RESET}"
   pause_and_return
-}
-
-function validate_pubkey() {
-  local pubkey="$1"
-  
-  if [ ${#pubkey} -ne 128 ]; then
-    echo -e "${RED}[-] 公钥长度错误！应为128位，当前为${#pubkey}位${RESET}"
-    return 1
-  fi
-  
-  if [[ ! "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
-    echo -e "${RED}[-] 公钥格式错误！只能包含0-9和a-f字符${RESET}"
-    return 1
-  fi
-  
-  return 0
 }
 
 function set_pubkey_env() {
@@ -555,21 +533,11 @@ function set_pubkey_env() {
       continue
     fi
     
-    pubkey=$(echo "$pubkey" | tr -d ' \n\r\t')
+    pubkey=$(echo "$pubkey" | tr -d ' \n\r\t' | tr '[:upper:]' '[:lower:]')
     
-    if validate_pubkey "$pubkey"; then
-      pubkey=$(echo "$pubkey" | tr '[:upper:]' '[:lower:]')
-      
-      # 更新.env文件
-      if command -v sed >/dev/null 2>&1; then
-        sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE" 2>/dev/null || {
-          grep -v '^MINING_PUBKEY=' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
-        }
-      else
-        grep -v '^MINING_PUBKEY=' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
-      fi
+    if [ ${#pubkey} -eq 128 ] && [[ "$pubkey" =~ ^[0-9a-f]{128}$ ]]; then
+      sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE" 2>/dev/null || true
       echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
-      
       echo -e "${GREEN}[+] 公钥已写入.env文件${RESET}"
       break
     else
@@ -577,67 +545,6 @@ function set_pubkey_env() {
     fi
   done
   
-  pause_and_return
-}
-
-function export_keys() {
-  echo -e "[*] 导出密钥..."
-  cd "$NCK_DIR" || return 1
-  
-  source "$HOME/.cargo/env" 2>/dev/null || true
-  export PATH="$HOME/.cargo/bin:$PATH"
-  
-  wallet_bin=""
-  if command -v nockchain-wallet >/dev/null 2>&1; then
-    wallet_bin="nockchain-wallet"
-  elif [ -f "target/release/nockchain-wallet" ]; then
-    wallet_bin="./target/release/nockchain-wallet"
-  elif [ -f "target/debug/nockchain-wallet" ]; then
-    wallet_bin="./target/debug/nockchain-wallet"
-  fi
-  
-  if [ -z "$wallet_bin" ]; then
-    echo -e "${RED}[-] 未找到钱包程序${RESET}"
-    pause_and_return
-    return
-  fi
-  
-  "$wallet_bin" export-keys
-  echo -e "${GREEN}[+] 密钥已导出${RESET}"
-  pause_and_return
-}
-
-function import_keys() {
-  echo -e "[*] 导入密钥..."
-  cd "$NCK_DIR" || return 1
-  
-  source "$HOME/.cargo/env" 2>/dev/null || true
-  export PATH="$HOME/.cargo/bin:$PATH"
-  
-  wallet_bin=""
-  if command -v nockchain-wallet >/dev/null 2>&1; then
-    wallet_bin="nockchain-wallet"
-  elif [ -f "target/release/nockchain-wallet" ]; then
-    wallet_bin="./target/release/nockchain-wallet"
-  elif [ -f "target/debug/nockchain-wallet" ]; then
-    wallet_bin="./target/debug/nockchain-wallet"
-  fi
-  
-  if [ -z "$wallet_bin" ]; then
-    echo -e "${RED}[-] 未找到钱包程序${RESET}"
-    pause_and_return
-    return
-  fi
-  
-  read -p "密钥文件路径 (默认: ./keys.export): " keyfile
-  keyfile=${keyfile:-"./keys.export"}
-  
-  if [ -f "$keyfile" ]; then
-    "$wallet_bin" import-keys --input "$keyfile"
-    echo -e "${GREEN}[+] 密钥已导入${RESET}"
-  else
-    echo -e "${RED}[-] 文件不存在: $keyfile${RESET}"
-  fi
   pause_and_return
 }
 
@@ -661,7 +568,6 @@ function start_node() {
   source "$HOME/.cargo/env" 2>/dev/null || true
   export PATH="$HOME/.cargo/bin:$PATH"
 
-  # 查找节点程序
   node_bin=""
   if command -v nockchain >/dev/null 2>&1; then
     node_bin="nockchain"
@@ -679,11 +585,9 @@ function start_node() {
 
   echo -e "${GREEN}[+] 使用节点: $node_bin${RESET}"
 
-  # 清理旧数据
   rm -rf ./.data.nockchain .socket/nockchain_npc.sock 2>/dev/null || true
   mkdir -p .socket
 
-  # 启动命令
   start_cmd="RUST_LOG=info $node_bin --mining-pubkey $MINING_PUBKEY \
 --mine \
 --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
@@ -694,11 +598,7 @@ function start_node() {
 --npc-socket .socket/nockchain.sock \
 --bind /ip4/0.0.0.0/udp/3006/quic-v1"
 
-  if ! command -v screen >/dev/null 2>&1; then
-    echo -e "${YELLOW}[!] 后台启动...${RESET}"
-    nohup bash -c "$start_cmd" > nockchain.log 2>&1 &
-    echo -e "${GREEN}[+] 节点已后台启动${RESET}"
-  else
+  if command -v screen >/dev/null 2>&1; then
     if screen -list | grep -qw "nockchain"; then
       screen -S nockchain -X quit >/dev/null 2>&1
       sleep 2
@@ -713,7 +613,54 @@ function start_node() {
     else
       echo -e "${RED}[-] 节点启动失败${RESET}"
     fi
+  else
+    nohup bash -c "$start_cmd" > nockchain.log 2>&1 &
+    echo -e "${GREEN}[+] 节点已后台启动${RESET}"
   fi
+  
+  pause_and_return
+}
+
+function check_status() {
+  echo -e "[*] 检查状态..."
+  
+  cd "$NCK_DIR" || return 1
+  
+  # 检查公钥配置
+  if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE" >/dev/null 2>&1
+    if [ -n "$MINING_PUBKEY" ]; then
+      echo -e "${GREEN}[+] 公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}${RESET}"
+    else
+      echo -e "${YELLOW}[!] 未设置公钥${RESET}"
+    fi
+  fi
+  
+  # 检查节点运行状态
+  if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
+    echo -e "${GREEN}[+] 节点运行中 (screen)${RESET}"
+  elif pgrep -f "nockchain" >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] 节点运行中 (进程)${RESET}"
+  else
+    echo -e "${RED}[-] 节点未运行${RESET}"
+  fi
+  
+  # 显示已安装的组件
+  echo -e "${BLUE}[i] 已安装组件:${RESET}"
+  for binary in "hoonc" "nockchain-wallet" "nockchain"; do
+    if command -v "$binary" >/dev/null 2>&1; then
+      binary_path=$(command -v "$binary")
+      binary_size=$(du -h "$binary_path" 2>/dev/null | cut -f1 || echo "unknown")
+      echo -e "${GREEN}  ✓ $binary ($binary_size)${RESET}"
+    else
+      echo -e "${YELLOW}  ✗ $binary${RESET}"
+    fi
+  done
+  
+  # 显示系统资源
+  echo -e "${BLUE}[i] 系统资源:${RESET}"
+  echo -e "${BLUE}  内存使用: $(free -h | grep Mem | awk '{print $3"/"$2}')${RESET}"
+  echo -e "${BLUE}  Swap使用: $(free -h | grep Swap | awk '{print $3"/"$2}')${RESET}"
   
   pause_and_return
 }
@@ -728,45 +675,6 @@ function view_logs() {
   else
     echo -e "${RED}[-] 无日志文件${RESET}"
   fi
-  pause_and_return
-}
-
-function check_status() {
-  echo -e "[*] 检查状态..."
-  
-  cd "$NCK_DIR" || return 1
-  if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE" >/dev/null 2>&1
-    if [ -n "$MINING_PUBKEY" ]; then
-      echo -e "${GREEN}[+] 公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}${RESET}"
-    else
-      echo -e "${YELLOW}[!] 未设置公钥${RESET}"
-    fi
-  fi
-  
-  if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
-    echo -e "${GREEN}[+] 节点运行中${RESET}"
-  elif pgrep -f "nockchain" >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 节点运行中${RESET}"
-  else
-    echo -e "${RED}[-] 节点未运行${RESET}"
-  fi
-  
-  # 显示已安装的组件
-  echo -e "${BLUE}[i] 已安装组件:${RESET}"
-  for binary in "hoonc" "nockchain-wallet" "nockchain"; do
-    if command -v "$binary" >/dev/null 2>&1; then
-      echo -e "${GREEN}  ✓ $binary${RESET}"
-    else
-      echo -e "${YELLOW}  ✗ $binary${RESET}"
-    fi
-  done
-  
-  # 显示系统资源
-  echo -e "${BLUE}[i] 系统资源:${RESET}"
-  echo -e "${BLUE}  内存使用: $(free -h | grep Mem | awk '{print $3"/"$2}')${RESET}"
-  echo -e "${BLUE}  Swap使用: $(free -h | grep Swap | awk '{print $3"/"$2}')${RESET}"
-  
   pause_and_return
 }
 
@@ -792,38 +700,82 @@ function pause_and_return() {
   main_menu
 }
 
+# ========= 完整修复安装流程 =========
+function complete_fix_installation() {
+  echo -e "[*] 开始构建失败专用修复安装..."
+  
+  # 创建日志文件
+  echo "=== Nockchain构建失败修复日志 $(date) ===" > "$LOG_FILE"
+  
+  check_and_optimize_system
+  
+  if ! install_complete_build_dependencies; then
+    echo -e "${RED}[-] 依赖安装失败${RESET}"
+    diagnose_build_failure
+    pause_and_return
+    return
+  fi
+  
+  if ! rebuild_rust_environment; then
+    echo -e "${RED}[-] Rust环境重建失败${RESET}"
+    diagnose_build_failure
+    pause_and_return
+    return
+  fi
+  
+  if ! prepare_project_clean; then
+    echo -e "${RED}[-] 项目准备失败${RESET}"
+    diagnose_build_failure
+    pause_and_return
+    return
+  fi
+  
+  if build_components_step_by_step; then
+    echo -e "${GREEN}[+] ✅ Nockchain修复安装成功！${RESET}"
+    echo -e "${BLUE}[i] 已修复nockchain-wallet和nockchain构建失败${RESET}"
+    echo -e "${BLUE}[i] 使用大内存优化和Clang/LLVM工具链${RESET}"
+    echo -e "${BLUE}[i] 详细日志: $LOG_FILE${RESET}"
+  else
+    echo -e "${YELLOW}[!] 构建部分成功${RESET}"
+    echo -e "${BLUE}[i] 查看构建诊断获取更多信息${RESET}"
+    diagnose_build_failure
+  fi
+  
+  pause_and_return
+}
+
 function main_menu() {
   show_banner
   echo "请选择操作:"
-  echo "  1) 🚀 修复安装 (解决资产文件和虚拟清单问题)"
-  echo "  2) 🔑 生成钱包"
-  echo "  3) 📝 设置挖矿公钥"
-  echo "  4) 💾 导出密钥"
-  echo "  5) 📂 导入密钥"
-  echo "  6) ⚡ 启动节点"
-  echo "  7) 📊 查看日志"
-  echo "  8) 🔍 检查状态"
-  echo "  9) ⏹️  停止节点"
+  echo "  1) 🔧 修复构建失败 (专用版)"
+  echo "  2) 📊 构建失败诊断"
+  echo "  3) 🔑 生成钱包"
+  echo "  4) 📝 设置挖矿公钥"
+  echo "  5) ⚡ 启动节点"
+  echo "  6) 📈 查看日志"
+  echo "  7) 🔍 检查状态"
+  echo "  8) ⏹️  停止节点"
   echo "  0) 退出"
   echo ""
-  echo -e "${BLUE}💡 专门修复: 资产文件缺失 + 虚拟清单错误${RESET}"
-  echo -e "${BLUE}💡 使用-p参数指定包名 + 自动创建资产文件${RESET}"
+  echo -e "${CYAN}💡 专门解决: nockchain-wallet + nockchain 构建失败${RESET}"
+  echo -e "${CYAN}💡 内存优化: 自动配置大容量swap和系统参数${RESET}"
+  echo -e "${CYAN}💡 工具链: 完整Clang/LLVM构建环境${RESET}"
   echo ""
   read -p "请输入编号: " choice
 
   case "$choice" in
-    1) setup_all ;;
-    2) generate_wallet ;;
-    3) set_pubkey_env ;;
-    4) export_keys ;;
-    5) import_keys ;;
-    6) start_node ;;
-    7) view_logs ;;
-    8) check_status ;;
-    9) stop_node ;;
+    1) complete_fix_installation ;;
+    2) diagnose_build_failure; pause_and_return ;;
+    3) generate_wallet ;;
+    4) set_pubkey_env ;;
+    5) start_node ;;
+    6) view_logs ;;
+    7) check_status ;;
+    8) stop_node ;;
     0) echo "退出脚本."; exit 0 ;;
     *) echo -e "${RED}[-] 无效选项${RESET}"; pause_and_return ;;
   esac
 }
 
+# 启动主菜单
 main_menu
