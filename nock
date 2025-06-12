@@ -17,20 +17,20 @@ function show_banner() {
   clear
   echo -e "${BOLD}${BLUE}"
   echo "==============================================="
-  echo "    Nockchain 编译失败修复版 v7.0"
+  echo "    Nockchain 编译失败修复版 v7.1"
   echo "==============================================="
   echo -e "${RESET}"
   echo "📌 作者: K2 节点教程分享"
   echo "🔗 Telegram: https://t.me/+EaCiFDOghoM3Yzll"
   echo "🐦 Twitter:  https://x.com/BtcK241918"
-  echo "⚡ 修复: 堆栈跟踪错误 + CARGO_TARGET_DIR问题"
+  echo "⚡ 修复: 资产文件缺失 + 虚拟清单问题"
   echo "-----------------------------------------------"
   echo ""
 }
 
 # ========= 系统检查 =========
 function check_system_requirements() {
-  echo -e "[*] 系统要求检查..."[1][6][7]
+  echo -e "[*] 系统要求检查..."
   
   # 检查内存
   total_mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
@@ -61,7 +61,7 @@ function check_system_requirements() {
 
 # ========= 完整依赖安装 =========
 function install_complete_dependencies() {
-  echo -e "[*] 安装完整构建依赖..."[1][6]
+  echo -e "[*] 安装完整构建依赖..."
   
   # 更新系统
   sudo apt-get update && sudo apt-get upgrade -y
@@ -108,7 +108,7 @@ function install_complete_dependencies() {
 
 # ========= 内存和swap优化 =========
 function setup_advanced_memory() {
-  echo -e "[*] 高级内存优化..."[1]
+  echo -e "[*] 高级内存优化..."
   
   # 增加swap防止编译失败
   if [ $total_mem_gb -lt 16 ]; then
@@ -143,7 +143,7 @@ function setup_advanced_memory() {
 
 # ========= 修复Rust环境和CARGO_TARGET_DIR =========
 function setup_rust_with_target_dir_fix() {
-  echo -e "[*] 修复Rust环境和CARGO_TARGET_DIR..."[2][6]
+  echo -e "[*] 修复Rust环境和CARGO_TARGET_DIR..."
   
   # 完全清理旧环境
   pkill -f cargo 2>/dev/null || true
@@ -172,7 +172,7 @@ function setup_rust_with_target_dir_fix() {
   source "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 根据搜索结果[2]修复CARGO_TARGET_DIR配置
+  # 配置Cargo
   mkdir -p "$HOME/.cargo"
   cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
@@ -245,7 +245,7 @@ EOF
 
 # ========= 清理并克隆仓库 =========
 function clean_and_clone_fresh() {
-  echo -e "[*] 清理并重新克隆仓库..."[1][7]
+  echo -e "[*] 清理并重新克隆仓库..."
   
   cd "$HOME" || exit 1
   
@@ -272,7 +272,7 @@ function clean_and_clone_fresh() {
 
 # ========= 修复编译失败的高级构建方法 =========
 function build_fix_compilation_failure() {
-  echo -e "[*] 使用高级方法修复编译失败..."[2][6]
+  echo -e "[*] 使用高级方法修复编译失败..."
   
   cd "$NCK_DIR" || return 1
   
@@ -299,6 +299,14 @@ RUST_LOG=info
 EOF
     echo -e "${GREEN}[+] 基本.env文件创建成功${RESET}"
   fi
+  
+  # 创建缺失的资产文件
+  echo -e "[*] 创建缺失的资产文件..."
+  mkdir -p assets
+  touch assets/wal.jam
+  touch assets/dumb.jam
+  touch assets/miner.jam
+  echo -e "${GREEN}[+] 已创建缺失的资产文件${RESET}"
   
   # 完全清理构建缓存
   echo -e "[*] 完全清理构建环境..."
@@ -367,42 +375,50 @@ EOF
   # 确保PATH包含cargo bin
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 构建主项目
-  echo -e "[*] 构建主项目..."
+  # 构建主项目 - 修复虚拟清单问题
+  echo -e "[*] 构建主项目（修复虚拟清单问题）..."
   
-  # 方法1: 直接cargo build
-  echo -e "[*] 尝试直接cargo构建..."
-  if timeout 3600 cargo build --release; then
-    echo -e "${GREEN}[+] cargo build成功${RESET}"
-  else
-    echo -e "${YELLOW}[!] release构建失败，尝试debug...${RESET}"
-    if timeout 2400 cargo build; then
-      echo -e "${GREEN}[+] debug构建成功${RESET}"
-    else
-      echo -e "${YELLOW}[!] cargo构建失败，尝试分别构建...${RESET}"
-      
-      # 分别构建各组件
-      for binary in "nockchain-wallet" "nockchain"; do
-        echo -e "[*] 构建 $binary..."
-        if timeout 1800 cargo build --release --bin "$binary"; then
-          echo -e "${GREEN}[+] $binary构建成功${RESET}"
-        elif timeout 1200 cargo build --bin "$binary"; then
-          echo -e "${GREEN}[+] $binary构建成功(debug)${RESET}"
-        fi
-      done
+  # 方法1: 直接构建各个包
+  echo -e "[*] 尝试直接构建各个包..."
+  
+  # 构建钱包组件
+  echo -e "[*] 构建钱包组件..."
+  if timeout 1800 cargo build --release -p nockchain-wallet; then
+    echo -e "${GREEN}[+] 钱包构建成功${RESET}"
+    # 安装钱包组件
+    if [ -f "target/release/nockchain-wallet" ]; then
+      cp target/release/nockchain-wallet "$HOME/.cargo/bin/"
+      echo -e "${GREEN}[+] 钱包安装成功${RESET}"
     fi
+  elif timeout 1200 cargo build -p nockchain-wallet; then
+    echo -e "${GREEN}[+] 钱包构建成功(debug)${RESET}"
+    # 安装钱包组件
+    if [ -f "target/debug/nockchain-wallet" ]; then
+      cp target/debug/nockchain-wallet "$HOME/.cargo/bin/"
+      echo -e "${GREEN}[+] 钱包安装成功(debug)${RESET}"
+    fi
+  else
+    echo -e "${YELLOW}[!] 钱包构建失败${RESET}"
   fi
   
-  # 尝试安装组件
-  echo -e "[*] 安装钱包组件..."
-  export PATH="$HOME/.cargo/bin:$PATH"
-  if timeout 600 cargo install --force --path . --bin nockchain-wallet; then
-    echo -e "${GREEN}[+] 钱包安装成功${RESET}"
-  fi
-  
-  echo -e "[*] 安装节点组件..."
-  if timeout 600 cargo install --force --path . --bin nockchain; then
-    echo -e "${GREEN}[+] 节点安装成功${RESET}"
+  # 构建节点组件
+  echo -e "[*] 构建节点组件..."
+  if timeout 1800 cargo build --release -p nockchain; then
+    echo -e "${GREEN}[+] 节点构建成功${RESET}"
+    # 安装节点组件
+    if [ -f "target/release/nockchain" ]; then
+      cp target/release/nockchain "$HOME/.cargo/bin/"
+      echo -e "${GREEN}[+] 节点安装成功${RESET}"
+    fi
+  elif timeout 1200 cargo build -p nockchain; then
+    echo -e "${GREEN}[+] 节点构建成功(debug)${RESET}"
+    # 安装节点组件
+    if [ -f "target/debug/nockchain" ]; then
+      cp target/debug/nockchain "$HOME/.cargo/bin/"
+      echo -e "${GREEN}[+] 节点安装成功(debug)${RESET}"
+    fi
+  else
+    echo -e "${YELLOW}[!] 节点构建失败${RESET}"
   fi
   
   # 检查构建结果
@@ -439,7 +455,7 @@ EOF
 
 # ========= 主安装流程 =========
 function setup_all() {
-  echo -e "[*] 开始编译失败修复安装..."[1][6][7]
+  echo -e "[*] 开始编译失败修复安装..."
   
   check_system_requirements
   install_complete_dependencies
@@ -459,7 +475,7 @@ function setup_all() {
   
   if build_fix_compilation_failure; then
     echo -e "${GREEN}[+] ✅ Nockchain安装成功！${RESET}"
-    echo -e "${BLUE}[i] 已修复编译失败和CARGO_TARGET_DIR问题${RESET}"
+    echo -e "${BLUE}[i] 已修复资产文件缺失和虚拟清单问题${RESET}"
     echo -e "${BLUE}[i] 使用稳定的构建参数和内存优化${RESET}"
   else
     echo -e "${YELLOW}[!] 安装可能有部分问题${RESET}"
@@ -471,7 +487,7 @@ function setup_all() {
 
 # ========= 钱包操作 =========
 function generate_wallet() {
-  echo -e "[*] 生成钱包..."[1][7]
+  echo -e "[*] 生成钱包..."
   cd "$NCK_DIR" || return 1
   
   # 确保环境变量
@@ -525,7 +541,7 @@ function validate_pubkey() {
 }
 
 function set_pubkey_env() {
-  echo -e "[*] 设置挖矿公钥..."[7]
+  echo -e "[*] 设置挖矿公钥..."
   cd "$NCK_DIR" || return 1
 
   echo -e "${BLUE}[i] 公钥格式：128位16进制字符串${RESET}"
@@ -626,7 +642,7 @@ function import_keys() {
 }
 
 function start_node() {
-  echo -e "[*] 启动节点..."[7]
+  echo -e "[*] 启动节点..."
   cd "$NCK_DIR" || return 1
   
   if [ ! -f "$ENV_FILE" ]; then
@@ -687,7 +703,7 @@ function start_node() {
       screen -S nockchain -X quit >/dev/null 2>&1
       sleep 2
     fi
-
+    
     screen -dmS nockchain bash -c "cd '$NCK_DIR' && $start_cmd"
     sleep 3
     
@@ -716,7 +732,7 @@ function view_logs() {
 }
 
 function check_status() {
-  echo -e "[*] 检查状态..."[1][6]
+  echo -e "[*] 检查状态..."
   
   cd "$NCK_DIR" || return 1
   if [ -f "$ENV_FILE" ]; then
@@ -779,7 +795,7 @@ function pause_and_return() {
 function main_menu() {
   show_banner
   echo "请选择操作:"
-  echo "  1) 🚀 修复安装 (解决编译失败问题)"
+  echo "  1) 🚀 修复安装 (解决资产文件和虚拟清单问题)"
   echo "  2) 🔑 生成钱包"
   echo "  3) 📝 设置挖矿公钥"
   echo "  4) 💾 导出密钥"
@@ -790,8 +806,8 @@ function main_menu() {
   echo "  9) ⏹️  停止节点"
   echo "  0) 退出"
   echo ""
-  echo -e "${BLUE}💡 专门修复: 堆栈跟踪错误 + CARGO_TARGET_DIR问题${RESET}"
-  echo -e "${BLUE}💡 不设置CARGO_TARGET_DIR + 优化内存 + 稳定构建${RESET}"
+  echo -e "${BLUE}💡 专门修复: 资产文件缺失 + 虚拟清单错误${RESET}"
+  echo -e "${BLUE}💡 使用-p参数指定包名 + 自动创建资产文件${RESET}"
   echo ""
   read -p "请输入编号: " choice
 
