@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ========= Nockchain 目录安全修复版脚本 v14.3 =========
+# ========= Nockchain 目录安全修复版脚本 v15.1 (构建失败修复版) =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -20,13 +20,13 @@ function show_banner() {
   clear
   echo -e "${BOLD}${CYAN}"
   echo "======================================================"
-  echo "   Nockchain 目录安全修复版脚本 v14.3"
+  echo "   Nockchain 构建失败修复版脚本 v15.1"
   echo "======================================================"
   echo -e "${RESET}"
-  echo "🎯 目录安全: 自动检查和创建项目目录"
-  echo "💾 内存优化: 基于社区反馈，支持大内存需求"
-  echo "🔧 全面修复: 解决所有已知的构建和启动问题"
-  echo "📊 智能诊断: 详细错误分析和解决建议"
+  echo "🔧 构建修复: 解决make build和install失败问题"
+  echo "💾 内存优化: 强化内存检查和swap配置"
+  echo "🎯 分步构建: 优化构建顺序，提高成功率"
+  echo "📊 智能重试: 自动重试失败的构建步骤"
   echo "🚀 完整管理: 从安装到运行的一站式解决方案"
   echo "------------------------------------------------------"
   echo ""
@@ -34,7 +34,6 @@ function show_banner() {
 
 # ========= 关键：目录安全检查函数 =========
 function ensure_nockchain_directory() {
-  # 检查nockchain目录是否存在
   if [ ! -d "$NCK_DIR" ]; then
     echo -e "${YELLOW}[!] Nockchain项目目录不存在: $NCK_DIR${RESET}"
     echo -e "${BLUE}[i] 可能的原因:${RESET}"
@@ -81,19 +80,16 @@ function clone_nockchain_project() {
   
   cd "$HOME" || return 1
   
-  # 清理可能存在的残留
   if [ -d "nockchain" ]; then
     echo -e "[*] 清理旧的项目残留..."
     rm -rf nockchain
   fi
   
-  # 克隆项目（基于搜索结果中的官方仓库）
   if git clone --depth 1 https://github.com/zorp-corp/nockchain; then
     echo -e "${GREEN}[+] 项目克隆成功${RESET}"
     
     cd nockchain || return 1
     
-    # 创建基本配置
     if [ -f ".env_example" ]; then
       cp .env_example .env
     else
@@ -103,14 +99,12 @@ RUST_LOG=info
 EOF
     fi
     
-    # 创建必需的资产文件（修复资产文件缺失问题）
     echo -e "[*] 创建必需的资产文件..."
     mkdir -p assets
     touch assets/wal.jam
-    touch assets/dumb.jam
+    touch assets/dumb.jam  
     touch assets/miner.jam
     
-    # 创建必要目录
     mkdir -p .socket test-leader logs
     chmod 755 .socket test-leader
     
@@ -123,93 +117,145 @@ EOF
   fi
 }
 
-# ========= 系统环境优化（基于社区反馈） =========
-function optimize_system_complete() {
-  echo -e "[*] 系统环境优化（基于社区经验）..."
+# ========= 强化内存检查和Swap配置 =========
+function optimize_system_advanced() {
+  echo -e "[*] 强化系统内存优化（基于构建失败修复）..."
   
   total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
   total_mem_gb=$((total_mem_kb / 1024 / 1024))
   
   echo -e "${BLUE}[i] 系统内存: ${total_mem_gb}GB${RESET}"
   
-  # 基于社区反馈，Nockchain需要大量内存[5]
-  if [ $total_mem_gb -lt 16 ]; then
-    echo -e "${RED}[-] 警告: 内存不足！${RESET}"
-    echo -e "${YELLOW}[!] 社区反馈显示Nockchain至少需要16GB内存${RESET}"
-    echo -e "${YELLOW}[!] 有用户报告即使64GB也可能遇到mem.rs错误${RESET}"
+  # 基于社区反馈，强化内存要求[5][7]
+  if [ $total_mem_gb -lt 8 ]; then
+    echo -e "${RED}[-] 严重警告: 内存严重不足！${RESET}"
+    echo -e "${YELLOW}[!] Nockchain构建至少需要8GB内存，推荐16GB+${RESET}"
+    echo -e "${YELLOW}[!] 当前内存可能导致mem.rs错误和构建失败${RESET}"
     
-    required_swap=$((32 - total_mem_gb))
+    # 配置大容量swap
+    required_swap=$((24 - total_mem_gb))
     if [ $required_swap -gt 0 ]; then
-      echo -e "[*] 配置${required_swap}GB大容量swap..."
-      sudo fallocate -l ${required_swap}G /swapfile-nockchain-mega 2>/dev/null || \
-      sudo dd if=/dev/zero of=/swapfile-nockchain-mega bs=1G count=$required_swap 2>/dev/null
+      echo -e "[*] 配置${required_swap}GB超大容量swap来补偿内存不足..."
       
-      sudo chmod 600 /swapfile-nockchain-mega
-      sudo mkswap /swapfile-nockchain-mega >/dev/null 2>&1
-      sudo swapon /swapfile-nockchain-mega >/dev/null 2>&1
-      echo -e "${GREEN}[+] ${required_swap}GB Swap已配置${RESET}"
+      # 删除旧的swap文件
+      sudo swapoff /swapfile-nockchain-mega 2>/dev/null || true
+      sudo rm -f /swapfile-nockchain-mega
+      
+      # 创建新的大容量swap
+      if sudo fallocate -l ${required_swap}G /swapfile-nockchain-mega 2>/dev/null; then
+        sudo chmod 600 /swapfile-nockchain-mega
+        sudo mkswap /swapfile-nockchain-mega >/dev/null 2>&1
+        sudo swapon /swapfile-nockchain-mega >/dev/null 2>&1
+        
+        # 添加到fstab以便重启后自动挂载
+        if ! grep -q "/swapfile-nockchain-mega" /etc/fstab; then
+          echo '/swapfile-nockchain-mega none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+        fi
+        
+        echo -e "${GREEN}[+] ${required_swap}GB 超大Swap配置成功${RESET}"
+      else
+        echo -e "${YELLOW}[!] Swap配置失败，使用dd方式...${RESET}"
+        sudo dd if=/dev/zero of=/swapfile-nockchain-mega bs=1G count=$required_swap 2>/dev/null
+        sudo chmod 600 /swapfile-nockchain-mega
+        sudo mkswap /swapfile-nockchain-mega >/dev/null 2>&1
+        sudo swapon /swapfile-nockchain-mega >/dev/null 2>&1
+        echo -e "${GREEN}[+] ${required_swap}GB Swap已配置${RESET}"
+      fi
     fi
+  elif [ $total_mem_gb -lt 16 ]; then
+    echo -e "${YELLOW}[!] 内存偏低，建议配置额外swap${RESET}"
+    required_swap=$((8))
+    
+    echo -e "[*] 配置${required_swap}GB额外swap..."
+    sudo swapoff /swapfile-nockchain-extra 2>/dev/null || true
+    sudo rm -f /swapfile-nockchain-extra
+    
+    sudo fallocate -l ${required_swap}G /swapfile-nockchain-extra 2>/dev/null || \
+    sudo dd if=/dev/zero of=/swapfile-nockchain-extra bs=1G count=$required_swap 2>/dev/null
+    
+    sudo chmod 600 /swapfile-nockchain-extra
+    sudo mkswap /swapfile-nockchain-extra >/dev/null 2>&1
+    sudo swapon /swapfile-nockchain-extra >/dev/null 2>&1
+    echo -e "${GREEN}[+] ${required_swap}GB 额外Swap已配置${RESET}"
   fi
   
-  # 系统参数优化
+  # 高级系统优化参数
   sudo sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
   sudo sysctl -w vm.max_map_count=2097152 >/dev/null 2>&1 || true
   sudo sysctl -w vm.dirty_ratio=5 >/dev/null 2>&1 || true
-  sudo sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
+  sudo sysctl -w vm.swappiness=60 >/dev/null 2>&1 || true  # 提高swap使用
+  sudo sysctl -w vm.vfs_cache_pressure=50 >/dev/null 2>&1 || true
   
-  echo -e "${GREEN}[+] 系统优化完成${RESET}"
+  # 显示当前内存状态
+  echo -e "${BLUE}[i] 当前内存状态:${RESET}"
+  free -h
+  
+  echo -e "${GREEN}[+] 强化系统优化完成${RESET}"
 }
 
-function install_complete_dependencies() {
-  echo -e "[*] 安装完整构建依赖（基于社区经验）..."
+function install_enhanced_dependencies() {
+  echo -e "[*] 安装强化构建依赖（解决构建失败）..."
   
-  # 基于社区反馈[5]，需要安装build-essential和clang
+  # 基于社区经验，强化依赖安装[2][5]
   sudo apt-get update -y && sudo apt-get upgrade -y
   
+  # 安装完整的构建工具链
   sudo apt install -y \
     build-essential \
-    gcc g++ clang llvm llvm-dev libclang-dev \
+    gcc g++ clang-12 llvm-12 llvm-12-dev libclang-12-dev \
     cmake make ninja-build autoconf automake libtool \
     curl git wget unzip tar gzip \
     pkg-config pkgconf \
-    libssl-dev openssl \
+    libssl-dev openssl libssl3 \
     python3 python3-dev python3-pip \
     libffi-dev zlib1g-dev libbz2-dev \
     libreadline-dev libsqlite3-dev libncurses5-dev \
     xz-utils tk-dev libgdbm-dev liblzma-dev uuid-dev \
     screen htop jq bc time strace \
-    net-tools lld \
-    valgrind gdb
+    net-tools lld-12 \
+    valgrind gdb \
+    libc6-dev \
+    linux-headers-$(uname -r) || true
+  
+  # 设置clang版本符号链接
+  sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-12 100 2>/dev/null || true
+  sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-12 100 2>/dev/null || true
+  sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-12 100 2>/dev/null || true
   
   # 验证关键工具
+  echo -e "${BLUE}[i] 验证构建工具:${RESET}"
   for tool in gcc g++ clang cmake make pkg-config git; do
     if command -v "$tool" >/dev/null 2>&1; then
-      echo -e "${GREEN}[+] $tool: 已安装${RESET}"
+      tool_version=$(eval "$tool --version 2>/dev/null | head -1" || echo "unknown")
+      echo -e "${GREEN}  ✓ $tool: $tool_version${RESET}"
     else
-      echo -e "${RED}[-] $tool: 未安装${RESET}"
+      echo -e "${RED}  ✗ $tool: 未安装${RESET}"
       return 1
     fi
   done
   
-  # 基于社区建议设置环境变量
+  # 设置构建环境变量
   export CC=clang
   export CXX=clang++
   export CARGO_BUILD_JOBS=1
+  export LIBCLANG_PATH=/usr/lib/llvm-12/lib
+  export LLVM_CONFIG_PATH=/usr/bin/llvm-config-12
   
-  echo -e "${GREEN}[+] 完整依赖安装完成${RESET}"
+  echo -e "${GREEN}[+] 强化依赖安装完成${RESET}"
 }
 
-# ========= Rust环境配置（社区方案） =========
-function setup_rust_complete() {
-  echo -e "[*] Rust环境配置（基于社区方案）..."
+# ========= 增强Rust环境配置 =========
+function setup_rust_enhanced() {
+  echo -e "[*] 增强Rust环境配置（解决构建问题）..."
   
+  # 杀死可能存在的rust进程
   pkill -f cargo 2>/dev/null || true
   pkill -f rustc 2>/dev/null || true
   sleep 3
   
-  # 基于社区反馈的Rust安装方法[5]
+  # 安装或更新Rust
   if ! command -v rustc >/dev/null 2>&1; then
-    echo -e "[*] 安装Rust（社区推荐方法）..."
+    echo -e "[*] 安装Rust（官方方法）..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
     source "$HOME/.cargo/env"
   else
@@ -220,19 +266,21 @@ function setup_rust_complete() {
   
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 配置Cargo以减少内存使用
+  # 强化Cargo配置以减少内存使用和提高构建成功率
   mkdir -p "$HOME/.cargo"
   cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
 jobs = 1
 
 [net]
-retry = 30
-timeout = 900
+retry = 50
+timeout = 1800
+git-fetch-with-cli = true
 
 [env]
 CC = "clang"
 CXX = "clang++"
+LIBCLANG_PATH = "/usr/lib/llvm-12/lib"
 
 [profile.release]
 opt-level = 1
@@ -256,6 +304,7 @@ codegen-units = 1
 linker = "clang"
 EOF
   
+  # 验证Rust环境
   if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
     echo -e "${GREEN}[+] Rust环境配置完成${RESET}"
     echo -e "${GREEN}[+] Rust: $(rustc --version)${RESET}"
@@ -267,58 +316,132 @@ EOF
   fi
 }
 
-# ========= 完整构建流程（使用make命令） =========
-function build_all_components_complete() {
-  echo -e "[*] 完整构建所有组件..."
+# ========= 分步骤构建流程（修复构建失败） =========
+function build_components_step_by_step() {
+  echo -e "[*] 分步骤构建Nockchain组件（修复版）..."
   
   if ! safe_cd_nockchain; then
     return 1
   fi
   
+  # 设置构建环境
   source "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
   export CC=clang
   export CXX=clang++
   export CARGO_BUILD_JOBS=1
   export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
+  export LIBCLANG_PATH=/usr/lib/llvm-12/lib
+  export LLVM_CONFIG_PATH=/usr/bin/llvm-config-12
   
-  echo -e "[*] 清理构建缓存..."
+  echo -e "[*] 彻底清理构建环境..."
   cargo clean >/dev/null 2>&1 || true
   rm -rf target/ 2>/dev/null || true
+  rm -rf ~/.cargo/registry/cache/ 2>/dev/null || true
+  
+  # 清理socket文件，避免Address already in use错误[4]
+  find . -name "*.sock" -delete 2>/dev/null || true
+  rm -f .socket/nockchain_npc.sock 2>/dev/null || true
   
   echo -e "[*] 更新项目依赖..."
-  timeout 600 cargo update >>"$LOG_FILE" 2>&1 || true
+  timeout 900 cargo update >>"$LOG_FILE" 2>&1 || {
+    echo -e "${YELLOW}[!] 依赖更新超时，继续构建...${RESET}"
+  }
   
   build_success=0
+  total_components=3
   
-  # 使用社区推荐的make命令[2]
-  echo -e "[*] 使用make命令构建（社区推荐）..."
-  
-  # 检查Makefile
-  if [ -f "Makefile" ]; then
-    echo -e "${GREEN}[+] 发现Makefile，使用make命令构建${RESET}"
-    
-    # 构建主要组件
-    for target in "build" "install-hoonc" "install-nockchain"; do
-      echo -e "[*] 执行: make $target"
-      if timeout 3600 make "$target" >>"$LOG_FILE" 2>&1; then
-        echo -e "${GREEN}[+] make $target 成功${RESET}"
-        ((build_success++))
-      else
-        echo -e "${YELLOW}[!] make $target 失败，尝试其他方法...${RESET}"
-      fi
-    done
+  # 步骤1: 构建hoonc编译器[2][3]
+  echo -e "${BLUE}[i] 步骤1/3: 构建hoonc编译器...${RESET}"
+  if timeout 3600 make install-hoonc >>"$LOG_FILE" 2>&1; then
+    echo -e "${GREEN}[+] hoonc构建成功${RESET}"
+    ((build_success++))
   else
-    echo -e "${YELLOW}[!] 未发现Makefile，使用cargo构建...${RESET}"
-    # 回退到cargo构建
-    build_with_cargo
+    echo -e "${YELLOW}[!] hoonc构建失败，尝试手动构建...${RESET}"
+    if timeout 3600 cargo build --bin hoonc --release >>"$LOG_FILE" 2>&1; then
+      mkdir -p "$HOME/.cargo/bin"
+      cp target/release/hoonc "$HOME/.cargo/bin/" 2>/dev/null || true
+      chmod +x "$HOME/.cargo/bin/hoonc"
+      echo -e "${GREEN}[+] hoonc手动构建成功${RESET}"
+      ((build_success++))
+    else
+      echo -e "${RED}[-] hoonc构建完全失败${RESET}"
+    fi
   fi
   
-  # 设置PATH
+  # 确保hoonc在PATH中
   export PATH="$HOME/.cargo/bin:$PATH"
   
-  # 检查构建结果
-  echo -e "[*] 检查构建结果..."
+  # 步骤2: 构建主项目
+  echo -e "${BLUE}[i] 步骤2/3: 构建主项目...${RESET}"
+  for attempt in 1 2 3; do
+    echo -e "[*] 主项目构建尝试 $attempt/3..."
+    if timeout 5400 make build >>"$LOG_FILE" 2>&1; then
+      echo -e "${GREEN}[+] 主项目构建成功${RESET}"
+      break
+    else
+      echo -e "${YELLOW}[!] 主项目构建尝试 $attempt 失败${RESET}"
+      if [ $attempt -eq 3 ]; then
+        echo -e "${YELLOW}[!] 主项目构建失败，尝试分别构建组件...${RESET}"
+        
+        # 分别构建wallet和node
+        for component in "nockchain-wallet" "nockchain"; do
+          echo -e "[*] 单独构建 $component..."
+          if timeout 3600 cargo build --bin "$component" --release >>"$LOG_FILE" 2>&1; then
+            echo -e "${GREEN}[+] $component 单独构建成功${RESET}"
+            mkdir -p "$HOME/.cargo/bin"
+            if [ -f "target/release/$component" ]; then
+              cp "target/release/$component" "$HOME/.cargo/bin/"
+              chmod +x "$HOME/.cargo/bin/$component"
+            fi
+          else
+            echo -e "${YELLOW}[!] $component 单独构建失败${RESET}"
+          fi
+        done
+      else
+        echo -e "[*] 清理缓存后重试..."
+        cargo clean >/dev/null 2>&1 || true
+        sync && sudo sysctl -w vm.drop_caches=1 >/dev/null 2>&1 || true
+        sleep 10
+      fi
+    fi
+  done
+  
+  # 步骤3: 安装组件
+  echo -e "${BLUE}[i] 步骤3/3: 安装组件...${RESET}"
+  
+  # 安装nockchain-wallet
+  if timeout 1800 make install-nockchain-wallet >>"$LOG_FILE" 2>&1; then
+    echo -e "${GREEN}[+] nockchain-wallet安装成功${RESET}"
+    ((build_success++))
+  else
+    echo -e "${YELLOW}[!] nockchain-wallet安装失败，检查二进制文件...${RESET}"
+    if [ -f "target/release/nockchain-wallet" ]; then
+      mkdir -p "$HOME/.cargo/bin"
+      cp target/release/nockchain-wallet "$HOME/.cargo/bin/"
+      chmod +x "$HOME/.cargo/bin/nockchain-wallet"
+      echo -e "${GREEN}[+] nockchain-wallet手动安装成功${RESET}"
+      ((build_success++))
+    fi
+  fi
+  
+  # 安装nockchain
+  if timeout 1800 make install-nockchain >>"$LOG_FILE" 2>&1; then
+    echo -e "${GREEN}[+] nockchain安装成功${RESET}"
+    ((build_success++))
+  else
+    echo -e "${YELLOW}[!] nockchain安装失败，检查二进制文件...${RESET}"
+    if [ -f "target/release/nockchain" ]; then
+      mkdir -p "$HOME/.cargo/bin"
+      cp target/release/nockchain "$HOME/.cargo/bin/"
+      chmod +x "$HOME/.cargo/bin/nockchain"
+      echo -e "${GREEN}[+] nockchain手动安装成功${RESET}"
+      ((build_success++))
+    fi
+  fi
+  
+  # 最终验证
+  echo -e "[*] 最终构建结果验证..."
   component_count=0
   
   for binary in "hoonc" "nockchain-wallet" "nockchain"; do
@@ -332,56 +455,38 @@ function build_all_components_complete() {
     fi
   done
   
-  echo -e "${BLUE}[i] 成功构建: $component_count/3 个组件${RESET}"
+  echo -e "${BLUE}[i] 成功构建: $component_count/$total_components 个组件${RESET}"
   
-  if [ $component_count -ge 2 ]; then
-    echo -e "${GREEN}[+] 构建成功！${RESET}"
+  if [ $component_count -eq $total_components ]; then
+    echo -e "${GREEN}[+] ✅ 所有组件构建成功！${RESET}"
+    return 0
+  elif [ $component_count -ge 2 ]; then
+    echo -e "${YELLOW}[!] 大部分组件构建成功${RESET}"
     return 0
   else
-    echo -e "${YELLOW}[!] 部分构建失败${RESET}"
+    echo -e "${RED}[-] 构建失败${RESET}"
     return 1
   fi
 }
 
-function build_with_cargo() {
-  echo -e "[*] 使用cargo构建组件..."
+# ========= 完整安装流程（修复版） =========
+function complete_installation_fixed() {
+  echo -e "[*] 开始Nockchain完整安装流程（构建失败修复版）..."
   
-  # 构建各个组件
-  for component in "hoonc" "nockchain-wallet" "nockchain"; do
-    echo -e "[*] 构建 $component..."
-    if timeout 3600 cargo build -p "$component" >>"$LOG_FILE" 2>&1; then
-      echo -e "${GREEN}[+] $component 构建成功${RESET}"
-      
-      # 尝试安装
-      if [ -f "target/debug/$component" ]; then
-        mkdir -p "$HOME/.cargo/bin"
-        cp "target/debug/$component" "$HOME/.cargo/bin/"
-        chmod +x "$HOME/.cargo/bin/$component"
-      fi
-    else
-      echo -e "${YELLOW}[!] $component 构建失败${RESET}"
-    fi
-  done
-}
-
-# ========= 完整安装流程 =========
-function complete_installation_process() {
-  echo -e "[*] 开始Nockchain完整安装流程..."
+  echo "=== Nockchain构建失败修复版安装日志 $(date) ===" > "$LOG_FILE"
   
-  echo "=== Nockchain完整安装日志 $(date) ===" > "$LOG_FILE"
+  echo -e "${BLUE}[i] 步骤1/5: 强化系统优化...${RESET}"
+  optimize_system_advanced
   
-  echo -e "${BLUE}[i] 步骤1/5: 系统优化...${RESET}"
-  optimize_system_complete
-  
-  echo -e "${BLUE}[i] 步骤2/5: 安装依赖...${RESET}"
-  if ! install_complete_dependencies; then
+  echo -e "${BLUE}[i] 步骤2/5: 安装增强依赖...${RESET}"
+  if ! install_enhanced_dependencies; then
     echo -e "${RED}[-] 依赖安装失败${RESET}"
     pause_and_return
     return
   fi
   
-  echo -e "${BLUE}[i] 步骤3/5: 配置Rust环境...${RESET}"
-  if ! setup_rust_complete; then
+  echo -e "${BLUE}[i] 步骤3/5: 配置增强Rust环境...${RESET}"
+  if ! setup_rust_enhanced; then
     echo -e "${RED}[-] Rust环境配置失败${RESET}"
     pause_and_return
     return
@@ -394,23 +499,23 @@ function complete_installation_process() {
     return
   fi
   
-  echo -e "${BLUE}[i] 步骤5/5: 构建组件...${RESET}"
-  if build_all_components_complete; then
-    echo -e "${GREEN}[+] ✅ Nockchain完整安装成功！${RESET}"
-    echo -e "${BLUE}[i] 所有组件已构建完成${RESET}"
+  echo -e "${BLUE}[i] 步骤5/5: 分步骤构建组件...${RESET}"
+  if build_components_step_by_step; then
+    echo -e "${GREEN}[+] ✅ Nockchain构建失败修复版安装成功！${RESET}"
+    echo -e "${BLUE}[i] 所有关键组件已构建完成${RESET}"
     echo -e "${BLUE}[i] 下一步: 生成钱包和设置挖矿公钥${RESET}"
     echo -e "${BLUE}[i] 详细日志: $LOG_FILE${RESET}"
   else
-    echo -e "${YELLOW}[!] 安装部分成功${RESET}"
-    echo -e "${BLUE}[i] 查看诊断信息获取详情${RESET}"
+    echo -e "${YELLOW}[!] 安装部分成功，检查日志获取详情${RESET}"
+    echo -e "${BLUE}[i] 日志文件: $LOG_FILE${RESET}"
   fi
   
   pause_and_return
 }
 
-# ========= 钱包管理功能（安全版） =========
-function generate_wallet() {
-  echo -e "[*] 生成钱包..."
+# ========= 钱包管理功能（增强版） =========
+function generate_wallet_enhanced() {
+  echo -e "[*] 生成钱包（增强版）..."
   
   if ! safe_cd_nockchain; then
     return
@@ -422,10 +527,10 @@ function generate_wallet() {
   wallet_bin=""
   if command -v nockchain-wallet >/dev/null 2>&1; then
     wallet_bin="nockchain-wallet"
-  elif [ -f "target/debug/nockchain-wallet" ]; then
-    wallet_bin="./target/debug/nockchain-wallet"
   elif [ -f "target/release/nockchain-wallet" ]; then
     wallet_bin="./target/release/nockchain-wallet"
+  elif [ -f "target/debug/nockchain-wallet" ]; then
+    wallet_bin="./target/debug/nockchain-wallet"
   fi
   
   if [ -z "$wallet_bin" ]; then
@@ -435,61 +540,80 @@ function generate_wallet() {
     return
   fi
   
-  echo -e "${GREEN}[+] 使用钱包: $wallet_bin${RESET}"
+  echo -e "${GREEN}[+] 使用钱包程序: $wallet_bin${RESET}"
+  echo -e "${BLUE}[i] 生成钱包密钥...${RESET}"
   
-  if ! "$wallet_bin" keygen 2>/dev/null; then
+  # 尝试生成钱包，增加错误处理
+  if "$wallet_bin" keygen 2>/dev/null; then
+    echo -e "${GREEN}[+] 钱包生成成功${RESET}"
+  else
     echo -e "${YELLOW}[!] 钱包生成可能有问题，尝试debug模式...${RESET}"
     RUST_LOG=debug "$wallet_bin" keygen
   fi
   
-  echo -e "${YELLOW}[!] 请复制上方的公钥${RESET}"
-  echo -e "${BLUE}[i] 公钥格式：128位16进制${RESET}"
+  echo ""
+  echo -e "${YELLOW}[!] 重要提醒:${RESET}"
+  echo -e "${YELLOW}[!] 1. 请务必备份上方显示的助记词、私钥和公钥${RESET}"
+  echo -e "${YELLOW}[!] 2. 公钥格式应为128位16进制字符串${RESET}"
+  echo -e "${YELLOW}[!] 3. 下一步需要将公钥设置到.env文件中${RESET}"
+  echo ""
   pause_and_return
 }
 
-function set_mining_pubkey() {
-  echo -e "[*] 设置挖矿公钥..."
+function set_mining_pubkey_enhanced() {
+  echo -e "[*] 设置挖矿公钥（增强版）..."
   
   if ! safe_cd_nockchain; then
     return
   fi
 
-  echo -e "${BLUE}[i] 公钥格式：128位16进制字符串${RESET}"
+  echo -e "${BLUE}[i] 公钥要求:${RESET}"
+  echo -e "  - 格式：128位16进制字符串"
+  echo -e "  - 示例：abcdef123456789... (共128个字符)"
+  echo -e "  - 不含空格、换行符等特殊字符"
   echo ""
   
   while true; do
-    read -p "请输入公钥: " pubkey
+    read -p "请输入完整的挖矿公钥: " pubkey
     
     if [ -z "$pubkey" ]; then
       echo -e "${RED}[-] 公钥不能为空${RESET}"
       continue
     fi
     
+    # 清理公钥格式
     pubkey=$(echo "$pubkey" | tr -d ' \n\r\t' | tr '[:upper:]' '[:lower:]')
     
     if [ ${#pubkey} -eq 128 ] && [[ "$pubkey" =~ ^[0-9a-f]{128}$ ]]; then
+      # 写入.env文件
       sed -i '/^MINING_PUBKEY=/d' "$ENV_FILE" 2>/dev/null || true
       echo "MINING_PUBKEY=$pubkey" >> "$ENV_FILE"
-      echo -e "${GREEN}[+] 公钥已写入.env文件${RESET}"
+      
+      echo -e "${GREEN}[+] 公钥已成功写入.env文件${RESET}"
+      echo -e "${GREEN}[+] 公钥: ${pubkey:0:16}...${pubkey: -16}${RESET}"
       break
     else
-      echo -e "${YELLOW}[!] 公钥格式错误，请重新输入${RESET}"
+      echo -e "${RED}[-] 公钥格式错误${RESET}"
+      echo -e "${YELLOW}[!] 当前长度: ${#pubkey}，需要128位${RESET}"
+      echo -e "${YELLOW}[!] 请检查公钥是否完整且仅包含0-9和a-f字符${RESET}"
     fi
   done
   
   pause_and_return
 }
 
-# ========= 节点启动修复（安全版） =========
-function fix_and_start_node() {
-  echo -e "[*] 修复并启动节点..."
+# ========= 节点启动增强版 =========
+function fix_and_start_node_enhanced() {
+  echo -e "[*] 修复并启动节点（增强版）..."
   
   if ! safe_cd_nockchain; then
     return
   fi
   
+  # 检查配置
   if [ ! -f "$ENV_FILE" ]; then
     echo -e "${RED}[-] .env文件不存在${RESET}"
+    echo -e "${YELLOW}[!] 请先设置挖矿公钥${RESET}"
     pause_and_return
     return
   fi
@@ -497,18 +621,24 @@ function fix_and_start_node() {
   source "$ENV_FILE"
   if [ -z "$MINING_PUBKEY" ]; then
     echo -e "${RED}[-] 未设置挖矿公钥${RESET}"
+    echo -e "${YELLOW}[!] 请先运行钱包生成和公钥设置${RESET}"
     pause_and_return
     return
   fi
   
-  echo -e "[*] 清理启动环境..."
+  # 彻底清理运行环境
+  echo -e "[*] 清理运行环境..."
   pkill -f nockchain 2>/dev/null || true
   screen -XS nockchain quit 2>/dev/null || true
   
+  # 清理socket文件[4]
   find . -name "*.sock" -delete 2>/dev/null || true
   find /tmp -name "*nockchain*.sock" -delete 2>/dev/null || true
+  rm -f .socket/nockchain_npc.sock 2>/dev/null || true
   
+  # 检查端口占用
   if netstat -tlnp 2>/dev/null | grep -q ":3006 "; then
+    echo -e "[*] 端口3006被占用，尝试释放..."
     pid=$(netstat -tlnp 2>/dev/null | grep ":3006 " | awk '{print $7}' | cut -d'/' -f1 | head -1)
     if [ -n "$pid" ] && [ "$pid" != "-" ]; then
       kill -9 "$pid" 2>/dev/null || true
@@ -517,25 +647,33 @@ function fix_and_start_node() {
   
   sleep 5
   
-  mkdir -p .socket test-leader
+  # 创建必要目录
+  mkdir -p .socket test-leader logs
   chmod 755 .socket test-leader
   
+  # 设置环境
   source "$HOME/.cargo/env" 2>/dev/null || true
   export PATH="$HOME/.cargo/bin:$PATH"
   
+  # 查找节点程序
   node_bin=""
   if command -v nockchain >/dev/null 2>&1; then
     node_bin="nockchain"
-  elif [ -f "target/debug/nockchain" ]; then
-    node_bin="./target/debug/nockchain"
   elif [ -f "target/release/nockchain" ]; then
     node_bin="./target/release/nockchain"
+  elif [ -f "target/debug/nockchain" ]; then
+    node_bin="./target/debug/nockchain"
   else
-    echo -e "${RED}[-] 未找到节点程序${RESET}"
+    echo -e "${RED}[-] 未找到nockchain节点程序${RESET}"
+    echo -e "${YELLOW}[!] 请先完成构建${RESET}"
     pause_and_return
     return
   fi
   
+  echo -e "${GREEN}[+] 使用节点程序: $node_bin${RESET}"
+  echo -e "${GREEN}[+] 挖矿公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}${RESET}"
+  
+  # 构建启动命令[2][3]
   start_cmd="RUST_LOG=info $node_bin --mining-pubkey $MINING_PUBKEY \
 --mine \
 --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
@@ -546,32 +684,38 @@ function fix_and_start_node() {
 --npc-socket .socket/nockchain.sock \
 --bind /ip4/0.0.0.0/udp/3006/quic-v1"
   
+  # 启动节点
   if command -v screen >/dev/null 2>&1; then
+    echo -e "[*] 使用screen启动节点..."
     screen -dmS nockchain bash -c "cd '$NCK_DIR' && $start_cmd 2>&1 | tee '$NODE_LOG'"
     sleep 5
     
     if screen -list | grep -qw "nockchain"; then
-      echo -e "${GREEN}[+] 节点启动成功 (screen: nockchain)${RESET}"
-      echo -e "${BLUE}[i] 使用 'screen -r nockchain' 查看日志${RESET}"
+      echo -e "${GREEN}[+] ✅ 节点启动成功！${RESET}"
+      echo -e "${BLUE}[i] Screen会话: nockchain${RESET}"
+      echo -e "${BLUE}[i] 查看日志: screen -r nockchain${RESET}"
+      echo -e "${BLUE}[i] 退出查看: Ctrl+A+D${RESET}"
+      echo -e "${BLUE}[i] 日志文件: $NODE_LOG${RESET}"
     else
       echo -e "${RED}[-] 节点启动失败${RESET}"
     fi
   else
+    echo -e "[*] 使用后台进程启动节点..."
     nohup bash -c "$start_cmd" > "$NODE_LOG" 2>&1 &
     echo -e "${GREEN}[+] 节点已后台启动${RESET}"
+    echo -e "${BLUE}[i] 日志文件: $NODE_LOG${RESET}"
   fi
   
   pause_and_return
 }
 
-# ========= 状态检查（安全版） =========
-function check_complete_status() {
-  echo -e "[*] 检查完整系统状态..."
+# ========= 其他功能函数 =========
+function check_enhanced_status() {
+  echo -e "[*] 检查系统状态（增强版）..."
   
-  # 首先检查目录状态
   echo -e "${BLUE}[i] 目录状态:${RESET}"
   if [ -d "$NCK_DIR" ]; then
-    echo -e "  ✓ 项目目录存在: $NCK_DIR"
+    echo -e "  ✓ 项目目录: $NCK_DIR"
   else
     echo -e "  ✗ 项目目录不存在: $NCK_DIR"
     echo -e "${YELLOW}[!] 请先运行完整安装${RESET}"
@@ -607,47 +751,64 @@ function check_complete_status() {
     fi
   done
   
-  echo -e "${BLUE}[i] 构建状态: $component_count/3 组件成功${RESET}"
+  echo -e "${BLUE}[i] 构建成功率: $component_count/3 ($(( component_count * 100 / 3 ))%)${RESET}"
   
   echo -e "${BLUE}[i] 节点状态:${RESET}"
   if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
-    echo -e "  ✓ 节点运行中 (screen)"
+    echo -e "  ✓ 节点运行中 (screen session)"
   elif pgrep -f "nockchain" >/dev/null 2>&1; then
-    echo -e "  ✓ 节点运行中 (进程)"
+    echo -e "  ✓ 节点运行中 (background process)"
   else
     echo -e "  ✗ 节点未运行"
   fi
   
   echo -e "${BLUE}[i] 系统资源:${RESET}"
-  echo -e "  内存: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-  echo -e "  Swap: $(free -h | grep Swap | awk '{print $3"/"$2}')"
+  echo -e "  内存: $(free -h | grep Mem | awk '{print $3"/"$2" ("int($3/$2*100)"%)"}')"
+  echo -e "  Swap: $(free -h | grep Swap | awk '{print $3"/"$2" ("int($3/$2*100)"%)"}')"
   echo -e "  磁盘: $(df -h . | tail -1 | awk '{print $3"/"$2" ("$5" used)"}')"
   
-  if [ $component_count -eq 3 ]; then
-    echo -e "${GREEN}[+] ✅ 系统状态良好，所有组件就绪！${RESET}"
+  # 网络状态
+  echo -e "${BLUE}[i] 网络状态:${RESET}"
+  if netstat -tlnp 2>/dev/null | grep -q ":3006"; then
+    echo -e "  ✓ 端口3006已绑定"
   else
-    echo -e "${YELLOW}[!] 部分组件缺失，需要重新构建${RESET}"
+    echo -e "  - 端口3006未绑定"
+  fi
+  
+  if [ $component_count -eq 3 ]; then
+    echo -e "${GREEN}[+] ✅ 系统状态优秀，所有组件就绪！${RESET}"
+  elif [ $component_count -ge 2 ]; then
+    echo -e "${YELLOW}[!] 系统状态良好，大部分组件就绪${RESET}"
+  else
+    echo -e "${RED}[-] 系统状态不佳，需要重新构建${RESET}"
   fi
   
   pause_and_return
 }
 
-# ========= 清理重建（安全版） =========
-function cleanup_and_rebuild() {
-  echo -e "[*] 清理环境并重新构建..."
+function cleanup_and_rebuild_enhanced() {
+  echo -e "[*] 清理环境并重新构建（增强版）..."
   
+  echo -e "[*] 停止所有相关进程..."
   pkill -f cargo 2>/dev/null || true
   pkill -f rustc 2>/dev/null || true
   pkill -f nockchain 2>/dev/null || true
-  sleep 3
+  screen -XS nockchain quit 2>/dev/null || true
+  sleep 5
   
+  echo -e "[*] 清理构建文件..."
   if [ -d "$NCK_DIR" ]; then
     cd "$NCK_DIR"
     cargo clean >/dev/null 2>&1 || true
     rm -rf target/ 2>/dev/null || true
+    find . -name "*.sock" -delete 2>/dev/null || true
   fi
-  rm -rf ~/.cargo/registry/cache/ 2>/dev/null || true
   
+  echo -e "[*] 清理Cargo缓存..."
+  rm -rf ~/.cargo/registry/cache/ 2>/dev/null || true
+  rm -rf ~/.cargo/registry/index/ 2>/dev/null || true
+  
+  echo -e "[*] 清理系统缓存..."
   sync
   sudo sysctl -w vm.drop_caches=3 >/dev/null 2>&1 || true
   
@@ -655,7 +816,7 @@ function cleanup_and_rebuild() {
   echo -e "[*] 开始重新构建..."
   
   if [ -d "$NCK_DIR" ]; then
-    build_all_components_complete
+    build_components_step_by_step
   else
     echo -e "${RED}[-] 项目目录不存在，请先运行完整安装${RESET}"
   fi
@@ -663,21 +824,23 @@ function cleanup_and_rebuild() {
   pause_and_return
 }
 
-function view_node_logs() {
+function view_node_logs_enhanced() {
   if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
-    echo -e "${YELLOW}[!] 进入screen日志查看 (Ctrl+A+D 退出)...${RESET}"
+    echo -e "${YELLOW}[!] 进入screen日志查看...${RESET}"
+    echo -e "${BLUE}[i] 使用 Ctrl+A+D 退出查看${RESET}"
+    sleep 2
     screen -r nockchain
   elif [ -f "$NODE_LOG" ]; then
-    echo -e "${YELLOW}[!] 显示节点日志:${RESET}"
+    echo -e "${YELLOW}[!] 显示节点日志 (Ctrl+C 退出):${RESET}"
     tail -f "$NODE_LOG"
   else
-    echo -e "${RED}[-] 无日志文件${RESET}"
+    echo -e "${RED}[-] 无可用的日志文件${RESET}"
   fi
   pause_and_return
 }
 
-function stop_all_services() {
-  echo -e "[*] 停止所有Nockchain服务..."
+function stop_all_services_enhanced() {
+  echo -e "[*] 停止所有Nockchain服务（增强版）..."
   
   if command -v screen >/dev/null 2>&1 && screen -list | grep -qw "nockchain"; then
     screen -S nockchain -X quit >/dev/null 2>&1
@@ -697,7 +860,14 @@ function stop_all_services() {
   fi
   
   sleep 3
-  echo -e "${GREEN}[+] 所有服务已停止${RESET}"
+  
+  echo -e "[*] 验证服务停止状态..."
+  if ! pgrep -f "nockchain" >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] ✅ 所有服务已完全停止${RESET}"
+  else
+    echo -e "${YELLOW}[!] 部分服务可能仍在运行${RESET}"
+  fi
+  
   pause_and_return
 }
 
@@ -713,44 +883,45 @@ function main_menu() {
   echo "请选择操作:"
   echo ""
   echo "🚀 安装和构建:"
-  echo "  1) 🎯 完整安装 (从零开始，包含目录检查)"
-  echo "  2) 🔧 重新构建所有组件"
+  echo "  1) 🎯 完整安装 (构建失败修复版)"
+  echo "  2) 🔧 分步骤重新构建"
   echo "  3) 🧹 清理环境并重建"
   echo ""
   echo "🔑 钱包管理:"
-  echo "  4) 🔑 生成新钱包"
-  echo "  5) 📝 设置挖矿公钥"
+  echo "  4) 🔑 生成钱包 (增强版)"
+  echo "  5) 📝 设置挖矿公钥 (增强版)"
   echo ""
   echo "⚡ 节点管理:"
-  echo "  6) ⚡ 修复并启动节点"
+  echo "  6) ⚡ 启动节点 (增强版)"
   echo "  7) 📊 查看节点日志"
   echo "  8) ⏹️  停止所有服务"
   echo ""
   echo "🔍 状态和诊断:"
-  echo "  9) 🔍 检查完整状态"
+  echo "  9) 🔍 检查系统状态 (增强版)"
   echo ""
   echo "  0) 退出脚本"
   echo ""
-  echo -e "${CYAN}💡 目录安全版: 自动检查和修复目录问题${RESET}"
-  echo -e "${CYAN}💡 基于社区经验: 优化内存使用和构建流程${RESET}"
+  echo -e "${CYAN}💡 构建失败修复版: 专门解决make build和install失败问题${RESET}"
+  echo -e "${CYAN}💡 增强内存管理: 自动配置swap，支持低内存环境${RESET}"
+  echo -e "${CYAN}💡 分步骤构建: 提高构建成功率，智能错误恢复${RESET}"
   echo ""
   read -p "请输入编号 (0-9): " choice
 
   case "$choice" in
-    1) complete_installation_process ;;
+    1) complete_installation_fixed ;;
     2) 
       if ensure_nockchain_directory; then
-        build_all_components_complete
+        build_components_step_by_step
         pause_and_return
       fi
       ;;
-    3) cleanup_and_rebuild ;;
-    4) generate_wallet ;;
-    5) set_mining_pubkey ;;
-    6) fix_and_start_node ;;
-    7) view_node_logs ;;
-    8) stop_all_services ;;
-    9) check_complete_status ;;
+    3) cleanup_and_rebuild_enhanced ;;
+    4) generate_wallet_enhanced ;;
+    5) set_mining_pubkey_enhanced ;;
+    6) fix_and_start_node_enhanced ;;
+    7) view_node_logs_enhanced ;;
+    8) stop_all_services_enhanced ;;
+    9) check_enhanced_status ;;
     0) echo "退出脚本."; exit 0 ;;
     *) echo -e "${RED}[-] 无效选项，请输入0-9${RESET}"; pause_and_return ;;
   esac
