@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ========= Nockchain 挖矿优化版脚本 v1.0 =========
+# ========= Nockchain 完整功能管理脚本 v27.0 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -27,139 +27,61 @@ mem_info() {
   printf "%dMi/%dMi (%d%%)" "$used" "$total" "$perc"
 }
 
-swap_info() {
-  local used total perc
-  total=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
-  free=$(grep SwapFree  /proc/meminfo | awk '{print $2}')
-  if [ "$total" -eq 0 ]; then echo "0Mi/0Mi (0%)"; return; fi
-  used=$(( (total-free)/1024 ))
-  total=$(( total/1024 ))
-  perc=$(( used*100/total ))
-  printf "%dMi/%dMi (%d%%)" "$used" "$total" "$perc"
-}
-
 log() { echo -e "${BLUE}[*] $*${RESET}"; }
 ok()  { echo -e "${GREEN}[✓] $*${RESET}"; }
 warn(){ echo -e "${YELLOW}[!] $*${RESET}"; }
-err() { echo -e "${RED}[✗] $*${RESET}"; exit 1; }
+err() { echo -e "${RED}[✗] $*${RESET}"; }
 
-# ---------- 性能优化函数 ----------
-optimize_memory() {
-  log "优化内存配置"
+# ---------- 安装依赖函数 ----------
+install_dependencies() {
+  log "安装系统依赖"
   
-  # 设置更大的栈空间，防止mem.rs错误
-  export RUST_MIN_STACK=33554432  # 32MB栈空间
-  
-  # 配置swap（如果内存不足）
-  total_mem=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
-  swap_total=$(grep SwapTotal /proc/meminfo | awk '{print int($2/1024)}')
-  
-  if [ "$total_mem" -lt 32768 ] && [ "$swap_total" -lt 16384 ]; then
-    warn "内存小于32GB，自动创建16GB swap"
-    sudo fallocate -l 16G /swapfile 2>/dev/null || dd if=/dev/zero of="$HOME/nockchain.swap" bs=1G count=16
-    sudo chmod 600 /swapfile 2>/dev/null || chmod 600 "$HOME/nockchain.swap"
-    sudo mkswap /swapfile 2>/dev/null || sudo mkswap "$HOME/nockchain.swap" 2>/dev/null
-    sudo swapon /swapfile 2>/dev/null || sudo swapon "$HOME/nockchain.swap" 2>/dev/null
-    ok "Swap已配置"
+  # 检查sudo权限
+  if ! sudo -n true 2>/dev/null; then
+    err "需要sudo权限来安装系统依赖"
+    return 1
   fi
   
-  # 优化内存分配器
-  export MALLOC_ARENA_MAX=2  # 限制内存分配器arena数量
+  # 更新包列表
+  sudo apt update -y
   
-  # 设置Nockchain内存限制
-  export NOCKVM_MEMORY_LIMIT=8589934592  # 8GB内存限制
+  # 安装构建依赖
+  sudo apt install -y \
+    build-essential \
+    git \
+    curl \
+    wget \
+    pkg-config \
+    clang \
+    cmake \
+    libssl-dev \
+    screen \
+    htop
   
-  ok "内存优化完成"
+  ok "系统依赖安装完成"
 }
 
-optimize_cpu() {
-  log "优化CPU配置"
+# ---------- 安装Rust函数 ----------
+install_rust() {
+  log "安装Rust编程语言"
   
-  # 获取物理CPU核心数（不包括超线程）
-  if [ -f /proc/cpuinfo ]; then
-    physical_cores=$(grep "cpu cores" /proc/cpuinfo | head -1 | awk '{print $4}')
-    if [ -z "$physical_cores" ]; then
-      physical_cores=$(grep -c processor /proc/cpuinfo)
-    fi
-  else
-    physical_cores=4  # 默认值
-  fi
-  
-  # 根据物理核心数优化线程配置
-  if [ "$physical_cores" -ge 8 ]; then
-    # 高端CPU：使用75%的物理核心
-    export CARGO_BUILD_JOBS=$(( physical_cores * 3 / 4 ))
-    export NOCKCHAIN_MINING_THREADS=$(( physical_cores * 3 / 4 ))
-  elif [ "$physical_cores" -ge 4 ]; then
-    # 中端CPU：使用所有物理核心
-    export CARGO_BUILD_JOBS=$physical_cores
-    export NOCKCHAIN_MINING_THREADS=$physical_cores
-  else
-    # 低端CPU：使用所有核心
-    export CARGO_BUILD_JOBS=$physical_cores
-    export NOCKCHAIN_MINING_THREADS=$physical_cores
-  fi
-  
-  # 设置CPU亲和性（如果可能）
-  if command -v taskset >/dev/null 2>&1; then
-    # 将挖矿进程绑定到特定CPU核心
-    export NOCKCHAIN_CPU_AFFINITY="0-$((NOCKCHAIN_MINING_THREADS-1))"
-  fi
-  
-  ok "CPU优化完成：使用 $NOCKCHAIN_MINING_THREADS 个线程"
-}
-
-optimize_mining_params() {
-  log "优化挖矿参数"
-  
-  # 设置挖矿优化参数
-  export RUST_LOG=info  # 减少日志输出提高性能
-  export RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1"  # 编译优化
-  
-  # 创建优化配置文件
-  mkdir -p "$NCK_DIR/config"
-  cat > "$NCK_DIR/config/mining_config.toml" << EOF
-# Nockchain 挖矿优化配置
-[mining]
-threads = $NOCKCHAIN_MINING_THREADS
-parallel = true
-batch_size = 1024
-memory_pool = 4096  # MB
-
-[network]
-connect_peers = 8
-max_peers = 16
-outbound_rate = 100
-EOF
-  
-  ok "挖矿参数优化完成"
-}
-
-# ---------- 主要功能函数 ----------
-complete_environment_setup() {
-  echo "=== Nockchain 优化版安装 $(date) ===" > "$BUILD_LOG"
-  
-  log "系统检测"
-  command -v sudo >/dev/null || warn "无sudo权限，部分优化可能无法应用"
-  
-  log "安装依赖"
-  sudo apt update -qq 2>/dev/null
-  sudo apt install -y build-essential clang cmake pkg-config git curl libssl-dev 2>/dev/null
-  
-  optimize_memory
-  optimize_cpu
-  
-  log "安装Rust"
   if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
+    ok "Rust安装完成"
+  else
+    ok "Rust已安装: $(rustc --version)"
   fi
   
   # 优化Cargo配置
   mkdir -p "$HOME/.cargo"
-  cat > "$HOME/.cargo/config.toml" << EOF
+  cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
-jobs = $CARGO_BUILD_JOBS
+jobs = 1
+
+[net]
+retry = 50
+timeout = 3600
 
 [profile.release]
 opt-level = 3
@@ -171,147 +93,412 @@ panic = "abort"
 rustflags = ["-C", "target-cpu=native"]
 EOF
   
-  log "克隆/更新源码"
+  ok "Cargo配置优化完成"
+}
+
+# ---------- 完整安装函数 ----------
+complete_installation() {
+  log "开始完整安装Nockchain"
+  echo "=== Nockchain完整安装日志 $(date) ===" > "$BUILD_LOG"
+  
+  # 步骤1: 安装系统依赖
+  if ! install_dependencies; then
+    err "依赖安装失败"
+    pause
+    return 1
+  fi
+  
+  # 步骤2: 安装Rust
+  if ! install_rust; then
+    err "Rust安装失败"
+    pause
+    return 1
+  fi
+  
+  # 步骤3: 克隆源码
+  log "克隆Nockchain源码"
   if [ ! -d "$NCK_DIR" ]; then
     git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
   else
     git -C "$NCK_DIR" pull
   fi
   
-  optimize_mining_params
-  
-  log "编译优化版Nockchain"
+  # 步骤4: 构建项目
+  log "构建Nockchain项目（这可能需要较长时间）"
   cd "$NCK_DIR"
   cargo clean
-  RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo build --release 2>&1 | tee "$BUILD_LOG"
   
-  # 安装到系统路径
-  mkdir -p "$HOME/.local/bin"
-  cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
+  # 设置构建环境变量
+  export RUST_MIN_STACK=16777216
+  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
   
-  # 创建必要目录
+  # 开始构建
+  timeout 14400 cargo build --release 2>&1 | tee "$BUILD_LOG"
+  
+  if [ $? -eq 0 ]; then
+    ok "Nockchain构建成功"
+    
+    # 安装到用户bin目录
+    mkdir -p "$HOME/.local/bin"
+    cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
+    
+    # 添加到PATH
+    if ! grep -q "$HOME/.local/bin" ~/.bashrc; then
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    fi
+    
+    export PATH="$HOME/.local/bin:$PATH"
+    
+  else
+    warn "构建可能失败，请查看日志: $BUILD_LOG"
+  fi
+  
+  # 步骤5: 创建必要目录和文件
   mkdir -p "$NCK_DIR/logs" "$NCK_DIR/.socket"
   
   # 创建环境文件
-  [ -f "$ENV_FILE" ] || cat > "$ENV_FILE" <<EOF
+  if [ ! -f "$ENV_FILE" ]; then
+    cat > "$ENV_FILE" <<EOF
 MINING_PUBKEY=
 RUST_LOG=info
 EOF
-  
-  ok "优化安装完成"
-  pause
-}
-
-set_mining_pubkey() {
-  [ -f "$ENV_FILE" ] || err ".env 不存在，请先安装"
-  read -rp "输入 128 位公钥: " key
-  key=$(echo "$key" | tr -d '[:space:]' | tr A-F a-f)
-  [[ ${#key} -eq 128 && "$key" =~ ^[0-9a-f]+$ ]] || { err "格式不正确"; }
-  sed -i "/^MINING_PUBKEY=/d" "$ENV_FILE"
-  echo "MINING_PUBKEY=$key" >> "$ENV_FILE"
-  ok "公钥已写入 .env"
-  pause
-}
-
-start_optimized_node() {
-  source "$ENV_FILE" || err "读取 .env 失败"
-  [ -n "$MINING_PUBKEY" ] || err "未设置 MINING_PUBKEY"
-  
-  # 停止现有进程
-  pkill -f nockchain || true
-  
-  # 优化系统
-  optimize_memory
-  optimize_cpu
-  
-  # 设置CPU亲和性
-  if [ -n "$NOCKCHAIN_CPU_AFFINITY" ] && command -v taskset >/dev/null 2>&1; then
-    TASKSET_CMD="taskset -c $NOCKCHAIN_CPU_AFFINITY"
-  else
-    TASKSET_CMD=""
   fi
   
-  # 启动优化版节点
+  ok "完整安装完成"
+  pause
+}
+
+# ---------- 项目构建函数 ----------
+build_project() {
+  log "重新构建Nockchain项目"
+  
+  if [ ! -d "$NCK_DIR" ]; then
+    err "项目目录不存在，请先执行完整安装"
+    pause
+    return 1
+  fi
+  
   cd "$NCK_DIR"
-  mkdir -p logs .socket
+  
+  # 清理旧构建
+  cargo clean
+  rm -rf target/
+  
+  # 更新源码
+  git pull
+  
+  # 设置构建环境
+  export RUST_MIN_STACK=16777216
+  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+  
+  log "开始构建（预计需要30-60分钟）"
+  timeout 14400 cargo build --release 2>&1 | tee "$BUILD_LOG"
+  
+  if [ $? -eq 0 ]; then
+    ok "项目构建成功"
+    
+    # 更新二进制文件
+    mkdir -p "$HOME/.local/bin"
+    cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
+    
+    # 验证构建结果
+    for binary in hoonc nockchain-wallet nockchain; do
+      if [ -f "target/release/$binary" ]; then
+        ok "$binary 构建成功"
+      else
+        warn "$binary 构建失败"
+      fi
+    done
+  else
+    err "构建失败，请查看日志: $BUILD_LOG"
+  fi
+  
+  pause
+}
+
+# ---------- 内存优化函数 ----------
+optimize_memory() {
+  log "优化内存配置"
+  
+  # 设置栈空间
+  export RUST_MIN_STACK=33554432  # 32MB
+  
+  # 检查并配置swap
+  total_mem=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  swap_total=$(grep SwapTotal /proc/meminfo | awk '{print int($2/1024)}')
+  
+  if [ "$total_mem" -lt 16384 ] && [ "$swap_total" -lt 8192 ]; then
+    if sudo -n true 2>/dev/null; then
+      warn "内存不足，自动配置8GB swap"
+      sudo fallocate -l 8G /swapfile 2>/dev/null || dd if=/dev/zero of="$HOME/nockchain.swap" bs=1G count=8
+      sudo chmod 600 /swapfile 2>/dev/null || chmod 600 "$HOME/nockchain.swap"
+      sudo mkswap /swapfile 2>/dev/null || sudo mkswap "$HOME/nockchain.swap" 2>/dev/null
+      sudo swapon /swapfile 2>/dev/null || sudo swapon "$HOME/nockchain.swap" 2>/dev/null
+      ok "Swap配置完成"
+    fi
+  fi
+  
+  ok "内存优化完成"
+}
+
+# ---------- 清理socket文件 ----------
+clean_socket_files() {
+  log "清理socket文件"
+  
+  # 停止现有进程
+  pkill -f nockchain 2>/dev/null || true
+  screen -XS nockchain quit 2>/dev/null || true
+  sleep 2
+  
+  # 清理socket目录
+  if [ -d "$NCK_DIR/.socket" ]; then
+    rm -rf "$NCK_DIR/.socket"/*
+  fi
+  mkdir -p "$NCK_DIR/.socket"
+  chmod 755 "$NCK_DIR/.socket"
+  
+  # 清理系统socket文件
+  find "$HOME" -name "*.sock" -delete 2>/dev/null || true
+  find "$HOME" -name "nockchain*.sock" -delete 2>/dev/null || true
+  
+  ok "Socket文件清理完成"
+}
+
+# ---------- 设置挖矿公钥 ----------
+set_mining_pubkey() {
+  log "设置挖矿公钥"
+  
+  if [ ! -f "$ENV_FILE" ]; then
+    mkdir -p "$NCK_DIR"
+    echo "MINING_PUBKEY=" > "$ENV_FILE"
+    echo "RUST_LOG=info" >> "$ENV_FILE"
+  fi
+  
+  # 显示当前公钥
+  current_key=$(grep "MINING_PUBKEY=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2)
+  if [ -n "$current_key" ]; then
+    echo "当前公钥: ${current_key:0:16}...${current_key: -16}"
+  fi
+  
+  read -rp "输入新的128位公钥（留空保持不变）: " key
+  
+  if [ -z "$key" ]; then
+    warn "公钥未更改"
+    pause
+    return
+  fi
+  
+  key=$(echo "$key" | tr -d '[:space:]' | tr A-F a-f)
+  
+  if [ ${#key} -eq 128 ] && [[ "$key" =~ ^[0-9a-f]+$ ]]; then
+    sed -i "/^MINING_PUBKEY=/d" "$ENV_FILE"
+    echo "MINING_PUBKEY=$key" >> "$ENV_FILE"
+    ok "公钥已更新"
+  else
+    err "公钥格式不正确（需要128位16进制）"
+  fi
+  
+  pause
+}
+
+# ---------- 启动节点 ----------
+start_node() {
+  log "启动Nockchain节点"
+  
+  # 检查环境
+  source "$ENV_FILE" 2>/dev/null || true
+  if [ -z "$MINING_PUBKEY" ]; then
+    err "未设置挖矿公钥，请先设置"
+    pause
+    return 1
+  fi
+  
+  # 优化内存
+  optimize_memory
+  
+  # 清理socket
+  clean_socket_files
+  
+  # 创建日志目录
+  mkdir -p "$NCK_DIR/logs"
+  
+  # 检查可执行文件
+  if ! command -v nockchain >/dev/null && [ ! -f "$NCK_DIR/target/release/nockchain" ]; then
+    err "nockchain程序不存在，请先执行安装或构建"
+    pause
+    return 1
+  fi
+  
+  # 确定使用的可执行文件
+  if command -v nockchain >/dev/null; then
+    NOCKCHAIN_BIN="nockchain"
+  else
+    NOCKCHAIN_BIN="$NCK_DIR/target/release/nockchain"
+  fi
   
   # 构建启动命令
-  MINING_CMD="RUST_MIN_STACK=33554432 NOCKVM_MEMORY_LIMIT=8589934592 RUST_LOG=info $TASKSET_CMD nockchain \
+  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info $NOCKCHAIN_BIN \
     --mining-pubkey $MINING_PUBKEY \
     --mine \
-    --mining-threads $NOCKCHAIN_MINING_THREADS \
     --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
     --peer /ip4/65.109.156.108/udp/3006/quic-v1 \
     --peer /ip4/65.21.67.175/udp/3006/quic-v1 \
     --peer /ip4/65.109.156.172/udp/3006/quic-v1 \
     --peer /ip4/34.174.22.166/udp/3006/quic-v1 \
-    --npc-socket .socket/nockchain.sock \
+    --npc-socket $NCK_DIR/.socket/nockchain.sock \
     --bind /ip4/0.0.0.0/udp/3006/quic-v1"
   
-  # 使用screen启动
-  if command -v screen >/dev/null 2>&1; then
-    screen -dmS nockchain bash -c "cd '$NCK_DIR' && $MINING_CMD 2>&1 | tee logs/nockchain.log"
+  # 启动节点
+  cd "$NCK_DIR"
+  if command -v screen >/dev/null; then
+    screen -dmS nockchain bash -c "$START_CMD 2>&1 | tee $NODE_LOG"
     sleep 3
     if screen -list | grep -qw "nockchain"; then
-      ok "优化版节点已启动 (screen会话)"
+      ok "节点已启动 (screen会话: nockchain)"
+      ok "查看日志: screen -r nockchain"
     else
       err "节点启动失败"
     fi
   else
-    # 后台启动
-    nohup bash -c "$MINING_CMD" > logs/nockchain.log 2>&1 &
-    ok "优化版节点已后台启动 (PID: $!)"
+    nohup bash -c "$START_CMD" > "$NODE_LOG" 2>&1 &
+    ok "节点已后台启动"
   fi
   
-  log "挖矿已开始，使用 $NOCKCHAIN_MINING_THREADS 个线程"
   pause
 }
 
+# ---------- 查看日志 ----------
 view_logs() {
-  [ -f "$NODE_LOG" ] && tail -n 50 -f "$NODE_LOG" || err "日志文件不存在"
+  if command -v screen >/dev/null && screen -list | grep -qw "nockchain"; then
+    warn "将进入screen会话查看实时日志，按Ctrl+A+D退出"
+    sleep 2
+    screen -r nockchain
+  elif [ -f "$NODE_LOG" ]; then
+    tail -n 100 -f "$NODE_LOG"
+  else
+    err "日志文件不存在"
+  fi
+  pause
 }
 
-check_status() {
-  echo -e "${BLUE}=== 系统资源 ===${RESET}"
-  echo "内存: $(mem_info)   Swap: $(swap_info)"
-  echo "CPU线程: $NOCKCHAIN_MINING_THREADS / $(grep -c processor /proc/cpuinfo)"
+# ---------- 停止节点 ----------
+stop_node() {
+  log "停止Nockchain节点"
   
-  echo -e "\n${BLUE}=== 挖矿状态 ===${RESET}"
-  if pgrep -f "nockchain.*--mine" >/dev/null; then
-    ok "挖矿进程运行中"
-    ps -o pid,pcpu,pmem,cmd -p $(pgrep -f "nockchain.*--mine") | grep -v PID
-  else
-    warn "挖矿进程未运行"
+  # 停止screen会话
+  if screen -list | grep -qw "nockchain"; then
+    screen -S nockchain -X quit
+    ok "Screen会话已终止"
   fi
   
-  echo -e "\n${BLUE}=== 最近日志 ===${RESET}"
-  if [ -f "$NODE_LOG" ]; then
-    tail -n 5 "$NODE_LOG"
-  else
-    warn "日志文件不存在"
+  # 停止进程
+  if pgrep -f "nockchain.*--mine" >/dev/null; then
+    pkill -f "nockchain.*--mine"
+    ok "挖矿进程已停止"
+  fi
+  
+  # 清理socket文件
+  if [ -d "$NCK_DIR/.socket" ]; then
+    rm -rf "$NCK_DIR/.socket"/*
+    ok "Socket文件已清理"
   fi
   
   pause
 }
 
-# ---------- 菜单 ----------
-while true; do
+# ---------- 检查状态 ----------
+check_status() {
+  echo -e "${BLUE}=== 系统状态 ===${RESET}"
+  echo "内存使用: $(mem_info)"
+  echo "CPU核心: $(nproc)"
+  
+  echo -e "\n${BLUE}=== 组件状态 ===${RESET}"
+  for binary in hoonc nockchain-wallet nockchain; do
+    if command -v "$binary" >/dev/null; then
+      ok "$binary: 已安装 ($(command -v $binary))"
+    elif [ -f "$NCK_DIR/target/release/$binary" ]; then
+      ok "$binary: 已构建 ($NCK_DIR/target/release/$binary)"
+    else
+      warn "$binary: 未找到"
+    fi
+  done
+  
+  echo -e "\n${BLUE}=== 节点状态 ===${RESET}"
+  if screen -list 2>/dev/null | grep -qw "nockchain"; then
+    ok "节点运行中 (screen会话)"
+  elif pgrep -f "nockchain.*--mine" >/dev/null; then
+    ok "节点运行中 (后台进程)"
+  else
+    warn "节点未运行"
+  fi
+  
+  echo -e "\n${BLUE}=== 配置状态 ===${RESET}"
+  if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+    if [ -n "$MINING_PUBKEY" ]; then
+      ok "挖矿公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}"
+    else
+      warn "挖矿公钥: 未设置"
+    fi
+  else
+    warn "配置文件不存在"
+  fi
+  
+  pause
+}
+
+# ---------- 主菜单 ----------
+show_menu() {
   clear
-  echo -e "${GREEN}Nockchain 挖矿优化版${RESET}"
-  echo "1) 安装优化版Nockchain"
-  echo "2) 设置挖矿公钥"
-  echo "3) 启动优化版挖矿节点"
-  echo "4) 查看挖矿日志"
-  echo "5) 检查挖矿状态"
-  echo "0) 退出"
-  read -rp "选择操作: " choice
+  echo -e "${CYAN}${BOLD}"
+  echo "================================================"
+  echo "        Nockchain 完整功能管理脚本 v27.0"
+  echo "================================================"
+  echo -e "${RESET}"
+  echo ""
+  echo -e "${GREEN}🔧 安装构建:${RESET}"
+  echo "  1) 完整安装Nockchain（依赖+Rust+构建）"
+  echo "  2) 重新构建项目"
+  echo ""
+  echo -e "${GREEN}🔑 钱包管理:${RESET}"
+  echo "  3) 设置/更改挖矿公钥"
+  echo ""
+  echo -e "${GREEN}⚡ 节点管理:${RESET}"
+  echo "  4) 启动挖矿节点"
+  echo "  5) 查看节点日志"
+  echo "  6) 停止挖矿节点"
+  echo ""
+  echo -e "${GREEN}🔍 状态监控:${RESET}"
+  echo "  7) 检查系统状态"
+  echo ""
+  echo "  0) 退出脚本"
+  echo ""
+  echo -e "${YELLOW}首次使用建议: 1 → 3 → 4 → 5${RESET}"
+  echo ""
+}
+
+# ---------- 主循环 ----------
+while true; do
+  show_menu
+  read -rp "请选择操作 (0-7): " choice
+  
   case $choice in
-    1) complete_environment_setup ;;
-    2) set_mining_pubkey ;;
-    3) start_optimized_node ;;
-    4) view_logs ;;
-    5) check_status ;;
-    0) exit 0 ;;
-    *) echo "无效选项"; sleep 1 ;;
+    1) complete_installation ;;
+    2) build_project ;;
+    3) set_mining_pubkey ;;
+    4) start_node ;;
+    5) view_logs ;;
+    6) stop_node ;;
+    7) check_status ;;
+    0) 
+      echo -e "${GREEN}感谢使用Nockchain管理脚本！${RESET}"
+      exit 0 
+      ;;
+    *) 
+      warn "无效选项，请重新选择"
+      sleep 1 
+      ;;
   esac
 done
