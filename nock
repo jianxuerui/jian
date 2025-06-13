@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ========= Nockchain 二进制修复版脚本 v28.0 =========
+# ========= Nockchain AWS-LC-SYS 修复脚本 v1.0 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -21,251 +21,89 @@ warn(){ echo -e "${YELLOW}[!] $*${RESET}"; }
 err() { echo -e "${RED}[✗] $*${RESET}"; }
 pause() { echo; read -n1 -r -p "按任意键返回菜单..." _; }
 
-# ---------- 二进制文件修复函数 ----------
-fix_binary_not_found() {
-  log "修复 nockchain 程序不存在问题"
+# ---------- 安装 Clang ----------
+install_clang() {
+  log "安装 Clang 编译器"
   
-  # 检查项目目录
-  if [ ! -d "$NCK_DIR" ]; then
-    err "Nockchain 项目目录不存在，请先克隆项目"
-    log "正在克隆 Nockchain 项目..."
-    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR" || {
-      err "项目克隆失败"
-      return 1
-    }
-  fi
-  
-  cd "$NCK_DIR"
-  
-  # 检查 target/release 目录中是否有二进制文件
-  if [ -f "target/release/nockchain" ]; then
-    log "找到已编译的 nockchain 二进制文件，正在安装..."
-    
-    # 创建用户 bin 目录并添加到 PATH
-    mkdir -p "$HOME/.local/bin"
-    cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
-    
-    # 添加到 PATH（如果尚未添加）
-    if ! grep -q "$HOME/.local/bin" "$HOME/.bashrc"; then
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-      export PATH="$HOME/.local/bin:$PATH"
-    fi
-    
-    ok "二进制文件已安装到 $HOME/.local/bin"
-    log "请运行 'source ~/.bashrc' 更新环境变量"
+  if command -v clang >/dev/null 2>&1; then
+    ok "Clang 已安装: $(clang --version | head -n1)"
     return 0
   fi
   
-  # 如果没有找到二进制文件，尝试重新编译
-  log "未找到已编译的二进制文件，尝试重新编译..."
-  
-  # 安装依赖
-  if ! command -v rustc >/dev/null; then
-    log "安装 Rust 编程语言..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-  
-  # 优化 Cargo 配置
-  mkdir -p "$HOME/.cargo"
-  cat > "$HOME/.cargo/config.toml" << 'EOF'
-[build]
-jobs = 1
-
-[net]
-retry = 50
-timeout = 3600
-git-fetch-with-cli = true
-
-[profile.release]
-opt-level = 1
-debug = false
-panic = "abort"
-codegen-units = 1
-strip = true
-EOF
-  
-  # 设置环境变量
-  export RUST_MIN_STACK=33554432
-  export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
-  
-  # 清理旧的构建文件
-  cargo clean
-  
-  # 重新编译
-  log "开始编译 Nockchain（这可能需要较长时间）..."
-  cargo build --release 2>&1 | tee "$BUILD_LOG"
-  
-  # 检查编译结果
-  if [ -f "target/release/nockchain" ]; then
-    ok "编译成功"
-    
-    # 安装到用户 bin 目录
-    mkdir -p "$HOME/.local/bin"
-    cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
-    
-    # 添加到 PATH（如果尚未添加）
-    if ! grep -q "$HOME/.local/bin" "$HOME/.bashrc"; then
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-    fi
-    
-    export PATH="$HOME/.local/bin:$PATH"
-    ok "二进制文件已安装到 $HOME/.local/bin"
-    log "请运行 'source ~/.bashrc' 更新环境变量"
-    return 0
-  else
-    err "编译失败，请查看日志: $BUILD_LOG"
-    return 1
-  fi
-}
-
-# ---------- 手动复制二进制文件 ----------
-manual_copy_binaries() {
-  log "手动复制二进制文件"
-  
-  # 检查项目目录
-  if [ ! -d "$NCK_DIR" ]; then
-    err "Nockchain 项目目录不存在"
-    return 1
-  fi
-  
-  cd "$NCK_DIR"
-  
-  # 检查 target/release 目录
-  if [ ! -d "target/release" ]; then
-    err "target/release 目录不存在，请先构建项目"
-    return 1
-  fi
-  
-  # 检查二进制文件
-  binaries_found=0
-  for binary in nockchain nockchain-wallet hoonc; do
-    if [ -f "target/release/$binary" ]; then
-      ((binaries_found++))
-    fi
-  done
-  
-  if [ $binaries_found -eq 0 ]; then
-    err "未找到任何二进制文件，请先构建项目"
-    return 1
-  fi
-  
-  # 创建目标目录
-  mkdir -p "$HOME/.local/bin"
-  
-  # 复制二进制文件
-  for binary in nockchain nockchain-wallet hoonc; do
-    if [ -f "target/release/$binary" ]; then
-      cp "target/release/$binary" "$HOME/.local/bin/"
-      chmod +x "$HOME/.local/bin/$binary"
-      ok "$binary 已复制到 $HOME/.local/bin/"
-    fi
-  done
-  
-  # 添加到 PATH
-  if ! grep -q "$HOME/.local/bin" "$HOME/.bashrc"; then
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-    log "已将 $HOME/.local/bin 添加到 PATH"
-  fi
-  
-  export PATH="$HOME/.local/bin:$PATH"
-  
-  ok "二进制文件已手动复制完成"
-  log "请运行 'source ~/.bashrc' 更新环境变量"
-}
-
-# ---------- 完整环境安装 ----------
-complete_installation() {
-  log "开始完整安装 Nockchain"
-  
-  # 安装系统依赖
-  if command -v apt >/dev/null; then
-    log "安装系统依赖..."
+  if command -v apt >/dev/null 2>&1; then
+    log "使用 apt 安装 Clang"
     sudo apt update -y
-    sudo apt install -y build-essential git curl pkg-config libssl-dev clang cmake
+    sudo apt install -y clang
+  elif command -v yum >/dev/null 2>&1; then
+    log "使用 yum 安装 Clang"
+    sudo yum install -y clang
+  else
+    err "无法安装 Clang，请手动安装"
+    return 1
   fi
   
-  # 安装 Rust
-  if ! command -v rustc >/dev/null; then
-    log "安装 Rust..."
+  if command -v clang >/dev/null 2>&1; then
+    ok "Clang 安装成功: $(clang --version | head -n1)"
+    return 0
+  else
+    err "Clang 安装失败"
+    return 1
+  fi
+}
+
+# ---------- 使用 Clang 构建 ----------
+build_with_clang() {
+  log "使用 Clang 构建 Nockchain"
+  
+  # 确保 Clang 已安装
+  if ! command -v clang >/dev/null 2>&1; then
+    err "Clang 未安装，请先安装 Clang"
+    return 1
+  fi
+  
+  # 设置环境变量，强制使用 Clang
+  export CC=clang
+  export CXX=clang++
+  
+  # 清理旧的构建文件
+  cd "$NCK_DIR" || return 1
+  cargo clean
+  
+  # 使用 Clang 构建
+  log "开始构建 (使用 Clang 替代 GCC)"
+  cargo build --release 2>&1 | tee "$BUILD_LOG"
+  
+  if [ $? -eq 0 ]; then
+    ok "构建成功"
+    return 0
+  else
+    err "构建失败，请查看日志: $BUILD_LOG"
+    return 1
+  fi
+}
+
+# ---------- 完整安装 ----------
+complete_installation() {
+  log "开始完整安装 Nockchain (使用 Clang)"
+  
+  # 安装 Clang
+  install_clang || return 1
+  
+  # 安装 Rust (如果需要)
+  if ! command -v rustc >/dev/null 2>&1; then
+    log "安装 Rust"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
   fi
   
-  # 克隆项目
+  # 克隆项目 (如果需要)
   if [ ! -d "$NCK_DIR" ]; then
-    log "克隆 Nockchain 项目..."
+    log "克隆 Nockchain 项目"
     git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
-  else
-    log "更新 Nockchain 项目..."
-    cd "$NCK_DIR"
-    git pull
   fi
   
-  cd "$NCK_DIR"
-  
-  # 优化 Cargo 配置
-  mkdir -p "$HOME/.cargo"
-  cat > "$HOME/.cargo/config.toml" << 'EOF'
-[build]
-jobs = 1
-
-[net]
-retry = 50
-timeout = 3600
-git-fetch-with-cli = true
-
-[profile.release]
-opt-level = 1
-debug = false
-panic = "abort"
-codegen-units = 1
-strip = true
-EOF
-  
-  # 设置环境变量
-  export RUST_MIN_STACK=33554432
-  export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
-  
-  # 清理旧的构建文件
-  cargo clean
-  
-  # 编译项目
-  log "编译 Nockchain（这可能需要较长时间）..."
-  cargo build --release 2>&1 | tee "$BUILD_LOG"
-  
-  # 检查编译结果
-  if [ -f "target/release/nockchain" ]; then
-    ok "编译成功"
-    
-    # 安装到用户 bin 目录
-    mkdir -p "$HOME/.local/bin"
-    cp target/release/{nockchain,nockchain-wallet,hoonc} "$HOME/.local/bin/" 2>/dev/null || true
-    
-    # 添加到 PATH
-    if ! grep -q "$HOME/.local/bin" "$HOME/.bashrc"; then
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-    fi
-    
-    export PATH="$HOME/.local/bin:$PATH"
-    
-    # 创建必要目录
-    mkdir -p "$NCK_DIR/logs" "$NCK_DIR/.socket"
-    
-    # 创建环境文件
-    if [ ! -f "$ENV_FILE" ]; then
-      cat > "$ENV_FILE" <<EOF
-MINING_PUBKEY=
-RUST_LOG=info
-EOF
-    fi
-    
-    ok "安装完成"
-  else
-    err "编译失败，请查看日志: $BUILD_LOG"
-  fi
+  # 使用 Clang 构建
+  build_with_clang
 }
 
 # ---------- 设置挖矿公钥 ----------
@@ -304,27 +142,13 @@ start_node() {
     return 1
   fi
   
-  # 检查可执行文件
-  if ! command -v nockchain >/dev/null && [ ! -f "$NCK_DIR/target/release/nockchain" ]; then
-    err "nockchain 程序不存在，请先执行安装或构建"
-    pause
-    return 1
-  fi
-  
-  # 确定使用的可执行文件
-  if command -v nockchain >/dev/null; then
-    NOCKCHAIN_BIN="nockchain"
-  else
-    NOCKCHAIN_BIN="$NCK_DIR/target/release/nockchain"
-  fi
-  
   # 清理 socket 文件
   pkill -f nockchain 2>/dev/null || true
   find "$NCK_DIR" -name "*.sock" -delete 2>/dev/null || true
   mkdir -p "$NCK_DIR/.socket" "$NCK_DIR/logs"
   
   # 构建启动命令
-  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info $NOCKCHAIN_BIN \
+  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info $NCK_DIR/target/release/nockchain \
     --mining-pubkey $MINING_PUBKEY \
     --mine \
     --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
@@ -368,31 +192,27 @@ while true; do
   clear
   echo -e "${CYAN}${BOLD}"
   echo "================================================"
-  echo "        Nockchain 二进制修复版脚本 v28.0"
+  echo "        Nockchain AWS-LC-SYS 修复脚本 v1.0"
   echo "================================================"
   echo -e "${RESET}"
   echo ""
-  echo -e "${GREEN}🔧 修复选项:${RESET}"
-  echo "  1) 修复 nockchain 程序不存在问题"
-  echo "  2) 手动复制二进制文件"
-  echo "  3) 完整重新安装"
+  echo -e "${GREEN}🔧 安装选项:${RESET}"
+  echo "  1) 使用 Clang 完整安装 Nockchain"
   echo ""
   echo -e "${GREEN}🔑 节点管理:${RESET}"
-  echo "  4) 设置挖矿公钥"
-  echo "  5) 启动挖矿节点"
-  echo "  6) 查看节点日志"
+  echo "  2) 设置挖矿公钥"
+  echo "  3) 启动挖矿节点"
+  echo "  4) 查看节点日志"
   echo ""
   echo "  0) 退出脚本"
   echo ""
-  read -rp "请选择操作 (0-6): " choice
+  read -rp "请选择操作 (0-4): " choice
   
   case $choice in
-    1) fix_binary_not_found; pause ;;
-    2) manual_copy_binaries; pause ;;
-    3) complete_installation; pause ;;
-    4) set_mining_pubkey ;;
-    5) start_node ;;
-    6) view_logs ;;
+    1) complete_installation; pause ;;
+    2) set_mining_pubkey ;;
+    3) start_node ;;
+    4) view_logs ;;
     0) echo -e "${GREEN}感谢使用！${RESET}"; exit 0 ;;
     *) warn "无效选项，请重新选择"; sleep 1 ;;
   esac
