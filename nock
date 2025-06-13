@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ========= Nockchain AWS-LC-SYS 修复脚本 v1.0 =========
+# ========= Nockchain 节点启动修复版脚本 v1.0 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -11,7 +11,7 @@ CYAN='\033[0;36m'
 
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
-BUILD_LOG="$HOME/nockchain_build.log"
+LOG_FILE="$HOME/nockchain_build.log"
 NODE_LOG="$NCK_DIR/logs/nockchain.log"
 
 # ---------- 辅助函数 ----------
@@ -21,89 +21,42 @@ warn(){ echo -e "${YELLOW}[!] $*${RESET}"; }
 err() { echo -e "${RED}[✗] $*${RESET}"; }
 pause() { echo; read -n1 -r -p "按任意键返回菜单..." _; }
 
-# ---------- 安装 Clang ----------
-install_clang() {
-  log "安装 Clang 编译器"
+# ---------- 彻底清理 socket 文件 ----------
+clean_socket_files() {
+  log "彻底清理 socket 文件"
   
-  if command -v clang >/dev/null 2>&1; then
-    ok "Clang 已安装: $(clang --version | head -n1)"
-    return 0
+  # 停止所有相关进程
+  pkill -f nockchain 2>/dev/null || true
+  screen -XS nockchain quit 2>/dev/null || true
+  sleep 2
+  
+  # 清理 socket 目录
+  if [ -d "$NCK_DIR/.socket" ]; then
+    rm -rf "$NCK_DIR/.socket"/*
+    ok "清理 $NCK_DIR/.socket 目录"
   fi
   
-  if command -v apt >/dev/null 2>&1; then
-    log "使用 apt 安装 Clang"
-    sudo apt update -y
-    sudo apt install -y clang
-  elif command -v yum >/dev/null 2>&1; then
-    log "使用 yum 安装 Clang"
-    sudo yum install -y clang
-  else
-    err "无法安装 Clang，请手动安装"
-    return 1
+  # 创建新的 socket 目录
+  mkdir -p "$NCK_DIR/.socket"
+  chmod 755 "$NCK_DIR/.socket"
+  
+  # 查找并删除所有相关 socket 文件
+  find "$HOME" -name "*.sock" -delete 2>/dev/null
+  find "$HOME" -name "nockchain*.sock" -delete 2>/dev/null
+  
+  # 检查端口占用情况
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -tlnp 2>/dev/null | grep -q ":3006 "; then
+      warn "端口 3006 被占用，尝试释放..."
+      pid=$(netstat -tlnp 2>/dev/null | grep ":3006 " | awk '{print $7}' | cut -d'/' -f1 | head -1)
+      if [ -n "$pid" ] && [ "$pid" != "-" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+        ok "已释放端口 3006"
+      fi
+    fi
   fi
   
-  if command -v clang >/dev/null 2>&1; then
-    ok "Clang 安装成功: $(clang --version | head -n1)"
-    return 0
-  else
-    err "Clang 安装失败"
-    return 1
-  fi
-}
-
-# ---------- 使用 Clang 构建 ----------
-build_with_clang() {
-  log "使用 Clang 构建 Nockchain"
-  
-  # 确保 Clang 已安装
-  if ! command -v clang >/dev/null 2>&1; then
-    err "Clang 未安装，请先安装 Clang"
-    return 1
-  fi
-  
-  # 设置环境变量，强制使用 Clang
-  export CC=clang
-  export CXX=clang++
-  
-  # 清理旧的构建文件
-  cd "$NCK_DIR" || return 1
-  cargo clean
-  
-  # 使用 Clang 构建
-  log "开始构建 (使用 Clang 替代 GCC)"
-  cargo build --release 2>&1 | tee "$BUILD_LOG"
-  
-  if [ $? -eq 0 ]; then
-    ok "构建成功"
-    return 0
-  else
-    err "构建失败，请查看日志: $BUILD_LOG"
-    return 1
-  fi
-}
-
-# ---------- 完整安装 ----------
-complete_installation() {
-  log "开始完整安装 Nockchain (使用 Clang)"
-  
-  # 安装 Clang
-  install_clang || return 1
-  
-  # 安装 Rust (如果需要)
-  if ! command -v rustc >/dev/null 2>&1; then
-    log "安装 Rust"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-  
-  # 克隆项目 (如果需要)
-  if [ ! -d "$NCK_DIR" ]; then
-    log "克隆 Nockchain 项目"
-    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
-  fi
-  
-  # 使用 Clang 构建
-  build_with_clang
+  ok "Socket 文件清理完成"
 }
 
 # ---------- 设置挖矿公钥 ----------
@@ -134,21 +87,24 @@ set_mining_pubkey() {
 start_node() {
   log "启动 Nockchain 节点"
   
-  # 检查环境
+  # 加载环境变量
   source "$ENV_FILE" 2>/dev/null || true
+  
+  # 检查公钥
   if [ -z "$MINING_PUBKEY" ]; then
     err "未设置挖矿公钥，请先设置"
     pause
     return 1
   fi
   
-  # 清理 socket 文件
-  pkill -f nockchain 2>/dev/null || true
-  find "$NCK_DIR" -name "*.sock" -delete 2>/dev/null || true
-  mkdir -p "$NCK_DIR/.socket" "$NCK_DIR/logs"
+  # 彻底清理 socket 文件（关键修复）
+  clean_socket_files
+  
+  # 创建日志目录
+  mkdir -p "$NCK_DIR/logs"
   
   # 构建启动命令
-  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info $NCK_DIR/target/release/nockchain \
+  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info nockchain \
     --mining-pubkey $MINING_PUBKEY \
     --mine \
     --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
@@ -159,19 +115,21 @@ start_node() {
     --npc-socket $NCK_DIR/.socket/nockchain.sock \
     --bind /ip4/0.0.0.0/udp/3006/quic-v1"
   
-  # 启动节点
-  cd "$NCK_DIR"
-  if command -v screen >/dev/null; then
-    screen -dmS nockchain bash -c "$START_CMD 2>&1 | tee $NODE_LOG"
+  # 使用 screen 启动
+  if command -v screen >/dev/null 2>&1; then
+    screen -dmS nockchain bash -c "cd '$NCK_DIR' && $START_CMD 2>&1 | tee $NODE_LOG"
     sleep 3
     if screen -list | grep -qw "nockchain"; then
-      ok "节点已启动 (screen 会话: nockchain)"
+      ok "节点已启动 (screen 会话)"
     else
       err "节点启动失败"
+      warn "请检查日志: $NODE_LOG"
     fi
   else
+    # 后台启动
+    cd "$NCK_DIR"
     nohup bash -c "$START_CMD" > "$NODE_LOG" 2>&1 &
-    ok "节点已后台启动"
+    ok "节点已后台启动 (PID: $!)"
   fi
   
   pause
@@ -187,17 +145,83 @@ view_logs() {
   pause
 }
 
+# ---------- 完整安装 ----------
+complete_installation() {
+  log "开始完整安装 Nockchain"
+  
+  # 安装系统依赖
+  if command -v apt >/dev/null; then
+    log "安装系统依赖..."
+    sudo apt update -y
+    sudo apt install -y build-essential git curl pkg-config libssl-dev clang cmake
+  fi
+  
+  # 安装 Rust
+  if ! command -v rustc >/dev/null; then
+    log "安装 Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+  fi
+  
+  # 克隆项目
+  if [ ! -d "$NCK_DIR" ]; then
+    log "克隆 Nockchain 项目..."
+    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
+  else
+    log "更新 Nockchain 项目..."
+    cd "$NCK_DIR"
+    git pull
+  fi
+  
+  cd "$NCK_DIR"
+  
+  # 设置环境变量
+  export RUST_MIN_STACK=33554432
+  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
+  
+  # 清理旧的构建文件
+  cargo clean
+  
+  # 编译项目
+  log "编译 Nockchain（这可能需要较长时间）..."
+  cargo build --release 2>&1 | tee "$BUILD_LOG"
+  
+  # 检查编译结果
+  if [ -f "target/release/nockchain" ]; then
+    ok "编译成功"
+    
+    # 创建必要目录
+    mkdir -p "$NCK_DIR/logs" "$NCK_DIR/.socket"
+    chmod 755 "$NCK_DIR/.socket"
+    
+    # 创建环境文件
+    if [ ! -f "$ENV_FILE" ]; then
+      cat > "$ENV_FILE" <<EOF
+MINING_PUBKEY=
+RUST_LOG=info
+EOF
+    fi
+    
+    ok "安装完成"
+  else
+    err "编译失败，请查看日志: $BUILD_LOG"
+  fi
+  
+  pause
+}
+
 # ---------- 主菜单 ----------
 while true; do
   clear
   echo -e "${CYAN}${BOLD}"
   echo "================================================"
-  echo "        Nockchain AWS-LC-SYS 修复脚本 v1.0"
+  echo "        Nockchain 节点启动修复版脚本 v1.0"
   echo "================================================"
   echo -e "${RESET}"
   echo ""
   echo -e "${GREEN}🔧 安装选项:${RESET}"
-  echo "  1) 使用 Clang 完整安装 Nockchain"
+  echo "  1) 完整安装 Nockchain"
   echo ""
   echo -e "${GREEN}🔑 节点管理:${RESET}"
   echo "  2) 设置挖矿公钥"
@@ -209,7 +233,7 @@ while true; do
   read -rp "请选择操作 (0-4): " choice
   
   case $choice in
-    1) complete_installation; pause ;;
+    1) complete_installation ;;
     2) set_mining_pubkey ;;
     3) start_node ;;
     4) view_logs ;;
