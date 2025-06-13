@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ========= Nockchain 节点启动修复版脚本 v1.0 =========
+# ========= Nockchain 集成修复版安装脚本 v31.0 =========
 RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -21,42 +21,116 @@ warn(){ echo -e "${YELLOW}[!] $*${RESET}"; }
 err() { echo -e "${RED}[✗] $*${RESET}"; }
 pause() { echo; read -n1 -r -p "按任意键返回菜单..." _; }
 
-# ---------- 彻底清理 socket 文件 ----------
-clean_socket_files() {
-  log "彻底清理 socket 文件"
+# ---------- 集成的完整安装流程 ----------
+complete_installation_with_fixes() {
+  log "开始集成修复版安装 Nockchain"
+  echo "=== Nockchain集成修复版安装日志 $(date) ===" > "$LOG_FILE"
   
-  # 停止所有相关进程
-  pkill -f nockchain 2>/dev/null || true
-  screen -XS nockchain quit 2>/dev/null || true
-  sleep 2
-  
-  # 清理 socket 目录
-  if [ -d "$NCK_DIR/.socket" ]; then
-    rm -rf "$NCK_DIR/.socket"/*
-    ok "清理 $NCK_DIR/.socket 目录"
+  # 步骤1: 系统依赖安装
+  log "步骤1/8: 安装系统依赖"
+  if command -v apt >/dev/null; then
+    sudo apt update -y
+    sudo apt install -y build-essential git curl pkg-config libssl-dev clang cmake screen netstat-nat
+    ok "系统依赖安装完成"
+  else
+    warn "非Ubuntu/Debian系统，请手动安装依赖"
   fi
   
-  # 创建新的 socket 目录
-  mkdir -p "$NCK_DIR/.socket"
-  chmod 755 "$NCK_DIR/.socket"
+  # 步骤2: 安装 Rust
+  log "步骤2/8: 安装 Rust"
+  if ! command -v rustc >/dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    ok "Rust 安装完成"
+  else
+    ok "Rust 已安装: $(rustc --version)"
+  fi
   
-  # 查找并删除所有相关 socket 文件
-  find "$HOME" -name "*.sock" -delete 2>/dev/null
-  find "$HOME" -name "nockchain*.sock" -delete 2>/dev/null
+  # 步骤3: 修复编译器问题（AWS-LC-SYS bug）
+  log "步骤3/8: 修复编译器问题"
+  export CC=clang
+  export CXX=clang++
+  ok "已设置使用 Clang 编译器避免 GCC bug"
   
-  # 检查端口占用情况
+  # 步骤4: 克隆/更新项目
+  log "步骤4/8: 克隆/更新项目"
+  if [ ! -d "$NCK_DIR" ]; then
+    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
+    ok "项目克隆完成"
+  else
+    cd "$NCK_DIR"
+    git pull
+    ok "项目更新完成"
+  fi
+  
+  # 步骤5: 优化 Cargo 配置
+  log "步骤5/8: 优化编译配置"
+  mkdir -p "$HOME/.cargo"
+  cat > "$HOME/.cargo/config.toml" << 'EOF'
+[build]
+jobs = 1
+
+[net]
+retry = 50
+timeout = 3600
+git-fetch-with-cli = true
+
+[profile.release]
+opt-level = 1
+debug = false
+panic = "abort"
+codegen-units = 1
+strip = true
+EOF
+  
+  # 设置环境变量防止 mem.rs 错误
+  export RUST_MIN_STACK=33554432
+  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
+  ok "编译配置优化完成"
+  
+  # 步骤6: 预修复端口和Socket问题
+  log "步骤6/8: 预修复端口和Socket问题"
+  pkill -f nockchain 2>/dev/null || true
   if command -v netstat >/dev/null 2>&1; then
-    if netstat -tlnp 2>/dev/null | grep -q ":3006 "; then
-      warn "端口 3006 被占用，尝试释放..."
-      pid=$(netstat -tlnp 2>/dev/null | grep ":3006 " | awk '{print $7}' | cut -d'/' -f1 | head -1)
-      if [ -n "$pid" ] && [ "$pid" != "-" ]; then
-        kill -9 "$pid" 2>/dev/null || true
-        ok "已释放端口 3006"
-      fi
+    pid=$(netstat -tulpn 2>/dev/null | grep ":3006" | awk '{print $7}' | cut -d'/' -f1 | head -1)
+    if [ -n "$pid" ] && [ "$pid" != "-" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      ok "已释放端口 3006"
     fi
   fi
   
-  ok "Socket 文件清理完成"
+  # 创建目录并设置权限
+  mkdir -p "$NCK_DIR"/{logs,.socket}
+  chmod -R 777 "$NCK_DIR"/{logs,.socket}
+  ok "Socket 和日志目录预配置完成"
+  
+  # 步骤7: 编译项目
+  log "步骤7/8: 编译项目（这可能需要较长时间）"
+  cd "$NCK_DIR"
+  cargo clean
+  cargo build --release 2>&1 | tee "$LOG_FILE"
+  
+  if [ -f "target/release/nockchain" ]; then
+    chmod +x target/release/{nockchain,nockchain-wallet,hoonc}
+    ok "编译成功并修复权限"
+  else
+    err "编译失败，请查看日志: $LOG_FILE"
+    return 1
+  fi
+  
+  # 步骤8: 创建配置文件
+  log "步骤8/8: 创建配置文件"
+  if [ ! -f "$ENV_FILE" ]; then
+    cat > "$ENV_FILE" <<EOF
+MINING_PUBKEY=
+RUST_LOG=info
+EOF
+    ok "配置文件创建完成"
+  fi
+  
+  ok "🎉 集成修复版安装完成！"
+  pause
 }
 
 # ---------- 设置挖矿公钥 ----------
@@ -69,7 +143,20 @@ set_mining_pubkey() {
     echo "RUST_LOG=info" >> "$ENV_FILE"
   fi
   
-  read -rp "输入 128 位公钥: " key
+  # 显示当前公钥
+  current_key=$(grep "MINING_PUBKEY=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2)
+  if [ -n "$current_key" ]; then
+    echo "当前公钥: ${current_key:0:16}...${current_key: -16}"
+  fi
+  
+  read -rp "输入新的 128 位公钥（留空保持不变）: " key
+  
+  if [ -z "$key" ]; then
+    warn "公钥未更改"
+    pause
+    return
+  fi
+  
   key=$(echo "$key" | tr -d '[:space:]' | tr A-F a-f)
   
   if [ ${#key} -eq 128 ] && [[ "$key" =~ ^[0-9a-f]+$ ]]; then
@@ -83,9 +170,9 @@ set_mining_pubkey() {
   pause
 }
 
-# ---------- 启动节点 ----------
-start_node() {
-  log "启动 Nockchain 节点"
+# ---------- 智能启动节点（集成修复）----------
+start_node_with_integrated_fixes() {
+  log "智能启动节点（集成修复）"
   
   # 加载环境变量
   source "$ENV_FILE" 2>/dev/null || true
@@ -97,39 +184,70 @@ start_node() {
     return 1
   fi
   
-  # 彻底清理 socket 文件（关键修复）
-  clean_socket_files
+  # 自动修复流程
+  log "执行启动前自动修复..."
   
-  # 创建日志目录
-  mkdir -p "$NCK_DIR/logs"
+  # 1. 停止现有进程
+  pkill -f nockchain 2>/dev/null || true
+  pkill -9 -f nockchain 2>/dev/null || true
+  screen -wipe 2>/dev/null || true
   
-  # 构建启动命令
-  START_CMD="RUST_MIN_STACK=33554432 RUST_LOG=info nockchain \
-    --mining-pubkey $MINING_PUBKEY \
+  # 2. 释放端口
+  if command -v netstat >/dev/null 2>&1; then
+    pid=$(netstat -tulpn 2>/dev/null | grep ":3006" | awk '{print $7}' | cut -d'/' -f1)
+    if [ -n "$pid" ] && [ "$pid" != "-" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      ok "已释放端口 3006"
+    fi
+  fi
+  
+  # 3. 清理socket文件
+  find / -name "nockchain*.sock" -delete 2>/dev/null || true
+  find "$HOME" -name "*.sock" -delete 2>/dev/null || true
+  rm -rf "$NCK_DIR/.socket"/*
+  mkdir -p "$NCK_DIR/.socket"
+  chmod -R 777 "$NCK_DIR/.socket"
+  
+  # 4. 修复可执行文件权限
+  if [ -f "$NCK_DIR/target/release/nockchain" ]; then
+    chmod +x "$NCK_DIR/target/release/nockchain"
+    NOCKCHAIN_BIN="$NCK_DIR/target/release/nockchain"
+  else
+    err "未找到 nockchain 可执行文件"
+    return 1
+  fi
+  
+  ok "自动修复完成"
+  
+  # 5. 启动节点
+  cd "$NCK_DIR"
+  log "启动节点..."
+  
+  export RUST_MIN_STACK=33554432
+  export RUST_LOG=info
+  
+  # 使用nohup启动（避免screen问题）
+  nohup "$NOCKCHAIN_BIN" \
+    --mining-pubkey "$MINING_PUBKEY" \
     --mine \
     --peer /ip4/95.216.102.60/udp/3006/quic-v1 \
     --peer /ip4/65.109.156.108/udp/3006/quic-v1 \
     --peer /ip4/65.21.67.175/udp/3006/quic-v1 \
     --peer /ip4/65.109.156.172/udp/3006/quic-v1 \
     --peer /ip4/34.174.22.166/udp/3006/quic-v1 \
-    --npc-socket $NCK_DIR/.socket/nockchain.sock \
-    --bind /ip4/0.0.0.0/udp/3006/quic-v1"
+    --npc-socket "$NCK_DIR/.socket/nockchain.sock" \
+    --bind /ip4/0.0.0.0/udp/3006/quic-v1 > "$NODE_LOG" 2>&1 &
   
-  # 使用 screen 启动
-  if command -v screen >/dev/null 2>&1; then
-    screen -dmS nockchain bash -c "cd '$NCK_DIR' && $START_CMD 2>&1 | tee $NODE_LOG"
-    sleep 3
-    if screen -list | grep -qw "nockchain"; then
-      ok "节点已启动 (screen 会话)"
-    else
-      err "节点启动失败"
-      warn "请检查日志: $NODE_LOG"
-    fi
+  NODE_PID=$!
+  sleep 5
+  
+  # 6. 验证启动状态
+  if kill -0 $NODE_PID 2>/dev/null; then
+    ok "节点已成功启动 (PID: $NODE_PID)"
+    ok "日志文件: $NODE_LOG"
   else
-    # 后台启动
-    cd "$NCK_DIR"
-    nohup bash -c "$START_CMD" > "$NODE_LOG" 2>&1 &
-    ok "节点已后台启动 (PID: $!)"
+    err "节点启动失败"
+    warn "请检查日志: $NODE_LOG"
   fi
   
   pause
@@ -145,67 +263,37 @@ view_logs() {
   pause
 }
 
-# ---------- 完整安装 ----------
-complete_installation() {
-  log "开始完整安装 Nockchain"
+# ---------- 检查状态 ----------
+check_status() {
+  log "检查系统状态"
   
-  # 安装系统依赖
-  if command -v apt >/dev/null; then
-    log "安装系统依赖..."
-    sudo apt update -y
-    sudo apt install -y build-essential git curl pkg-config libssl-dev clang cmake
-  fi
-  
-  # 安装 Rust
-  if ! command -v rustc >/dev/null; then
-    log "安装 Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-  
-  # 克隆项目
-  if [ ! -d "$NCK_DIR" ]; then
-    log "克隆 Nockchain 项目..."
-    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
+  echo -e "${BLUE}=== 节点状态 ===${RESET}"
+  if pgrep -f "nockchain.*--mine" >/dev/null; then
+    ok "节点进程正在运行"
+    ps -ef | grep "nockchain" | grep -v grep
   else
-    log "更新 Nockchain 项目..."
-    cd "$NCK_DIR"
-    git pull
+    err "节点进程未运行"
   fi
   
-  cd "$NCK_DIR"
-  
-  # 设置环境变量
-  export RUST_MIN_STACK=33554432
-  export CARGO_BUILD_JOBS=1
-  export RUSTFLAGS="-C opt-level=1 -C debuginfo=0 -C panic=abort"
-  
-  # 清理旧的构建文件
-  cargo clean
-  
-  # 编译项目
-  log "编译 Nockchain（这可能需要较长时间）..."
-  cargo build --release 2>&1 | tee "$BUILD_LOG"
-  
-  # 检查编译结果
-  if [ -f "target/release/nockchain" ]; then
-    ok "编译成功"
-    
-    # 创建必要目录
-    mkdir -p "$NCK_DIR/logs" "$NCK_DIR/.socket"
-    chmod 755 "$NCK_DIR/.socket"
-    
-    # 创建环境文件
-    if [ ! -f "$ENV_FILE" ]; then
-      cat > "$ENV_FILE" <<EOF
-MINING_PUBKEY=
-RUST_LOG=info
-EOF
+  echo -e "\n${BLUE}=== 端口状态 ===${RESET}"
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -tulpn 2>/dev/null | grep -q ":3006"; then
+      ok "端口 3006 已绑定"
+    else
+      warn "端口 3006 未绑定"
     fi
-    
-    ok "安装完成"
+  fi
+  
+  echo -e "\n${BLUE}=== 配置状态 ===${RESET}"
+  if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+    if [ -n "$MINING_PUBKEY" ]; then
+      ok "挖矿公钥: ${MINING_PUBKEY:0:16}...${MINING_PUBKEY: -16}"
+    else
+      warn "挖矿公钥: 未设置"
+    fi
   else
-    err "编译失败，请查看日志: $BUILD_LOG"
+    warn "配置文件不存在"
   fi
   
   pause
@@ -216,27 +304,31 @@ while true; do
   clear
   echo -e "${CYAN}${BOLD}"
   echo "================================================"
-  echo "        Nockchain 节点启动修复版脚本 v1.0"
+  echo "        Nockchain 集成修复版脚本 v31.0"
   echo "================================================"
   echo -e "${RESET}"
   echo ""
-  echo -e "${GREEN}🔧 安装选项:${RESET}"
-  echo "  1) 完整安装 Nockchain"
+  echo -e "${GREEN}🔧 安装选项（集成修复）:${RESET}"
+  echo "  1) 完整安装 Nockchain（自动修复所有问题）"
   echo ""
   echo -e "${GREEN}🔑 节点管理:${RESET}"
-  echo "  2) 设置挖矿公钥"
-  echo "  3) 启动挖矿节点"
+  echo "  2) 设置/更改挖矿公钥"
+  echo "  3) 智能启动节点（自动修复）"
   echo "  4) 查看节点日志"
+  echo "  5) 检查系统状态"
   echo ""
   echo "  0) 退出脚本"
   echo ""
-  read -rp "请选择操作 (0-4): " choice
+  echo -e "${YELLOW}✨ 新功能: 所有修复选项已集成到安装和启动流程中${RESET}"
+  echo ""
+  read -rp "请选择操作 (0-5): " choice
   
   case $choice in
-    1) complete_installation ;;
+    1) complete_installation_with_fixes ;;
     2) set_mining_pubkey ;;
-    3) start_node ;;
+    3) start_node_with_integrated_fixes ;;
     4) view_logs ;;
+    5) check_status ;;
     0) echo -e "${GREEN}感谢使用！${RESET}"; exit 0 ;;
     *) warn "无效选项，请重新选择"; sleep 1 ;;
   esac
