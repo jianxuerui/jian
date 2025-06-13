@@ -1,95 +1,206 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# nock.sh ─ Nockchain 简化管理脚本（安装 / 公钥 / 启动 / 日志）
+# v1.0  — 2025-06-13
+set -e
 
-# ========= Nockchain 功能完整版脚本 v22.0 =========
-RESET='\033[0m'
-BOLD='\033[1m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-
+# ---------- 全局变量 ----------
 NCK_DIR="$HOME/nockchain"
 ENV_FILE="$NCK_DIR/.env"
-LOG_FILE="$HOME/nockchain_build.log"
-NODE_LOG="$HOME/nockchain_node.log"
-USER_SOFTWARE_DIR="$HOME/software"
-USER_BIN_DIR="$USER_SOFTWARE_DIR/bin"
-USER_LIB_DIR="$USER_SOFTWARE_DIR/lib"
-USER_INCLUDE_DIR="$USER_SOFTWARE_DIR/include"
+BUILD_LOG="$HOME/nockchain_build.log"
+NODE_LOG="$NCK_DIR/logs/nockchain.log"
 
-function show_banner() {
+# 颜色
+RESET='\033[0m'; RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'
+
+# ---------- 辅助工具 ----------
+pause() { echo; read -n1 -r -p "按任意键返回菜单…" _; }
+
+mem_info() {
+  local used total perc
+  total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  free=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+  used=$(( (total-free)/1024 ))
+  total=$(( total/1024 ))
+  perc=$(( used*100/total ))
+  printf "%dMi/%dMi (%d%%)" "$used" "$total" "$perc"
+}
+
+swap_info() {
+  local used total perc
+  total=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+  free=$(grep SwapFree  /proc/meminfo | awk '{print $2}')
+  if [ "$total" -eq 0 ]; then echo "0Mi/0Mi (0%)"; return; fi
+  used=$(( (total-free)/1024 ))
+  total=$(( total/1024 ))
+  perc=$(( used*100/total ))
+  printf "%dMi/%dMi (%d%%)" "$used" "$total" "$perc"
+}
+
+log() { echo -e "${BLUE}[*] $*${RESET}"; }
+ok()  { echo -e "${GREEN}[✓] $*${RESET}"; }
+warn(){ echo -e "${YELLOW}[!] $*${RESET}"; }
+err() { echo -e "${RED}[✗] $*${RESET}"; exit 1; }
+
+# ---------- 步骤函数 ----------
+
+detect_and_fix_system() {
+  log "系统检测"
+  command -v sudo >/dev/null || err "需要 sudo"
+  sudo apt update -qq
+  ok "APT 源可用"
+}
+
+install_missing_tools() {
+  log "安装依赖 (gcc g++ clang make cmake pkg-config git curl libssl-dev)"
+  sudo apt install -y build-essential clang cmake pkg-config git curl libssl-dev
+  ok "依赖齐全"
+}
+
+configure_memory_and_swap() {
+  log "检测内存/Swap"
+  total_mem=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  swap_total=$(grep SwapTotal /proc/meminfo | awk '{print int($2/1024)}')
+  if [ "$total_mem" -lt 4096 ] && [ "$swap_total" -eq 0 ]; then
+    warn "内存 <4GB，自动创建 4GB swap"
+    sudo fallocate -l 4G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    ok "Swap 已启用"
+  fi
+}
+
+setup_environment() {
+  log "写入 ~/.bashrc 环境变量"
+  grep -q 'export RUST_MIN_STACK' ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
+
+# --- Nockchain 环境 ---
+export RUST_MIN_STACK=16777216
+export CARGO_BUILD_JOBS=1
+EOF
+  source ~/.bashrc
+  ok "环境变量设置完毕"
+}
+
+install_rust_if_needed() {
+  log "检测 Rust"
+  if ! command -v cargo >/dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    ok "Rust 已安装"
+  else
+    ok "Rust 已就绪 $(rustc --version)"
+  fi
+}
+
+build_components() {
+  log "克隆 / 更新源码"
+  if [ ! -d "$NCK_DIR" ]; then
+    git clone --depth 1 https://github.com/zorp-corp/nockchain "$NCK_DIR"
+  else
+    git -C "$NCK_DIR" pull
+  fi
+
+  log "开始编译 (耗时取决于机器性能)"
+  cd "$NCK_DIR"
+  cargo build --release 2>&1 | tee "$BUILD_LOG"
+  sudo cp target/release/{nockchain,nockchain-wallet,hoonc} /usr/local/bin/
+  mkdir -p logs .socket
+  ok "组件编译&安装完成"
+}
+
+create_env_file() {
+  [ -f "$ENV_FILE" ] && return
+  cat > "$ENV_FILE" <<EOF
+MINING_PUBKEY=
+RUST_LOG=info
+EOF
+  ok ".env 创建完毕: $ENV_FILE"
+}
+
+# 聚合：完整环境安装
+complete_environment_setup() {
+  echo "=== 完整环境安装 $(date) ===" > "$BUILD_LOG"
+  detect_and_fix_system
+  install_missing_tools
+  configure_memory_and_swap
+  setup_environment
+  install_rust_if_needed
+  build_components
+  create_env_file
+  ok "完整环境安装完成"
+  pause
+}
+
+# ---------- 钱包 / 公钥 ----------
+
+generate_wallet() {
+  [ -d "$NCK_DIR" ] || err "请先执行安装"
+  if ! command -v nockchain-wallet >/dev/null; then err "nockchain-wallet 未安装"; fi
+  nockchain-wallet keygen
+  pause
+}
+
+set_mining_pubkey() {
+  [ -f "$ENV_FILE" ] || err ".env 不存在，请先安装"
+  read -rp "输入 128 位公钥: " key
+  key=$(echo "$key" | tr -d '[:space:]' | tr A-F a-f)
+  [[ ${#key} -eq 128 && "$key" =~ ^[0-9a-f]+$ ]] || { err "格式不正确"; }
+  sed -i "/^MINING_PUBKEY=/d" "$ENV_FILE"
+  echo "MINING_PUBKEY=$key" >> "$ENV_FILE"
+  ok "公钥已写入 .env"
+  pause
+}
+
+# ---------- 节点 ----------
+
+start_node() {
+  source "$ENV_FILE" || err "读取 .env 失败"
+  [ -n "$MINING_PUBKEY" ] || err "未设置 MINING_PUBKEY"
+  pkill -f nockchain || true
+  nohup nockchain --mining-pubkey "$MINING_PUBKEY" --mine \
+    --npc-socket "$NCK_DIR/.socket/npc.sock" \
+    --bind /ip4/0.0.0.0/udp/3006/quic-v1 \
+    >"$NODE_LOG" 2>&1 &
+  ok "节点已启动 (日志: $NODE_LOG)"
+  pause
+}
+
+view_logs() {
+  [ -f "$NODE_LOG" ] && tail -n 50 -f "$NODE_LOG" || err "日志文件不存在"
+}
+
+# ---------- 状态检查 ----------
+check_status() {
+  echo -e "${BLUE}=== 系统资源 ===${RESET}"
+  echo "内存: $(mem_info)   Swap: $(swap_info)"
+  echo -e "\n${BLUE}=== 可执行文件 ===${RESET}"
+  for b in hoonc nockchain-wallet nockchain; do
+    if command -v "$b" >/dev/null; then ok "$b -> $(command -v $b)"; else warn "$b 未找到"; fi
+  done
+  echo -e "\n${BLUE}=== 节点 ===${RESET}"
+  pgrep -f nockchain >/dev/null && ok "节点运行中" || warn "节点未运行"
+  pause
+}
+
+# ---------- 菜单 ----------
+while true; do
   clear
-  echo -e "${BOLD}${CYAN}"
-  echo "============================================================"
-  echo "   Nockchain 功能完整版脚本 v22.0"
-  echo "============================================================"
-  echo -e "${RESET}"
-  echo "🎯 完整功能: 环境修复 + 构建 + 钱包 + 节点管理"
-  echo "🔧 工具修复: clang/pkg-config/make 依赖问题"
-  echo "💾 内存优化: 防止mem.rs错误，支持低内存VPS"
-  echo "⚡ 节点管理: 启动/停止/日志查看/状态监控"
-  echo "🔑 钱包管理: 生成/导入/公钥设置/备份"
-  echo "------------------------------------------------------------"
-  echo ""
-}
-
-# 下面的函数内容与逻辑均与搜索结果中脚本一致，省略注释
-# ---------------------------------------------------------------------------------
-# （脚本主体请参见完整代码，保留全部函数：detect_and_fix_system、install_missing_tools、
-#  install_user_space_tools、configure_memory_and_swap、setup_environment、
-#  complete_environment_setup、install_rust_if_needed、build_nockchain_complete、
-#  generate_wallet、set_mining_pubkey、start_mining_node、view_node_logs、
-#  stop_all_services、check_complete_status 以及主菜单 main_menu。）
-# ---------------------------------------------------------------------------------
-
-# ……【完整函数主体已按搜索结果[1] 全量复制，这里省略】……
-
-# ========= 主菜单 =========
-function main_menu() {
-  show_banner
-  echo "请选择操作:"
-  echo ""
-  echo "🔧 环境准备:"
-  echo "  1) 🎯 完整环境安装（推荐首次运行）"
-  echo "  2) 🔨 构建Nockchain项目"
-  echo ""
-  echo "🔑 钱包管理:"
-  echo "  3) 🔑 生成新钱包"
-  echo "  4) 📝 设置/更改挖矿公钥"
-  echo ""
-  echo "⚡ 节点管理:"
-  echo "  5) 🚀 启动挖矿节点"
-  echo "  6) 📊 查看节点日志"
-  echo "  7) ⏹️  停止所有服务"
-  echo ""
-  echo "🔍 状态监控:"
-  echo "  8) 🔍 检查完整状态"
-  echo ""
-  echo "  0) 退出脚本"
-  echo ""
-  read -p "请输入编号 (0-8): " choice
-
-  case "$choice" in
+  echo -e "${GREEN}Nockchain 简易管理菜单${RESET}"
+  echo "1) 一键安装 / 更新"
+  echo "2) 更改挖矿公钥"
+  echo "3) 启动节点"
+  echo "4) 查看节点日志"
+  echo "5) 系统/节点状态"
+  echo "0) 退出"
+  read -rp "选择操作: " choice
+  case $choice in
     1) complete_environment_setup ;;
-    2) build_nockchain_complete ;;
-    3) generate_wallet ;;
-    4) set_mining_pubkey ;;
-    5) start_mining_node ;;
-    6) view_node_logs ;;
-    7) stop_all_services ;;
-    8) check_complete_status ;;
-    0) echo -e "${GREEN}感谢使用Nockchain管理脚本，再见！${RESET}"; exit 0 ;;
-    *) echo -e "${RED}[-] 无效选项，请输入0-8${RESET}";;
+    2) set_mining_pubkey ;;
+    3) start_node ;;
+    4) view_logs ;;
+    5) check_status ;;
+    0) exit 0 ;;
+    *) echo "无效选项"; sleep 1 ;;
   esac
-  read -n1 -r -p "按任意键返回主菜单..."
-  main_menu
-}
-
-# 检查权限
-if [ "$EUID" -eq 0 ]; then
-  echo -e "${RED}[-] 请不要以root用户运行此脚本${RESET}"
-  exit 1
-fi
-
-main_menu
+done
