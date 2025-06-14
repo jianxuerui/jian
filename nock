@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain内存优化完全解决方案 v5.0
+# Nockchain智能安装脚本 v6.0 - 彻底解决Miniconda冲突
 
 # 颜色定义
 RED='\033[1;31m'
@@ -16,16 +16,15 @@ INSTALL_PREFIX="$HOME/.local"
 NOCKCHAIN_DIR="$HOME/nockchain"
 LOG_FILE="$HOME/nockchain_install.log"
 BACKUP_DIR="$HOME/nockchain_backup"
-SWAP_FILE="/tmp/nockchain_swap"
+MINICONDA_DIR="$HOME/.miniconda3"
 
-# 内存优化环境变量
+# 优化环境变量
 export PATH="$INSTALL_PREFIX/bin:$HOME/.cargo/bin:$PATH"
-export RUST_MIN_STACK=16777216  # 16MB栈空间
-export RUST_LOG=error           # 减少日志内存使用
-export RUST_BACKTRACE=0         # 禁用回溯减少内存
+export RUST_MIN_STACK=16777216
+export RUST_LOG=error
 export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1"
-export CARGO_BUILD_JOBS=1       # 强制单线程编译
-export MALLOC_ARENA_MAX=2       # 限制内存分配器
+export CARGO_BUILD_JOBS=1
+export MALLOC_ARENA_MAX=2
 
 # 消息输出函数
 print_message() {
@@ -47,95 +46,179 @@ show_menu() {
     clear
     echo -e "${BLUE}
 =======================================
- Nockchain 内存优化完全解决方案 v5.0
+ Nockchain 智能安装脚本 v6.0
 =======================================
 ${RESET}"
-    echo -e "${YELLOW}1. 内存优化完整安装（彻底解决编译问题）"
+    echo -e "${YELLOW}1. 智能完整安装（自动解决所有冲突）"
     echo "2. 配置挖矿公钥"
     echo "3. 启动优化挖矿"
     echo "4. 查看实时日志"
     echo "5. 检查钱包余额"
-    echo "6. 系统内存监控"
+    echo "6. 系统状态监控"
     echo "7. 备份钱包密钥"
-    echo "8. 内存问题诊断修复"
+    echo "8. 修复环境问题"
     echo "9. 退出脚本"
     echo -e "${BLUE}=======================================${RESET}"
 }
 
-# 检查并创建swap空间
-setup_swap_space() {
-    print_message "$CYAN" "正在检查并优化虚拟内存..."
+# 智能检测并处理Miniconda冲突
+handle_miniconda_conflict() {
+    print_message "$CYAN" "正在检测Miniconda安装状态..."
     
-    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
-    local current_swap=$(free -m | awk '/^Swap:/{print $2}')
-    local recommended_swap=$((total_ram * 2))
-    
-    print_message "$YELLOW" "内存状态："
-    print_message "$YELLOW" "- 物理内存: ${total_ram}MB"
-    print_message "$YELLOW" "- 当前Swap: ${current_swap}MB"
-    print_message "$YELLOW" "- 推荐Swap: ${recommended_swap}MB"
-    
-    if [ "$current_swap" -lt "$recommended_swap" ]; then
-        print_message "$CYAN" "创建临时swap文件以确保编译成功..."
+    if [ -d "$MINICONDA_DIR" ]; then
+        print_message "$YELLOW" "检测到现有Miniconda安装目录: $MINICONDA_DIR"
         
-        local swap_size=$((recommended_swap - current_swap))
-        if [ "$swap_size" -gt 16384 ]; then
-            swap_size=16384  # 最大16GB临时swap
+        # 检查是否为有效安装
+        if [ -f "$MINICONDA_DIR/bin/conda" ] && "$MINICONDA_DIR/bin/conda" --version >/dev/null 2>&1; then
+            print_message "$GREEN" "现有Miniconda安装有效"
+            
+            # 检查版本
+            local conda_version=$("$MINICONDA_DIR/bin/conda" --version 2>/dev/null)
+            print_message "$YELLOW" "当前版本: $conda_version"
+            
+            read -p "是否使用现有安装？(Y/n): " use_existing
+            if [[ ! "$use_existing" =~ ^[Nn]$ ]]; then
+                export PATH="$MINICONDA_DIR/bin:$PATH"
+                source "$MINICONDA_DIR/etc/profile.d/conda.sh" 2>/dev/null || true
+                print_message "$GREEN" "使用现有Miniconda安装"
+                return 0
+            fi
+        else
+            print_message "$YELLOW" "现有安装无效或损坏"
         fi
         
-        # 创建swap文件
-        if ! sudo dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_size" 2>/dev/null; then
-            print_message "$YELLOW" "无法创建swap文件，将在低内存模式下编译"
-            return 1
+        # 处理无效或用户选择重新安装的情况
+        print_message "$CYAN" "选择处理方式："
+        echo "1. 完全清理并重新安装（推荐）"
+        echo "2. 尝试更新现有安装"
+        echo "3. 备份现有安装并重新安装"
+        
+        read -p "请选择（1-3）: " choice
+        case $choice in
+            1)
+                print_message "$CYAN" "完全清理现有安装..."
+                clean_miniconda_completely
+                ;;
+            2)
+                print_message "$CYAN" "尝试更新现有安装..."
+                update_existing_miniconda
+                return $?
+                ;;
+            3)
+                print_message "$CYAN" "备份现有安装..."
+                backup_existing_miniconda
+                clean_miniconda_completely
+                ;;
+            *)
+                print_message "$RED" "无效选择，默认完全清理"
+                clean_miniconda_completely
+                ;;
+        esac
+    fi
+    
+    # 执行全新安装
+    install_miniconda_fresh
+}
+
+# 完全清理Miniconda
+clean_miniconda_completely() {
+    print_message "$CYAN" "正在完全清理Miniconda..."
+    
+    # 停止所有conda相关进程
+    pkill -f conda 2>/dev/null || true
+    pkill -f python 2>/dev/null || true
+    
+    # 删除安装目录
+    if [ -d "$MINICONDA_DIR" ]; then
+        rm -rf "$MINICONDA_DIR"
+        print_message "$GREEN" "已删除Miniconda目录"
+    fi
+    
+    # 清理环境变量配置
+    local shell_configs=("$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile")
+    for config in "${shell_configs[@]}"; do
+        if [ -f "$config" ]; then
+            # 备份原配置
+            cp "$config" "$config.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+            
+            # 删除conda相关行
+            sed -i '/miniconda3/d' "$config" 2>/dev/null || true
+            sed -i '/conda initialize/,/conda initialize/d' "$config" 2>/dev/null || true
         fi
-        
-        sudo chmod 600 "$SWAP_FILE"
-        sudo mkswap "$SWAP_FILE" >/dev/null 2>&1
-        sudo swapon "$SWAP_FILE" >/dev/null 2>&1
-        
-        print_message "$GREEN" "临时swap空间创建成功: ${swap_size}MB"
-        log_message "创建临时swap: ${swap_size}MB"
+    done
+    
+    # 清理其他相关文件
+    rm -rf ~/.conda 2>/dev/null || true
+    rm -rf ~/.condarc 2>/dev/null || true
+    rm -rf ~/.anaconda_backup 2>/dev/null || true
+    
+    print_message "$GREEN" "Miniconda完全清理完成"
+    log_message "Miniconda完全清理完成"
+}
+
+# 备份现有安装
+backup_existing_miniconda() {
+    print_message "$CYAN" "正在备份现有Miniconda安装..."
+    
+    local backup_path="$BACKUP_DIR/miniconda_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_path"
+    
+    # 备份重要配置和环境
+    if [ -d "$MINICONDA_DIR/envs" ]; then
+        cp -r "$MINICONDA_DIR/envs" "$backup_path/" 2>/dev/null || true
     fi
-}
-
-# 清理swap空间
-cleanup_swap() {
-    if [ -f "$SWAP_FILE" ]; then
-        print_message "$CYAN" "清理临时swap空间..."
-        sudo swapoff "$SWAP_FILE" 2>/dev/null
-        sudo rm -f "$SWAP_FILE" 2>/dev/null
-        print_message "$GREEN" "临时swap空间已清理"
+    
+    if [ -f "$HOME/.condarc" ]; then
+        cp "$HOME/.condarc" "$backup_path/" 2>/dev/null || true
     fi
+    
+    # 导出环境列表
+    if [ -f "$MINICONDA_DIR/bin/conda" ]; then
+        "$MINICONDA_DIR/bin/conda" env list > "$backup_path/env_list.txt" 2>/dev/null || true
+    fi
+    
+    print_message "$GREEN" "备份完成: $backup_path"
+    log_message "Miniconda备份完成: $backup_path"
 }
 
-# 内存优化系统配置
-optimize_system_memory() {
-    print_message "$CYAN" "正在优化系统内存配置..."
+# 尝试更新现有安装
+update_existing_miniconda() {
+    print_message "$CYAN" "正在尝试更新现有Miniconda安装..."
     
-    # 设置内存过量分配策略
-    echo 1 | sudo tee /proc/sys/vm/overcommit_memory >/dev/null 2>&1
-    echo 80 | sudo tee /proc/sys/vm/overcommit_ratio >/dev/null 2>&1
+    local arch=$(uname -m)
+    case $arch in
+        x86_64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh" ;;
+        aarch64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh" ;;
+        *) print_message "$RED" "不支持的架构: $arch"; return 1 ;;
+    esac
     
-    # 优化swap使用策略
-    echo 10 | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1
+    local installer="/tmp/miniconda_updater.sh"
     
-    # 增加文件描述符限制
-    ulimit -n 65536 2>/dev/null
+    # 下载安装程序
+    if ! wget -q --show-progress "$MINICONDA_URL" -O "$installer"; then
+        print_message "$RED" "下载Miniconda安装程序失败"
+        return 1
+    fi
     
-    # 设置进程内存限制
-    ulimit -v unlimited 2>/dev/null
+    chmod +x "$installer"
     
-    print_message "$GREEN" "系统内存配置优化完成"
-}
-
-# 安装Miniconda（内存优化版）
-install_miniconda_optimized() {
-    print_message "$CYAN" "正在安装内存优化版Miniconda..."
-    
-    if check_command "conda"; then
-        print_message "$GREEN" "Miniconda已安装"
+    # 尝试使用-u选项更新
+    if bash "$installer" -b -u -p "$MINICONDA_DIR"; then
+        print_message "$GREEN" "Miniconda更新成功"
+        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+        export PATH="$MINICONDA_DIR/bin:$PATH"
+        rm -f "$installer"
         return 0
+    else
+        print_message "$YELLOW" "更新失败，将执行完全重新安装"
+        rm -f "$installer"
+        return 1
     fi
+}
+
+# 全新安装Miniconda
+install_miniconda_fresh() {
+    print_message "$CYAN" "正在执行Miniconda全新安装..."
     
     local arch=$(uname -m)
     case $arch in
@@ -146,66 +229,82 @@ install_miniconda_optimized() {
     
     local installer="/tmp/miniconda_installer.sh"
     
-    # 使用内存优化的下载方式
-    if ! wget -q --show-progress --limit-rate=1m "$MINICONDA_URL" -O "$installer"; then
-        print_message "$RED" "Miniconda下载失败"
+    # 下载安装程序
+    print_message "$CYAN" "下载Miniconda安装程序..."
+    if ! wget -q --show-progress "$MINICONDA_URL" -O "$installer"; then
+        print_message "$RED" "下载失败，请检查网络连接"
         return 1
     fi
     
     chmod +x "$installer"
     
-    # 静默安装，减少内存使用
-    if ! bash "$installer" -b -p "$HOME/.miniconda3" -s; then
+    # 静默安装
+    print_message "$CYAN" "正在安装Miniconda..."
+    if bash "$installer" -b -p "$MINICONDA_DIR"; then
+        print_message "$GREEN" "Miniconda安装成功"
+        
+        # 初始化conda
+        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+        export PATH="$MINICONDA_DIR/bin:$PATH"
+        
+        # 配置conda
+        conda config --set auto_activate_base false
+        conda config --set channel_priority strict
+        
+        # 清理安装文件
+        rm -f "$installer"
+        
+        print_message "$GREEN" "Miniconda配置完成"
+        log_message "Miniconda全新安装完成"
+        return 0
+    else
         print_message "$RED" "Miniconda安装失败"
+        rm -f "$installer"
         return 1
     fi
-    
-    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-    conda config --set auto_activate_base false
-    conda config --set channel_priority strict
-    
-    export PATH="$HOME/.miniconda3/bin:$PATH"
-    rm -f "$installer"
-    
-    print_message "$GREEN" "Miniconda内存优化版安装完成"
 }
 
-# 安装编译工具（超低内存模式）
-install_build_tools_low_memory() {
-    print_message "$CYAN" "正在安装编译工具（超低内存模式）..."
+# 安装编译环境
+setup_build_environment() {
+    print_message "$CYAN" "正在设置编译环境..."
     
-    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+    # 确保conda可用
+    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+    export PATH="$MINICONDA_DIR/bin:$PATH"
     
-    # 创建最小化编译环境
-    conda create -n nockchain-minimal -y python=3.9 --no-default-packages
-    conda activate nockchain-minimal
+    # 创建专用编译环境
+    print_message "$CYAN" "创建Nockchain编译环境..."
+    conda create -n nockchain-build -y python=3.9 --no-default-packages || {
+        print_message "$YELLOW" "环境已存在，正在更新..."
+    }
     
-    # 逐个安装工具，避免内存峰值
-    local tools=("gcc_linux-64" "make" "clang" "pkg-config" "openssl")
+    # 激活环境
+    conda activate nockchain-build
+    
+    # 逐步安装编译工具（避免内存峰值）
+    local tools=("gcc_linux-64" "make" "cmake" "clang" "pkg-config" "openssl" "git")
     
     for tool in "${tools[@]}"; do
         print_message "$YELLOW" "安装 $tool..."
-        conda install -y "$tool" -c conda-forge --no-deps --quiet || {
-            print_message "$YELLOW" "跳过 $tool"
+        conda install -y "$tool" -c conda-forge --quiet || {
+            print_message "$YELLOW" "跳过 $tool（可能不可用）"
         }
-        sleep 2  # 给内存回收时间
+        sleep 1  # 给系统一些喘息时间
     done
     
-    print_message "$GREEN" "编译工具安装完成"
+    print_message "$GREEN" "编译环境设置完成"
 }
 
-# 内存优化的Rust安装
-install_rust_low_memory() {
-    print_message "$CYAN" "正在安装Rust工具链（内存优化）..."
+# 安装Rust工具链
+install_rust_optimized() {
+    print_message "$CYAN" "正在安装Rust工具链..."
     
-    if check_command "rustc"; then
+    if check_command "rustc" && check_command "cargo"; then
         print_message "$YELLOW" "Rust已安装: $(rustc --version)"
         return 0
     fi
     
-    # 设置内存友好的安装选项
-    export RUSTUP_INIT_SKIP_PATH_CHECK=yes
-    
+    # 下载并安装rustup
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
         --default-toolchain stable \
         --profile minimal \
@@ -214,7 +313,7 @@ install_rust_low_memory() {
     source "$HOME/.cargo/env"
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 配置Cargo使用单线程
+    # 配置Cargo进行内存优化编译
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
@@ -228,62 +327,45 @@ opt-level = 1
 debug = false
 lto = false
 codegen-units = 1
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
 EOF
     
-    print_message "$GREEN" "Rust内存优化版安装完成"
+    print_message "$GREEN" "Rust工具链安装完成"
 }
 
-# 超低内存编译Nockchain
-compile_nockchain_low_memory() {
-    print_message "$MAGENTA" "开始超低内存模式编译Nockchain..."
+# 编译Nockchain项目
+compile_nockchain_optimized() {
+    print_message "$CYAN" "开始编译Nockchain项目..."
     
     cd "$NOCKCHAIN_DIR" || return 1
     
-    # 设置最严格的内存控制
-    export RUST_MIN_STACK=16777216      # 16MB
-    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1 -C incremental=false"
+    # 设置最优编译环境
+    export RUST_MIN_STACK=16777216
+    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1"
     export CARGO_BUILD_JOBS=1
     export CARGO_INCREMENTAL=0
     export RUST_LOG=error
     export RUST_BACKTRACE=0
     
     # 激活conda环境
-    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-    conda activate nockchain-minimal
+    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+    conda activate nockchain-build
     
-    print_message "$CYAN" "步骤1: 清理之前的编译缓存..."
+    # 清理之前的编译结果
+    print_message "$CYAN" "清理编译缓存..."
     rm -rf target/ || true
     cargo clean || true
     
-    print_message "$CYAN" "步骤2: 编译hoonc（单线程模式）..."
-    
-    # 创建内存监控脚本
-    cat > memory_monitor.sh << 'EOF'
-#!/bin/bash
-while true; do
-    mem_usage=$(free -m | awk '/^Mem:/{print $3}')
-    if [ "$mem_usage" -gt 6144 ]; then  # 如果超过6GB
-        echo "$(date): 内存使用过高: ${mem_usage}MB" >> memory_warning.log
-    fi
-    sleep 30
-done
-EOF
-    chmod +x memory_monitor.sh
-    ./memory_monitor.sh &
-    monitor_pid=$!
-    
-    # 分步骤编译，每步之间清理内存
+    # 分步骤编译以减少内存压力
+    print_message "$CYAN" "编译hoonc编译器..."
     if ! timeout 3600 make install-hoonc; then
-        kill $monitor_pid 2>/dev/null
-        print_message "$RED" "hoonc编译失败，尝试备用方案..."
+        print_message "$YELLOW" "标准编译失败，尝试手动编译..."
         
-        # 备用编译方案：手动编译
-        print_message "$CYAN" "使用手动编译方案..."
         cd crates/hoonc
-        
-        # 逐个编译依赖
         cargo build --release --bin hoonc --jobs 1 || {
-            print_message "$RED" "手动编译也失败"
+            print_message "$RED" "hoonc编译失败"
             return 1
         }
         
@@ -292,88 +374,67 @@ EOF
         cd ../..
     fi
     
-    kill $monitor_pid 2>/dev/null
+    # 等待内存释放
+    sleep 5
     
-    print_message "$CYAN" "步骤3: 编译主项目..."
-    sleep 5  # 让内存稳定
-    
+    print_message "$CYAN" "编译主项目..."
     if ! timeout 3600 make build; then
         print_message "$RED" "主项目编译失败"
         return 1
     fi
     
-    print_message "$CYAN" "步骤4: 安装钱包..."
-    if ! make install-nockchain-wallet; then
-        print_message "$YELLOW" "钱包安装失败，但可以继续"
-    fi
-    
-    print_message "$CYAN" "步骤5: 安装主程序..."
-    if ! make install-nockchain; then
-        print_message "$YELLOW" "主程序安装失败，但编译已完成"
-    fi
+    print_message "$CYAN" "安装组件..."
+    make install-nockchain-wallet || print_message "$YELLOW" "钱包安装失败"
+    make install-nockchain || print_message "$YELLOW" "主程序安装失败"
     
     print_message "$GREEN" "Nockchain编译完成！"
 }
 
-# 主安装函数（内存优化版）
-install_nockchain_memory_optimized() {
-    print_message "$GREEN" ">>> 开始Nockchain内存优化完整安装..."
-    log_message "开始内存优化安装"
+# 主安装函数
+install_nockchain_intelligent() {
+    print_message "$GREEN" ">>> 开始Nockchain智能安装..."
+    log_message "开始智能安装流程"
     
     # 检查系统资源
-    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
-    local available_space=$(df -m ~ | awk 'NR==2{print $4}')
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
+    local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
     
-    print_message "$YELLOW" "系统配置检查："
-    print_message "$YELLOW" "- 物理内存: ${total_ram}MB"
+    print_message "$YELLOW" "系统检查："
+    print_message "$YELLOW" "- 内存: ${total_ram}MB"
     print_message "$YELLOW" "- 可用空间: ${available_space}MB"
     
-    if [ "$total_ram" -lt 2048 ]; then
-        print_message "$RED" "错误：系统内存不足2GB，无法安全编译"
+    if [ "$total_ram" -lt 2048 ] && [ "$total_ram" -gt 0 ]; then
+        print_message "$YELLOW" "警告：内存较低，将使用超级优化模式"
+    fi
+    
+    # 创建必要目录
+    mkdir -p "$BACKUP_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
+    
+    # 步骤1：智能处理Miniconda
+    print_message "$MAGENTA" "步骤 1/5: 智能处理Miniconda..."
+    if ! handle_miniconda_conflict; then
+        print_message "$RED" "Miniconda处理失败"
         return 1
     fi
     
-    if [ "$available_space" -lt 10240 ]; then
-        print_message "$RED" "错误：磁盘空间不足10GB"
+    # 步骤2：设置编译环境
+    print_message "$MAGENTA" "步骤 2/5: 设置编译环境..."
+    if ! setup_build_environment; then
+        print_message "$RED" "编译环境设置失败"
         return 1
     fi
     
-    # 步骤1: 设置虚拟内存
-    print_message "$MAGENTA" "步骤 1/7: 设置虚拟内存..."
-    setup_swap_space
-    
-    # 步骤2: 优化系统内存配置
-    print_message "$MAGENTA" "步骤 2/7: 优化系统内存配置..."
-    optimize_system_memory
-    
-    # 步骤3: 安装Miniconda
-    print_message "$MAGENTA" "步骤 3/7: 安装环境管理器..."
-    if ! install_miniconda_optimized; then
-        print_message "$RED" "环境管理器安装失败"
-        cleanup_swap
-        return 1
-    fi
-    
-    # 步骤4: 安装编译工具
-    print_message "$MAGENTA" "步骤 4/7: 安装编译工具..."
-    if ! install_build_tools_low_memory; then
-        print_message "$RED" "编译工具安装失败"
-        cleanup_swap
-        return 1
-    fi
-    
-    # 步骤5: 安装Rust
-    print_message "$MAGENTA" "步骤 5/7: 安装Rust工具链..."
-    if ! install_rust_low_memory; then
+    # 步骤3：安装Rust
+    print_message "$MAGENTA" "步骤 3/5: 安装Rust工具链..."
+    if ! install_rust_optimized; then
         print_message "$RED" "Rust安装失败"
-        cleanup_swap
         return 1
     fi
     
-    # 步骤6: 克隆项目
-    print_message "$MAGENTA" "步骤 6/7: 克隆Nockchain项目..."
+    # 步骤4：克隆项目
+    print_message "$MAGENTA" "步骤 4/5: 获取Nockchain源码..."
     if [ -d "$NOCKCHAIN_DIR" ]; then
-        print_message "$YELLOW" "发现现有安装，正在更新..."
+        print_message "$YELLOW" "更新现有项目..."
         cd "$NOCKCHAIN_DIR"
         git pull origin main || {
             cd "$HOME"
@@ -383,7 +444,6 @@ install_nockchain_memory_optimized() {
     else
         git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR" || {
             print_message "$RED" "项目克隆失败"
-            cleanup_swap
             return 1
         }
     fi
@@ -404,17 +464,16 @@ RUST_MIN_STACK=16777216
 EOF
     fi
     
-    # 步骤7: 编译项目
-    print_message "$MAGENTA" "步骤 7/7: 编译项目（可能需要1-2小时）..."
-    if ! compile_nockchain_low_memory; then
+    # 步骤5：编译项目
+    print_message "$MAGENTA" "步骤 5/5: 编译Nockchain..."
+    if ! compile_nockchain_optimized; then
         print_message "$RED" "项目编译失败"
-        cleanup_swap
         return 1
     fi
     
-    # 生成钱包（如果可能）
+    # 生成钱包
     if check_command "nockchain-wallet"; then
-        print_message "$CYAN" "正在生成钱包..."
+        print_message "$CYAN" "生成钱包..."
         local wallet_output
         wallet_output=$(nockchain-wallet keygen 2>&1)
         
@@ -425,38 +484,34 @@ EOF
             local pubkey=$(echo "$wallet_output" | grep -E "Public key:|公钥:" | awk '{print $NF}')
             if [ -n "$pubkey" ]; then
                 sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$pubkey/" .env
-                print_message "$GREEN" "公钥已配置: $pubkey"
+                print_message "$GREEN" "公钥自动配置完成"
             fi
             
-            mkdir -p "$BACKUP_DIR"
             echo "$wallet_output" > "$BACKUP_DIR/wallet_$(date +%Y%m%d_%H%M%S).txt"
         fi
     fi
     
-    # 创建启动脚本
-    cat > "$HOME/start_nockchain.sh" << 'EOF'
+    # 创建便捷启动脚本
+    cat > "$HOME/nockchain_env.sh" << 'EOF'
 #!/bin/bash
-# Nockchain启动脚本（内存优化版）
+# Nockchain环境激活脚本
 source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-conda activate nockchain-minimal
+conda activate nockchain-build
 export RUST_MIN_STACK=16777216
 export RUST_LOG=error
 export PATH="$HOME/.cargo/bin:$PATH"
 cd "$HOME/nockchain"
-echo "启动Nockchain挖矿节点..."
-make run-nockchain
+echo "Nockchain环境已激活"
+echo "使用 'make run-nockchain' 启动挖矿"
 EOF
-    chmod +x "$HOME/start_nockchain.sh"
+    chmod +x "$HOME/nockchain_env.sh"
     
-    # 清理临时文件
-    cleanup_swap
-    
-    print_message "$GREEN" "🎉 Nockchain内存优化安装完成！"
+    print_message "$GREEN" "🎉 Nockchain智能安装完成！"
     print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "启动脚本: $HOME/start_nockchain.sh"
-    print_message "$CYAN" "所有内存问题已彻底解决！"
+    print_message "$YELLOW" "环境激活: source ~/nockchain_env.sh"
+    print_message "$CYAN" "所有冲突问题已彻底解决！"
     
-    log_message "内存优化安装完成"
+    log_message "智能安装流程完成"
 }
 
 # 验证公钥格式
@@ -492,9 +547,9 @@ configure_mining_key() {
     fi
 }
 
-# 启动挖矿（内存优化版）
-start_mining_optimized() {
-    print_message "$GREEN" ">>> 启动内存优化挖矿节点..."
+# 启动挖矿
+start_mining() {
+    print_message "$GREEN" ">>> 启动优化挖矿节点..."
     
     if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
         print_message "$RED" "错误：未找到安装"
@@ -503,8 +558,7 @@ start_mining_optimized() {
     
     # 检查现有进程
     if screen -list | grep -q "nockchain"; then
-        print_message "$YELLOW" "检测到挖矿进程正在运行"
-        read -p "是否重启？(y/N): " restart
+        read -p "检测到挖矿进程正在运行，是否重启？(y/N): " restart
         if [[ "$restart" =~ ^[Yy]$ ]]; then
             screen -S nockchain -X quit
             sleep 3
@@ -515,29 +569,31 @@ start_mining_optimized() {
     
     cd "$NOCKCHAIN_DIR"
     
-    # 设置内存优化环境
+    # 激活环境
+    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+    conda activate nockchain-build
+    
+    # 设置环境变量
     export RUST_MIN_STACK=16777216
     export RUST_LOG=error
     export MALLOC_ARENA_MAX=2
-    
-    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-    conda activate nockchain-minimal
     
     print_message "$CYAN" "正在启动挖矿节点..."
     
     # 在screen中启动
     screen -dmS nockchain bash -c "
-        source '$HOME/.miniconda3/etc/profile.d/conda.sh'
-        conda activate nockchain-minimal
+        source '$MINICONDA_DIR/etc/profile.d/conda.sh'
+        conda activate nockchain-build
         cd '$NOCKCHAIN_DIR'
         export RUST_MIN_STACK=16777216
         export RUST_LOG=error
         export MALLOC_ARENA_MAX=2
         source .env
-        echo '=== Nockchain 内存优化挖矿 ===' > logs/mining.log
+        mkdir -p logs
+        echo '=== Nockchain 智能优化挖矿 ===' > logs/mining.log
         echo '启动时间: \$(date)' >> logs/mining.log
-        echo '内存模式: 超低内存优化' >> logs/mining.log
-        echo '==========================' >> logs/mining.log
+        echo '版本: 智能冲突解决版' >> logs/mining.log
+        echo '=============================' >> logs/mining.log
         make run-nockchain 2>&1 | tee -a logs/mining.log
     "
     
@@ -548,7 +604,7 @@ start_mining_optimized() {
         print_message "$CYAN" "- 查看状态: screen -r nockchain"
         print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
     else
-        print_message "$RED" "启动失败"
+        print_message "$RED" "启动失败，请查看日志"
     fi
 }
 
@@ -562,7 +618,7 @@ view_logs() {
         if screen -list | grep -q "nockchain"; then
             screen -r nockchain
         else
-            print_message "$RED" "未找到日志文件或运行进程"
+            print_message "$RED" "未找到日志或进程"
         fi
     fi
 }
@@ -571,8 +627,8 @@ view_logs() {
 check_balance() {
     print_message "$GREEN" ">>> 检查钱包余额"
     
-    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-    conda activate nockchain-minimal
+    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+    conda activate nockchain-build
     
     cd "$NOCKCHAIN_DIR"
     local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
@@ -593,38 +649,33 @@ check_balance() {
     fi
 }
 
-# 系统内存监控
-memory_monitor() {
-    print_message "$BLUE" "====== 系统内存监控 ======"
+# 系统监控
+system_monitor() {
+    print_message "$BLUE" "====== 系统状态监控 ======"
     
-    # 内存使用情况
-    local mem_info=$(free -h | awk '/^Mem:/{print "使用: "$3" / 总计: "$2" ("int($3/$2*100)"%)"}')
+    # 基本系统信息
+    local mem_info=$(free -h | awk '/^Mem:/{print "使用: "$3" / 总计: "$2}')
     print_message "$YELLOW" "内存状态: $mem_info"
     
-    # Swap使用情况
-    local swap_info=$(free -h | awk '/^Swap:/{print "使用: "$3" / 总计: "$2}')
-    print_message "$YELLOW" "Swap状态: $swap_info"
-    
-    # 系统负载
     local load_avg=$(uptime | awk -F'load average:' '{print $2}')
     print_message "$YELLOW" "系统负载: $load_avg"
     
-    # 挖矿进程状态
+    # 挖矿状态
     if screen -list | grep -q "nockchain"; then
         print_message "$GREEN" "挖矿状态: ✅ 正在运行"
         
-        # 进程内存使用
-        local nock_mem=$(ps aux | grep nockchain | grep -v grep | awk '{sum+=$6} END {print sum/1024}')
-        if [ -n "$nock_mem" ]; then
-            print_message "$CYAN" "挖矿进程内存: ${nock_mem}MB"
+        if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
+            print_message "$CYAN" "最近日志："
+            tail -n 3 "$NOCKCHAIN_DIR/logs/mining.log" 2>/dev/null
         fi
     else
         print_message "$RED" "挖矿状态: ❌ 未运行"
     fi
     
-    # 磁盘空间
-    local disk_usage=$(df -h ~ | awk 'NR==2{print $4" 可用"}')
-    print_message "$YELLOW" "磁盘空间: $disk_usage"
+    # 环境状态
+    print_message "$CYAN" "环境状态："
+    print_message "$YELLOW" "- Conda: $(which conda 2>/dev/null || echo '未安装')"
+    print_message "$YELLOW" "- Rust: $(which rustc 2>/dev/null || echo '未安装')"
 }
 
 # 备份钱包
@@ -634,12 +685,11 @@ backup_wallet() {
     local backup_file="$BACKUP_DIR/complete_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
     mkdir -p "$BACKUP_DIR"
     
-    cd "$NOCKCHAIN_DIR"
+    cd "$NOCKCHAIN_DIR" 2>/dev/null || return 1
     
     # 创建备份
     tar -czf "$backup_file" .env logs/ *.txt 2>/dev/null || true
     
-    # 备份钱包配置
     if [ -f ".env" ]; then
         cp .env "$BACKUP_DIR/env_$(date +%Y%m%d_%H%M%S).backup"
     fi
@@ -647,95 +697,63 @@ backup_wallet() {
     print_message "$GREEN" "备份完成: $backup_file"
 }
 
-# 内存问题诊断修复
-diagnose_memory_issues() {
-    print_message "$GREEN" ">>> 内存问题诊断修复"
+# 修复环境问题
+fix_environment() {
+    print_message "$GREEN" ">>> 修复环境问题"
     
-    print_message "$CYAN" "正在检查内存配置..."
+    print_message "$CYAN" "正在诊断环境..."
     
-    # 检查swap
-    local swap_total=$(free -m | awk '/^Swap:/{print $2}')
-    local mem_total=$(free -m | awk '/^Mem:/{print $2}')
-    
-    print_message "$YELLOW" "诊断结果："
-    print_message "$YELLOW" "- 物理内存: ${mem_total}MB"
-    print_message "$YELLOW" "- 虚拟内存: ${swap_total}MB"
-    
-    if [ "$swap_total" -lt "$((mem_total * 2))" ]; then
-        print_message "$RED" "问题：虚拟内存不足"
-        read -p "是否创建临时swap空间？(Y/n): " create_swap
-        if [[ ! "$create_swap" =~ ^[Nn]$ ]]; then
-            setup_swap_space
-        fi
-    fi
-    
-    # 检查编译配置
-    if [ -f "$HOME/.cargo/config.toml" ]; then
-        if grep -q "jobs = 1" "$HOME/.cargo/config.toml"; then
-            print_message "$GREEN" "✅ Cargo已配置单线程编译"
-        else
-            print_message "$YELLOW" "⚠️  Cargo未配置单线程编译"
-        fi
-    else
-        print_message "$RED" "❌ Cargo配置文件不存在"
-        print_message "$CYAN" "正在创建优化配置..."
-        mkdir -p "$HOME/.cargo"
-        cat > "$HOME/.cargo/config.toml" << 'EOF'
-[build]
-jobs = 1
-
-[profile.dev]
-debug = false
-opt-level = 1
-EOF
-        print_message "$GREEN" "Cargo配置已优化"
-    fi
-    
-    # 检查环境变量
     local issues=()
     
-    if [ -z "$RUST_MIN_STACK" ] || [ "$RUST_MIN_STACK" -lt 16777216 ]; then
-        issues+=("RUST_MIN_STACK未设置或过小")
+    # 检查Miniconda
+    if [ ! -d "$MINICONDA_DIR" ] || ! check_command "conda"; then
+        issues+=("Miniconda未正确安装")
     fi
     
-    if [ "$RUSTFLAGS" != *"debuginfo=0"* ]; then
-        issues+=("RUSTFLAGS未优化")
+    # 检查Rust
+    if ! check_command "rustc"; then
+        issues+=("Rust未安装")
     fi
     
-    if [ ${#issues[@]} -gt 0 ]; then
-        print_message "$YELLOW" "发现配置问题："
-        for issue in "${issues[@]}"; do
-            print_message "$RED" "- $issue"
-        done
+    # 检查Nockchain
+    if [ ! -d "$NOCKCHAIN_DIR" ]; then
+        issues+=("Nockchain项目未找到")
+    fi
+    
+    if [ ${#issues[@]} -eq 0 ]; then
+        print_message "$GREEN" "环境检查通过"
+        return 0
+    fi
+    
+    print_message "$YELLOW" "发现问题："
+    for issue in "${issues[@]}"; do
+        print_message "$RED" "- $issue"
+    done
+    
+    read -p "是否自动修复？(Y/n): " fix_choice
+    if [[ ! "$fix_choice" =~ ^[Nn]$ ]]; then
+        print_message "$CYAN" "正在修复环境..."
         
-        read -p "是否自动修复？(Y/n): " fix_issues
-        if [[ ! "$fix_issues" =~ ^[Nn]$ ]]; then
-            # 创建环境配置文件
-            cat >> "$HOME/.bashrc" << 'EOF'
+        # 重新配置PATH
+        cat >> "$HOME/.bashrc" << 'EOF'
 
-# Nockchain内存优化配置
+# Nockchain环境配置
+export PATH="$HOME/.miniconda3/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 export RUST_MIN_STACK=16777216
-export RUSTFLAGS="-C debuginfo=0 -C opt-level=1"
-export CARGO_BUILD_JOBS=1
 export RUST_LOG=error
-export MALLOC_ARENA_MAX=2
+
+# 激活Nockchain环境函数
+activate_nockchain() {
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh" 2>/dev/null
+    conda activate nockchain-build 2>/dev/null || true
+    cd "$HOME/nockchain" 2>/dev/null || true
+}
 EOF
-            print_message "$GREEN" "配置问题已修复"
-            print_message "$YELLOW" "请运行: source ~/.bashrc"
-        fi
-    else
-        print_message "$GREEN" "✅ 所有配置检查通过"
+        
+        source "$HOME/.bashrc"
+        print_message "$GREEN" "环境修复完成"
     fi
 }
-
-# 清理退出函数
-cleanup_on_exit() {
-    cleanup_swap
-    print_message "$CYAN" "清理完成"
-}
-
-# 设置退出清理
-trap cleanup_on_exit EXIT
 
 # 主循环
 main() {
@@ -746,24 +764,24 @@ main() {
     
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
-    log_message "内存优化脚本启动 v5.0"
+    log_message "智能脚本启动 v6.0"
     
     while true; do
         show_menu
         read -p "请输入选项编号（1-9）: " choice
         
         case $choice in
-            1) install_nockchain_memory_optimized ;;
+            1) install_nockchain_intelligent ;;
             2) configure_mining_key ;;
-            3) start_mining_optimized ;;
+            3) start_mining ;;
             4) view_logs ;;
             5) check_balance ;;
-            6) memory_monitor ;;
+            6) system_monitor ;;
             7) backup_wallet ;;
-            8) diagnose_memory_issues ;;
+            8) fix_environment ;;
             9)
-                print_message "$GREEN" "感谢使用Nockchain内存优化解决方案！"
-                cleanup_on_exit
+                print_message "$GREEN" "感谢使用Nockchain智能解决方案！"
+                log_message "脚本正常退出"
                 exit 0
                 ;;
             *)
