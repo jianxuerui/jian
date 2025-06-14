@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Nockchain 节点管理脚本 - 精简菜单版
-# 版本：5.0 保留核心功能菜单版
-# 保留功能：安装、更改挖矿公钥、启动节点、日志查看
+# Nockchain 节点管理脚本 - 修复 hoonc 编译问题版
+# 版本：6.0 解决编译错误专版
+# 主要修复：hoonc 编译失败、内存不足、依赖问题
 
 set -e
 
@@ -43,6 +43,172 @@ log_success() {
     echo -e "${PURPLE}[SUCCESS]${NC} $1"
 }
 
+# 检查系统资源 - 增强版
+check_system_resources_enhanced() {
+    log_info "执行增强系统资源检查..."
+    
+    local warnings=0
+    
+    # 检查内存 - 更严格的要求
+    local total_mem=$(free -g | awk '/^Mem:/{print $2}')
+    local available_mem=$(free -g | awk '/^Mem:/{print $7}')
+    
+    if [ "$total_mem" -lt 32 ]; then
+        log_error "系统内存不足: ${total_mem}GB (最低要求32GB，推荐64GB+)"
+        log_error "hoonc 编译需要大量内存，建议升级硬件或使用云服务器"
+        ((warnings++))
+    elif [ "$total_mem" -lt 64 ]; then
+        log_warn "系统内存: ${total_mem}GB (推荐64GB+，可能影响编译速度)"
+        ((warnings++))
+    else
+        log_success "系统内存: ${total_mem}GB ✓"
+    fi
+    
+    if [ "$available_mem" -lt 16 ]; then
+        log_warn "可用内存不足: ${available_mem}GB，建议释放内存或重启系统"
+        ((warnings++))
+    fi
+    
+    # 检查磁盘空间
+    local disk_space=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+    if [ "$disk_space" -lt 50 ]; then
+        log_error "可用磁盘空间不足: ${disk_space}GB (最低要求50GB)"
+        ((warnings++))
+    elif [ "$disk_space" -lt 100 ]; then
+        log_warn "可用磁盘空间: ${disk_space}GB (推荐100GB+)"
+        ((warnings++))
+    else
+        log_success "可用磁盘空间: ${disk_space}GB ✓"
+    fi
+    
+    # 检查CPU和负载
+    local cpu_cores=$(nproc)
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+    
+    if [ "$cpu_cores" -lt 4 ]; then
+        log_warn "CPU核心数: ${cpu_cores}核 (推荐6核+)"
+        ((warnings++))
+    else
+        log_success "CPU核心数: ${cpu_cores}核 ✓"
+    fi
+    
+    # 检查虚拟内存设置
+    local swap_total=$(free -g | awk '/^Swap:/{print $2}')
+    if [ "$swap_total" -lt 8 ]; then
+        log_warn "Swap 空间: ${swap_total}GB (建议至少8GB)"
+        ((warnings++))
+    fi
+    
+    if [ $warnings -gt 0 ]; then
+        log_warn "发现 $warnings 个资源警告，可能影响编译成功率"
+        read -p "是否继续安装？建议在云服务器上运行 (y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "建议使用配置更高的服务器后重试"
+            exit 1
+        fi
+    fi
+}
+
+# 优化系统设置
+optimize_system_for_compilation() {
+    log_info "优化系统设置以提高编译成功率..."
+    
+    # 启用内存过量分配
+    log_info "启用内存过量分配..."
+    sudo sysctl -w vm.overcommit_memory=1
+    
+    # 调整 OOM killer 设置
+    echo 'vm.oom_kill_allocating_task=1' | sudo tee -a /etc/sysctl.conf >/dev/null
+    
+    # 增加文件描述符限制
+    ulimit -n 65536
+    
+    # 设置更大的栈大小
+    ulimit -s 16384
+    
+    # 清理系统缓存
+    log_info "清理系统缓存..."
+    sudo sync
+    sudo echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+    
+    log_success "系统优化完成"
+}
+
+# 安装系统依赖 - 增强版
+install_system_dependencies_enhanced() {
+    log_info "安装增强系统依赖..."
+    
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # 更新包列表
+        sudo apt update
+        sudo apt upgrade -y
+        
+        # 核心编译工具
+        local core_packages=(
+            "build-essential" "cmake" "ninja-build"
+            "pkg-config" "autoconf" "automake" "libtool"
+            "git" "curl" "wget" "unzip" "lz4"
+        )
+        
+        # LLVM 和 Clang 相关
+        local llvm_packages=(
+            "clang" "clang-tools" "clang-format"
+            "llvm" "llvm-dev" "llvm-runtime"
+            "libclang-dev" "libclang1" "libclang-common-dev"
+            "lld" "libc++-dev" "libc++abi-dev"
+        )
+        
+        # 系统库
+        local system_packages=(
+            "libssl-dev" "libffi-dev" "zlib1g-dev"
+            "libbz2-dev" "libreadline-dev" "libsqlite3-dev"
+            "libncursesw5-dev" "xz-utils" "tk-dev"
+            "libxml2-dev" "libxmlsec1-dev" "libffi-dev"
+            "liblzma-dev" "libleveldb-dev"
+        )
+        
+        # 内存和性能相关
+        local perf_packages=(
+            "htop" "iotop" "sysstat" "psmisc"
+            "linux-tools-common" "linux-tools-generic"
+        )
+        
+        log_info "安装核心编译工具..."
+        sudo apt install -y "${core_packages[@]}"
+        
+        log_info "安装 LLVM 和 Clang..."
+        sudo apt install -y "${llvm_packages[@]}"
+        
+        log_info "安装系统库..."
+        sudo apt install -y "${system_packages[@]}"
+        
+        log_info "安装性能监控工具..."
+        sudo apt install -y "${perf_packages[@]}"
+        
+        log_success "系统依赖安装完成"
+    fi
+    
+    # 安装 Rust - 最新稳定版
+    if ! command -v rustc &> /dev/null || ! command -v cargo &> /dev/null; then
+        log_info "安装 Rust 最新稳定版..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        source $HOME/.cargo/env
+        
+        # 安装必要的 Rust 组件
+        rustup component add rustfmt clippy
+        
+        log_success "Rust 安装完成: $(rustc --version)"
+    else
+        log_info "Rust 已安装: $(rustc --version)"
+        
+        # 更新到最新版本
+        log_info "更新 Rust 到最新版本..."
+        rustup update stable
+        rustup default stable
+    fi
+}
+
 # 检查项目根目录
 check_project_root() {
     local current_dir=$(pwd)
@@ -65,7 +231,7 @@ check_project_root() {
 find_nockchain_directory() {
     log_info "正在查找 nockchain 项目目录..."
     
-    local found_dirs=($(find . -maxdepth 3 -name "nockchain" -type d 2>/dev/null))
+    local found_dirs=($(find . -maxdepth 3 -name "nockchain*" -type d 2>/dev/null))
     
     if [ ${#found_dirs[@]} -gt 0 ]; then
         for dir in "${found_dirs[@]}"; do
@@ -134,44 +300,27 @@ smart_directory_setup() {
     auto_initialize_project
 }
 
-# 安装系统依赖
-install_system_dependencies() {
-    log_info "正在安装系统依赖..."
-    
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        sudo apt update
-        
-        local apt_packages=(
-            "curl" "git" "build-essential" "make" "gcc" "clang"
-            "pkg-config" "libssl-dev" "libclang-dev" "llvm-dev"
-            "libleveldb-dev" "cmake" "autoconf" "automake"
-            "libtool" "wget" "unzip" "jq"
-        )
-        
-        sudo apt install -y "${apt_packages[@]}"
-        log_success "系统依赖安装完成"
-    fi
-    
-    # 安装 Rust
-    if ! command -v rustc &> /dev/null || ! command -v cargo &> /dev/null; then
-        log_info "安装 Rust..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source $HOME/.cargo/env
-        log_success "Rust 安装完成"
-    else
-        log_info "Rust 已安装：$(rustc --version)"
-    fi
-}
-
 # 初始化环境配置
 initialize_environment() {
     log_info "初始化环境配置..."
     
+    # 设置 Rust 环境
     if [ -f "$HOME/.cargo/env" ]; then
         source "$HOME/.cargo/env"
     fi
     export PATH="$HOME/.cargo/bin:$PATH"
     
+    # 设置编译优化环境变量
+    export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+    export CARGO_NET_RETRY=3
+    export CARGO_NET_TIMEOUT=300
+    export CARGO_HTTP_TIMEOUT=300
+    
+    # 设置 LLVM 环境变量
+    export LLVM_CONFIG_PATH="/usr/bin/llvm-config"
+    export LIBCLANG_PATH="/usr/lib/x86_64-linux-gnu"
+    
+    # 创建环境文件
     if [ ! -f "$ENV_FILE" ]; then
         if [ -f "$ENV_EXAMPLE" ]; then
             cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -186,7 +335,10 @@ EOF
         fi
     fi
     
+    # 创建备份目录
     [ ! -d "$BACKUP_DIR" ] && mkdir -p "$BACKUP_DIR"
+    
+    log_success "环境初始化完成"
 }
 
 # 验证128位16进制挖矿公钥格式
@@ -204,43 +356,97 @@ validate_mining_pubkey() {
     return 0
 }
 
-# 功能1：完整安装 Nockchain
-install_nockchain_complete() {
-    log_info "开始完整安装 Nockchain..."
+# 修复版 hoonc 安装
+install_hoonc_fixed() {
+    log_info "开始修复版 hoonc 编译器安装..."
     
-    # 检查系统资源
-    local total_mem=$(free -g | awk '/^Mem:/{print $2}')
-    log_info "系统内存: ${total_mem}GB"
+    # 清理之前的构建产物
+    if [ -d "target" ]; then
+        log_info "清理之前的构建产物..."
+        rm -rf target/
+    fi
     
-    local disk_space=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-    log_info "可用磁盘空间: ${disk_space}GB"
+    # 清理 Cargo 缓存
+    cargo clean 2>/dev/null || true
     
-    local cpu_cores=$(nproc)
-    log_info "CPU核心数: ${cpu_cores}核"
+    # 设置编译环境
+    export CARGO_BUILD_JOBS=$(( $(nproc) / 2 ))
+    export CARGO_TARGET_DIR="$(pwd)/target"
     
-    # 安装依赖
-    install_system_dependencies
+    log_info "使用 $CARGO_BUILD_JOBS 个并行编译任务"
+    log_info "目标目录: $CARGO_TARGET_DIR"
+    
+    # 尝试使用不同的方法安装 hoonc
+    log_info "尝试方法1: 使用 make install-hoonc（超时 20 分钟）..."
+    
+    if timeout 1200 make install-hoonc; then
+        log_success "hoonc 编译器安装成功（方法1）"
+        return 0
+    else
+        log_warn "方法1失败，尝试方法2: 直接使用 cargo 安装..."
+        
+        # 方法2: 直接使用 cargo 安装
+        if timeout 1800 cargo install --locked --force --path crates/hoonc --bin hoonc; then
+            log_success "hoonc 编译器安装成功（方法2）"
+            return 0
+        else
+            log_warn "方法2失败，尝试方法3: 降低优化级别..."
+            
+            # 方法3: 降低优化级别
+            export RUSTFLAGS="-C opt-level=1"
+            if timeout 2400 cargo install --locked --force --path crates/hoonc --bin hoonc; then
+                log_success "hoonc 编译器安装成功（方法3）"
+                return 0
+            else
+                log_error "所有方法都失败，hoonc 编译器安装失败"
+                log_error "建议检查系统资源或在更高配置的服务器上重试"
+                return 1
+            fi
+        fi
+    fi
+}
+
+# 功能1：完整安装 Nockchain - 修复版
+install_nockchain_complete_fixed() {
+    log_info "开始修复版完整安装 Nockchain..."
+    
+    # 系统检查和优化
+    check_system_resources_enhanced
+    optimize_system_for_compilation
+    install_system_dependencies_enhanced
     initialize_environment
     
     # 设置环境
     source $HOME/.cargo/env 2>/dev/null || true
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 安装 Hoon 编译器
-    log_info "安装 Hoon 编译器..."
-    if timeout 300 make install-hoonc; then
-        log_success "Hoon 编译器安装成功"
+    # 显示系统信息
+    log_info "系统信息："
+    log_info "- Rust: $(rustc --version)"
+    log_info "- Cargo: $(cargo --version)"
+    log_info "- LLVM: $(llvm-config --version 2>/dev/null || echo 'N/A')"
+    log_info "- Clang: $(clang --version | head -1 2>/dev/null || echo 'N/A')"
+    
+    # 安装 hoonc 编译器 - 使用修复版方法
+    install_hoonc_fixed || return 1
+    
+    # 验证 hoonc 安装
+    if command -v hoonc &> /dev/null; then
+        log_success "hoonc 验证成功: $(command -v hoonc)"
     else
-        log_error "Hoon 编译器安装失败"
+        log_error "hoonc 验证失败，未找到可执行文件"
         return 1
     fi
     
     # 构建项目
-    log_info "构建 Nockchain 项目（这可能需要较长时间）..."
-    if timeout 600 make build; then
+    log_info "构建 Nockchain 项目（这可能需要很长时间）..."
+    export CARGO_BUILD_JOBS=$(( $(nproc) / 2 ))
+    
+    if timeout 3600 make build; then
         log_success "项目构建成功"
     else
-        log_error "项目构建失败"
+        log_error "项目构建失败或超时"
+        log_error "建议检查系统资源或延长超时时间"
         return 1
     fi
     
@@ -280,10 +486,12 @@ install_nockchain_complete() {
     if [ -f "$ENV_FILE" ]; then
         cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
         sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$hex_pubkey/" "$ENV_FILE"
-        log_success "已生成并设置128位挖矿公钥: $hex_pubkey"
+        log_success "已生成并设置128位挖矿公钥"
+        log_info "挖矿公钥: $hex_pubkey"
     fi
     
     log_success "Nockchain 完整安装成功！"
+    log_info "所有组件已安装完成，可以开始使用"
 }
 
 # 功能2：更改挖矿公钥（128位16进制格式）
@@ -457,24 +665,29 @@ show_main_menu() {
     echo -e "${PURPLE}"
     echo "╔════════════════════════════════════════════════════════════════╗"
     echo "║                 Nockchain 节点管理工具                        ║"
-    echo "║               （核心功能菜单版 v5.0）                         ║"
+    echo "║            （修复 hoonc 编译问题版 v6.0）                     ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
     echo
     echo -e "${GREEN}🔧 核心功能菜单${NC}"
     echo "────────────────────────────────────────────────────────────────"
-    echo "  1. 安装 Nockchain（完整安装流程）"
+    echo "  1. 安装 Nockchain（修复编译问题版）"
     echo "  2. 更改挖矿公钥（128位16进制格式）"
     echo "  3. 启动挖矿节点"
     echo "  4. 查看节点日志"
     echo
     echo "  0. 退出"
     echo
-    echo -e "${YELLOW}📋 重要说明：${NC}"
-    echo -e "${YELLOW}• 挖矿公钥必须是128位16进制格式（128个十六进制字符）${NC}"
-    echo -e "${YELLOW}• 首次使用请先选择 '1. 安装 Nockchain'${NC}"
-    echo -e "${YELLOW}• 启动节点前请确保已正确设置挖矿公钥${NC}"
+    echo -e "${YELLOW}🔨 修复改进点：${NC}"
+    echo -e "${YELLOW}• 增强系统资源检查（内存、CPU、磁盘）${NC}"
+    echo -e "${YELLOW}• 优化编译环境和系统设置${NC}"
+    echo -e "${YELLOW}• 多种 hoonc 编译方法和超时保护${NC}"
+    echo -e "${YELLOW}• 改进依赖安装和 LLVM/Clang 配置${NC}"
+    echo
+    echo -e "${CYAN}📋 系统要求：${NC}"
+    echo -e "${CYAN}• 最低: 32GB RAM, 4核 CPU, 50GB 磁盘${NC}"
+    echo -e "${CYAN}• 推荐: 64GB+ RAM, 6核+ CPU, 100GB+ SSD${NC}"
     echo
     
     # 显示当前状态
@@ -512,7 +725,7 @@ main() {
         
         case $choice in
             1)
-                install_nockchain_complete
+                install_nockchain_complete_fixed
                 read -p "按回车键继续..."
                 ;;
             2)
