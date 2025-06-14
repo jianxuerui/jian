@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Nockchain 节点管理脚本 - 修复 dpkg lock-frontend 错误版
-# 版本：8.0 解决 dpkg 锁文件冲突专版
-# 主要修复：dpkg lock-frontend 错误、包管理冲突、锁文件清理
+# Nockchain 节点管理脚本 - 修复 cloud-init 24.4.1 卡死问题版
+# 版本：9.0 解决 cloud-init 配置卡死专版
+# 主要修复：cloud-init 24.4.1 卡死、dpkg 配置死锁、网络服务冲突
 
 set -e
 
@@ -43,8 +43,45 @@ log_success() {
     echo -e "${PURPLE}[SUCCESS]${NC} $1"
 }
 
-# 修复 dpkg 锁文件问题
-fix_dpkg_lock_issues() {
+# 修复 cloud-init 24.4.1 卡死问题
+fix_cloud_init_hang() {
+    log_info "检查并修复 cloud-init 24.4.1 卡死问题..."
+    
+    # 检查当前 cloud-init 版本
+    local cloud_init_version=$(dpkg -l | grep cloud-init | awk '{print $3}' | head -1)
+    log_info "当前 cloud-init 版本: $cloud_init_version"
+    
+    # 检查是否是问题版本
+    if [[ "$cloud_init_version" == *"24.4"* ]]; then
+        log_warn "检测到问题版本 cloud-init 24.4.x，开始修复..."
+        
+        # 强制终止可能卡死的进程
+        log_info "终止可能卡死的 cloud-init 相关进程..."
+        sudo pkill -9 cloud-init 2>/dev/null || true
+        sudo pkill -9 systemd-networkd-wait-online 2>/dev/null || true
+        
+        # 禁用 cloud-init
+        log_info "临时禁用 cloud-init..."
+        sudo touch /etc/cloud/cloud-init.disabled
+        
+        # 禁用网络配置
+        sudo mkdir -p /etc/cloud/cloud.cfg.d/
+        echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg > /dev/null
+        
+        # 停止相关服务
+        sudo systemctl stop cloud-init 2>/dev/null || true
+        sudo systemctl stop cloud-init-local 2>/dev/null || true
+        sudo systemctl stop cloud-config 2>/dev/null || true
+        sudo systemctl stop cloud-final 2>/dev/null || true
+        
+        log_success "cloud-init 已临时禁用"
+    else
+        log_info "cloud-init 版本正常，无需修复"
+    fi
+}
+
+# 修复 dpkg 锁文件问题 - 增强版
+fix_dpkg_lock_issues_enhanced() {
     log_info "检查并修复 dpkg 锁文件问题..."
     
     # 检查是否存在锁文件冲突
@@ -57,10 +94,10 @@ fix_dpkg_lock_issues() {
     
     local has_lock_issue=false
     
-    # 检查是否有正在运行的 apt 进程
-    local apt_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
+    # 检查是否有正在运行的 apt/dpkg 进程
+    local dpkg_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
     
-    if [ "$apt_processes" -gt 0 ]; then
+    if [ "$dpkg_processes" -gt 0 ]; then
         log_warn "检测到正在运行的包管理进程"
         ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock"
         has_lock_issue=true
@@ -77,14 +114,17 @@ fix_dpkg_lock_issues() {
     if [ "$has_lock_issue" = true ]; then
         log_warn "发现 dpkg 锁文件问题，开始修复..."
         
-        # 尝试优雅地等待进程完成
+        # 首先修复 cloud-init 问题
+        fix_cloud_init_hang
+        
+        # 等待进程自然完成
         log_info "等待 30 秒让进程自然完成..."
         sleep 30
         
         # 再次检查进程
-        apt_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
+        dpkg_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
         
-        if [ "$apt_processes" -gt 0 ]; then
+        if [ "$dpkg_processes" -gt 0 ]; then
             log_warn "进程仍在运行，准备强制终止..."
             
             # 获取进程 ID 并终止
@@ -119,9 +159,11 @@ fix_dpkg_lock_issues() {
             fi
         done
         
-        # 重新配置 dpkg
-        log_info "重新配置 dpkg..."
-        sudo dpkg --configure -a 2>/dev/null || true
+        # 重新配置 dpkg（带超时保护）
+        log_info "重新配置 dpkg（带超时保护）..."
+        timeout 60 sudo dpkg --configure -a 2>/dev/null || {
+            log_warn "dpkg 配置超时，跳过配置步骤"
+        }
         
         # 清理并更新包缓存
         log_info "清理包缓存..."
@@ -133,8 +175,8 @@ fix_dpkg_lock_issues() {
     fi
 }
 
-# 安全的 apt 命令执行器
-safe_apt_command() {
+# 安全的 apt 命令执行器 - 带 cloud-init 检查
+safe_apt_command_enhanced() {
     local command="$1"
     local max_retries=3
     local retry_count=0
@@ -142,19 +184,24 @@ safe_apt_command() {
     while [ $retry_count -lt $max_retries ]; do
         log_info "执行: $command (尝试 $((retry_count + 1))/$max_retries)"
         
-        # 设置非交互模式
+        # 设置非交互模式和锁定超时
         export DEBIAN_FRONTEND=noninteractive
         
-        if eval "$command"; then
+        # 添加 dpkg 锁定超时选项
+        local timeout_option="-o DPkg::Lock::Timeout=300"
+        local enhanced_command="$command $timeout_option"
+        
+        if eval "$enhanced_command"; then
             log_success "命令执行成功: $command"
             return 0
         else
-            log_warn "命令执行失败，检查 dpkg 锁文件..."
+            log_warn "命令执行失败，检查系统状态..."
             retry_count=$((retry_count + 1))
             
             if [ $retry_count -lt $max_retries ]; then
-                fix_dpkg_lock_issues
-                sleep 5
+                fix_cloud_init_hang
+                fix_dpkg_lock_issues_enhanced
+                sleep 10
             fi
         fi
     done
@@ -163,20 +210,18 @@ safe_apt_command() {
     return 1
 }
 
-# 检查系统资源 - 修复算术表达式错误
+# 检查系统资源
 check_system_resources_enhanced() {
     log_info "执行增强系统资源检查..."
     
-    # 使用传统方式初始化警告计数器
     local warnings=0
     
-    # 检查内存 - 更严格的要求
+    # 检查内存
     local total_mem=$(free -g | awk '/^Mem:/{print $2}')
     local available_mem=$(free -g | awk '/^Mem:/{print $7}')
     
     if [ "$total_mem" -lt 32 ]; then
         log_error "系统内存不足: ${total_mem}GB (最低要求32GB，推荐64GB+)"
-        log_error "hoonc 编译需要大量内存，建议升级硬件或使用云服务器"
         warnings=$((warnings + 1))
     elif [ "$total_mem" -lt 64 ]; then
         log_warn "系统内存: ${total_mem}GB (推荐64GB+，可能影响编译速度)"
@@ -202,9 +247,8 @@ check_system_resources_enhanced() {
         log_success "可用磁盘空间: ${disk_space}GB ✓"
     fi
     
-    # 检查CPU和负载
+    # 检查CPU
     local cpu_cores=$(nproc)
-    
     if [ "$cpu_cores" -lt 4 ]; then
         log_warn "CPU核心数: ${cpu_cores}核 (推荐6核+)"
         warnings=$((warnings + 1))
@@ -212,19 +256,11 @@ check_system_resources_enhanced() {
         log_success "CPU核心数: ${cpu_cores}核 ✓"
     fi
     
-    # 检查虚拟内存设置
-    local swap_total=$(free -g | awk '/^Swap:/{print $2}')
-    if [ "$swap_total" -lt 8 ]; then
-        log_warn "Swap 空间: ${swap_total}GB (建议至少8GB)"
-        warnings=$((warnings + 1))
-    fi
-    
     if [ $warnings -gt 0 ]; then
         log_warn "发现 $warnings 个资源警告，可能影响编译成功率"
-        read -p "是否继续安装？建议在云服务器上运行 (y/n): " -n 1 -r
+        read -p "是否继续安装？(y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_info "建议使用配置更高的服务器后重试"
             exit 1
         fi
     fi
@@ -235,37 +271,30 @@ optimize_system_for_compilation() {
     log_info "优化系统设置以提高编译成功率..."
     
     # 启用内存过量分配
-    log_info "启用内存过量分配..."
     sudo sysctl -w vm.overcommit_memory=1 2>/dev/null || true
     
-    # 调整 OOM killer 设置
-    echo 'vm.oom_kill_allocating_task=1' | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1 || true
-    
-    # 增加文件描述符限制
+    # 调整文件描述符限制
     ulimit -n 65536 2>/dev/null || true
-    
-    # 设置更大的栈大小
     ulimit -s 16384 2>/dev/null || true
     
     # 清理系统缓存
-    log_info "清理系统缓存..."
     sudo sync 2>/dev/null || true
     sudo echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
     
     log_success "系统优化完成"
 }
 
-# 安装系统依赖 - 集成锁文件修复
+# 安装系统依赖 - 集成 cloud-init 修复
 install_system_dependencies_enhanced() {
     log_info "安装增强系统依赖..."
     
-    # 首先修复可能的 dpkg 锁文件问题
-    fix_dpkg_lock_issues
+    # 首先修复可能的系统问题
+    fix_cloud_init_hang
+    fix_dpkg_lock_issues_enhanced
     
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         # 更新包列表
-        safe_apt_command "sudo apt update"
-        safe_apt_command "sudo apt upgrade -y"
+        safe_apt_command_enhanced "sudo apt update"
         
         # 核心编译工具
         local core_packages=(
@@ -287,46 +316,31 @@ install_system_dependencies_enhanced() {
             "libssl-dev" "libffi-dev" "zlib1g-dev"
             "libbz2-dev" "libreadline-dev" "libsqlite3-dev"
             "libncursesw5-dev" "xz-utils" "tk-dev"
-            "libxml2-dev" "libxmlsec1-dev" "libffi-dev"
+            "libxml2-dev" "libxmlsec1-dev"
             "liblzma-dev" "libleveldb-dev"
         )
         
-        # 内存和性能相关
-        local perf_packages=(
-            "htop" "iotop" "sysstat" "psmisc"
-            "linux-tools-common" "linux-tools-generic"
-        )
-        
         log_info "安装核心编译工具..."
-        safe_apt_command "sudo apt install -y ${core_packages[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${core_packages[*]}"
         
         log_info "安装 LLVM 和 Clang..."
-        safe_apt_command "sudo apt install -y ${llvm_packages[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${llvm_packages[*]}"
         
         log_info "安装系统库..."
-        safe_apt_command "sudo apt install -y ${system_packages[*]}"
-        
-        log_info "安装性能监控工具..."
-        safe_apt_command "sudo apt install -y ${perf_packages[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${system_packages[*]}"
         
         log_success "系统依赖安装完成"
     fi
     
-    # 安装 Rust - 最新稳定版
+    # 安装 Rust
     if ! command -v rustc &> /dev/null || ! command -v cargo &> /dev/null; then
         log_info "安装 Rust 最新稳定版..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
         source $HOME/.cargo/env
-        
-        # 安装必要的 Rust 组件
         rustup component add rustfmt clippy
-        
         log_success "Rust 安装完成: $(rustc --version)"
     else
         log_info "Rust 已安装: $(rustc --version)"
-        
-        # 更新到最新版本
-        log_info "更新 Rust 到最新版本..."
         rustup update stable
         rustup default stable
     fi
@@ -365,15 +379,6 @@ find_nockchain_directory() {
             fi
         done
     fi
-    
-    local parent_dirs=("../nockchain" "../../nockchain" "~/nockchain")
-    for dir in "${parent_dirs[@]}"; do
-        if [ -d "$dir" ] && ([ -f "$dir/Cargo.toml" ] || [ -f "$dir/Makefile" ]); then
-            log_success "找到 nockchain 项目目录: $dir"
-            cd "$dir"
-            return 0
-        fi
-    done
     
     return 1
 }
@@ -475,7 +480,6 @@ validate_mining_pubkey() {
     if [[ ! "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
         log_error "无效的挖矿公钥格式"
         log_error "挖矿公钥必须是128位16进制格式（128个十六进制字符）"
-        log_error "示例格式: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         return 1
     fi
     
@@ -492,7 +496,6 @@ install_hoonc_fixed() {
         rm -rf target/
     fi
     
-    # 清理 Cargo 缓存
     cargo clean 2>/dev/null || true
     
     # 设置编译环境
@@ -501,7 +504,6 @@ install_hoonc_fixed() {
     export CARGO_TARGET_DIR="$(pwd)/target"
     
     log_info "使用 $CARGO_BUILD_JOBS 个并行编译任务"
-    log_info "目标目录: $CARGO_TARGET_DIR"
     
     # 尝试使用不同的方法安装 hoonc
     log_info "尝试方法1: 使用 make install-hoonc（超时 20 分钟）..."
@@ -512,21 +514,18 @@ install_hoonc_fixed() {
     else
         log_warn "方法1失败，尝试方法2: 直接使用 cargo 安装..."
         
-        # 方法2: 直接使用 cargo 安装
         if timeout 1800 cargo install --locked --force --path crates/hoonc --bin hoonc; then
             log_success "hoonc 编译器安装成功（方法2）"
             return 0
         else
             log_warn "方法2失败，尝试方法3: 降低优化级别..."
             
-            # 方法3: 降低优化级别
             export RUSTFLAGS="-C opt-level=1"
             if timeout 2400 cargo install --locked --force --path crates/hoonc --bin hoonc; then
                 log_success "hoonc 编译器安装成功（方法3）"
                 return 0
             else
                 log_error "所有方法都失败，hoonc 编译器安装失败"
-                log_error "建议检查系统资源或在更高配置的服务器上重试"
                 return 1
             fi
         fi
@@ -554,7 +553,7 @@ install_nockchain_complete_fixed() {
     log_info "- LLVM: $(llvm-config --version 2>/dev/null || echo 'N/A')"
     log_info "- Clang: $(clang --version | head -1 2>/dev/null || echo 'N/A')"
     
-    # 安装 hoonc 编译器 - 使用修复版方法
+    # 安装 hoonc 编译器
     install_hoonc_fixed || return 1
     
     # 验证 hoonc 安装
@@ -574,7 +573,6 @@ install_nockchain_complete_fixed() {
         log_success "项目构建成功"
     else
         log_error "项目构建失败或超时"
-        log_error "建议检查系统资源或延长超时时间"
         return 1
     fi
     
@@ -619,7 +617,6 @@ install_nockchain_complete_fixed() {
     fi
     
     log_success "Nockchain 完整安装成功！"
-    log_info "所有组件已安装完成，可以开始使用"
 }
 
 # 功能2：更改挖矿公钥（128位16进制格式）
@@ -627,7 +624,6 @@ change_mining_pubkey() {
     log_info "更改挖矿公钥（128位16进制格式）"
     echo
     log_info "请输入128位16进制格式的挖矿公钥（128个十六进制字符）"
-    log_debug "格式示例: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
     echo
     
     while true; do
@@ -638,13 +634,10 @@ change_mining_pubkey() {
             continue
         fi
         
-        # 验证128位16进制格式
         if validate_mining_pubkey "$new_pubkey"; then
             if [ -f "$ENV_FILE" ]; then
-                # 创建备份
                 cp "$ENV_FILE" "$BACKUP_DIR/.env.backup.$(date +%Y%m%d_%H%M%S)"
                 
-                # 更新公钥
                 if grep -q "MINING_PUBKEY=" "$ENV_FILE"; then
                     sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" "$ENV_FILE"
                 else
@@ -653,7 +646,6 @@ change_mining_pubkey() {
                 
                 log_success "挖矿公钥已更新"
                 log_info "新公钥: $new_pubkey"
-                log_info "配置已备份到 $BACKUP_DIR/"
                 break
             else
                 log_error ".env 文件不存在，请先运行安装选项"
@@ -669,7 +661,6 @@ change_mining_pubkey() {
 start_node() {
     log_info "启动 Nockchain 挖矿节点"
     
-    # 检查必要条件
     if ! command -v nockchain &> /dev/null; then
         log_error "nockchain 未安装，请先运行安装选项"
         return 1
@@ -680,18 +671,14 @@ start_node() {
         return 1
     fi
     
-    # 加载环境变量
     source "$ENV_FILE"
     export RUST_LOG MINIMAL_LOG_FORMAT MINING_PUBKEY
     
-    # 验证挖矿公钥格式
     if ! validate_mining_pubkey "$MINING_PUBKEY" 2>/dev/null; then
         log_error "当前配置的挖矿公钥格式不正确"
-        log_error "请先使用 '更改挖矿公钥' 选项设置正确的128位16进制公钥"
         return 1
     fi
     
-    # 检查现有进程
     if pgrep -f "nockchain" > /dev/null; then
         local existing_pids=$(pgrep -f nockchain | tr '\n' ' ')
         log_warn "检测到运行中的 Nockchain 进程: $existing_pids"
@@ -699,7 +686,6 @@ start_node() {
         read -p "是否停止现有进程并重新启动？(y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "停止现有进程..."
             pkill -TERM -f nockchain 2>/dev/null || true
             sleep 3
             if pgrep -f nockchain > /dev/null; then
@@ -708,42 +694,31 @@ start_node() {
             fi
             log_info "现有进程已停止"
         else
-            log_info "保持现有进程运行"
             return 0
         fi
     fi
     
     log_info "配置信息："
     log_info "- 挖矿公钥: $MINING_PUBKEY"
-    log_info "- 日志级别: $RUST_LOG"
     log_info "- 日志文件: $LOG_FILE"
     
-    # 启动节点
     log_info "正在启动挖矿节点..."
     
     nohup nockchain --mining-pubkey "${MINING_PUBKEY}" --mine > "$LOG_FILE" 2>&1 &
     local node_pid=$!
     
-    # 等待启动
     sleep 5
     
-    # 验证启动状态
     if kill -0 $node_pid 2>/dev/null; then
-        log_success "节点启动成功！"
-        log_success "进程ID: $node_pid"
-        log_info "日志文件: $LOG_FILE"
+        log_success "节点启动成功！进程ID: $node_pid"
         
-        # 显示初始日志
         if [ -f "$LOG_FILE" ]; then
             log_info "最近几行日志："
             tail -n 5 "$LOG_FILE" 2>/dev/null || true
         fi
-        
-        log_info "使用 '查看日志' 选项监控节点状态"
     else
         log_error "节点启动失败"
         if [ -f "$LOG_FILE" ]; then
-            log_error "错误日志："
             tail -n 10 "$LOG_FILE"
         fi
         return 1
@@ -756,14 +731,6 @@ view_logs() {
     
     if [ ! -f "$LOG_FILE" ]; then
         log_warn "日志文件不存在: $LOG_FILE"
-        
-        # 检查进程状态
-        if pgrep -f "nockchain" > /dev/null; then
-            log_info "节点正在运行，但日志文件不存在"
-            log_info "建议重启节点以生成日志文件"
-        else
-            log_info "节点未运行"
-        fi
         return 1
     fi
     
@@ -771,19 +738,14 @@ view_logs() {
     log_info "=== 日志文件信息 ==="
     echo "文件位置: $(realpath $LOG_FILE)"
     echo "文件大小: $(du -h "$LOG_FILE" | cut -f1)"
-    echo "最后修改: $(stat -c %y "$LOG_FILE" 2>/dev/null || date -r "$LOG_FILE" 2>/dev/null)"
     
     echo
     log_info "=== 最近50行日志 ==="
-    echo
     tail -n 50 "$LOG_FILE"
     
     echo
     log_info "=== 实时日志监控 ==="
     log_info "按 Ctrl+C 退出监控"
-    echo
-    
-    # 实时监控日志
     tail -f "$LOG_FILE"
 }
 
@@ -793,14 +755,14 @@ show_main_menu() {
     echo -e "${PURPLE}"
     echo "╔════════════════════════════════════════════════════════════════╗"
     echo "║                 Nockchain 节点管理工具                        ║"
-    echo "║          （修复 dpkg lock-frontend 错误版 v8.0）              ║"
+    echo "║        （修复 cloud-init 24.4.1 卡死问题版 v9.0）            ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
     echo
     echo -e "${GREEN}🔧 核心功能菜单${NC}"
     echo "────────────────────────────────────────────────────────────────"
-    echo "  1. 安装 Nockchain（修复 dpkg 锁文件问题版）"
+    echo "  1. 安装 Nockchain（修复 cloud-init 卡死问题版）"
     echo "  2. 更改挖矿公钥（128位16进制格式）"
     echo "  3. 启动挖矿节点"
     echo "  4. 查看节点日志"
@@ -808,14 +770,10 @@ show_main_menu() {
     echo "  0. 退出"
     echo
     echo -e "${YELLOW}🔨 修复改进点：${NC}"
-    echo -e "${YELLOW}• 修复 dpkg lock-frontend 锁文件冲突${NC}"
-    echo -e "${YELLOW}• 智能检测和清理僵尸锁文件${NC}"
-    echo -e "${YELLOW}• 安全的 apt 命令执行器和重试机制${NC}"
-    echo -e "${YELLOW}• 进程冲突检测和自动处理${NC}"
-    echo
-    echo -e "${CYAN}📋 系统要求：${NC}"
-    echo -e "${CYAN}• 最低: 32GB RAM, 4核 CPU, 50GB 磁盘${NC}"
-    echo -e "${CYAN}• 推荐: 64GB+ RAM, 6核+ CPU, 100GB+ SSD${NC}"
+    echo -e "${YELLOW}• 修复 cloud-init 24.4.1 版本卡死问题${NC}"
+    echo -e "${YELLOW}• 增强 dpkg 锁文件处理和超时保护${NC}"
+    echo -e "${YELLOW}• 智能系统服务冲突检测和处理${NC}"
+    echo -e "${YELLOW}• 防止 systemd-networkd-wait-online 服务卡死${NC}"
     echo
     
     # 显示当前状态
@@ -838,8 +796,11 @@ show_main_menu() {
 
 # 主程序
 main() {
-    # 启动时进行智能目录检测
     log_info "Nockchain 节点管理工具启动中..."
+    
+    # 立即修复可能的系统问题
+    fix_cloud_init_hang
+    fix_dpkg_lock_issues_enhanced
     
     if ! smart_directory_setup; then
         log_error "无法初始化项目环境"
@@ -869,7 +830,6 @@ main() {
                 ;;
             0)
                 log_info "感谢使用 Nockchain 节点管理工具！"
-                log_info "祝您挖矿愉快 🚀"
                 exit 0
                 ;;
             *)
@@ -882,10 +842,7 @@ main() {
 
 # 脚本入口
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # 设置错误处理
     set -eE
     trap 'log_error "脚本在第 $LINENO 行出错"' ERR
-    
-    # 启动主程序
     main "$@"
 fi
