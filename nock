@@ -1,802 +1,467 @@
 #!/bin/bash
 
-# Nockchain 节点管理脚本 - 彻底修复 cloud-init 24.4.1 卡死问题版
-# 版本：11.0 终极修复版
-# 主要修复：cloud-init 24.4.1 卡死、dpkg 配置死锁、systemd-networkd-wait-online 冲突
+# Nockchain Mining Optimization Script
+# 基于Nockchain优化分析开发的全功能挖矿脚本
+# Version: 1.0.0
 
 set -e
 
-# 颜色定义
+# Color definitions for better UI
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
-# 配置常量
-NOCKCHAIN_REPO="https://github.com/zorp-corp/nockchain.git"
-ENV_FILE=".env"
-ENV_EXAMPLE=".env_example"
-LOG_FILE="nockchain.log"
-BACKUP_DIR="backups"
+# Configuration variables
+NOCKCHAIN_DIR="$HOME/nockchain"
+WALLET_BACKUP_DIR="$HOME/nockchain_backup"
+SCREEN_SESSION_NAME="nockchain_miner"
+LOG_FILE="$NOCKCHAIN_DIR/mining.log"
 
-# 日志函数
-log_info() {
+# System optimization parameters
+RUST_MIN_STACK_SIZE=$((83 * 1024 * 1024))  # 83MB stack size
+MAX_FILE_DESCRIPTORS=65536
+MAX_PEER_CONNECTIONS=4000
+BIND_PORT=3006
+
+# Peer list for optimal network connections
+PEER_LIST=(
+    "/ip4/95.216.102.60/udp/3006/quic-v1"
+    "/ip4/65.109.156.108/udp/3006/quic-v1"
+    "/ip4/65.21.67.175/udp/3006/quic-v1"
+    "/ip4/65.109.156.172/udp/3006/quic-v1"
+    "/ip4/34.174.22.166/udp/3006/quic-v1"
+    "/ip4/34.95.155.151/udp/30000/quic-v1"
+    "/ip4/34.18.98.38/udp/30000/quic-v1"
+)
+
+print_banner() {
+    echo -e "${CYAN}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                    Nockchain Mining Optimizer               ║"
+    echo "║                       Version 1.0.0                         ║"
+    echo "║            基于ZK-Proof of Work的挖矿优化脚本                ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_status() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-log_error() {
+print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-log_debug() {
-    echo -e "${CYAN}[DEBUG]${NC} $1"
+print_section() {
+    echo -e "\n${BLUE}=== $1 ===${NC}"
 }
 
-log_success() {
-    echo -e "${PURPLE}[SUCCESS]${NC} $1"
-}
-
-# 彻底修复 cloud-init 24.4.1 问题
-fix_cloud_init_comprehensive() {
-    log_info "执行 cloud-init 24.4.1 问题彻底修复..."
+check_system_requirements() {
+    print_section "系统要求检查"
     
-    # 强制终止所有相关进程
-    log_info "强制终止可能卡死的进程..."
-    sudo pkill -9 cloud-init 2>/dev/null || true
-    sudo pkill -9 systemd-networkd-wait-online 2>/dev/null || true
-    sudo pkill -9 dpkg 2>/dev/null || true
-    
-    # 检查当前 cloud-init 版本
-    local cloud_init_version=$(dpkg -l | grep cloud-init | awk '{print $3}' | head -1 2>/dev/null || echo "unknown")
-    log_info "当前 cloud-init 版本: $cloud_init_version"
-    
-    # 彻底禁用 cloud-init
-    log_info "彻底禁用 cloud-init..."
-    sudo touch /etc/cloud/cloud-init.disabled
-    
-    # 创建网络配置禁用文件
-    sudo mkdir -p /etc/cloud/cloud.cfg.d/
-    echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg > /dev/null
-    
-    # 禁用所有 cloud-init 服务
-    local cloud_services=(
-        "cloud-init"
-        "cloud-init-local" 
-        "cloud-config"
-        "cloud-final"
-    )
-    
-    for service in "${cloud_services[@]}"; do
-        sudo systemctl stop "$service" 2>/dev/null || true
-        sudo systemctl disable "$service" 2>/dev/null || true
-        sudo systemctl mask "$service" 2>/dev/null || true
-    done
-    
-    # 禁用 systemd-networkd-wait-online 服务
-    log_info "禁用 systemd-networkd-wait-online 服务..."
-    sudo systemctl stop systemd-networkd-wait-online 2>/dev/null || true
-    sudo systemctl disable systemd-networkd-wait-online 2>/dev/null || true
-    sudo systemctl mask systemd-networkd-wait-online 2>/dev/null || true
-    
-    # 如果是问题版本，尝试降级到稳定版本
-    if [[ "$cloud_init_version" == *"24.4"* ]]; then
-        log_warn "检测到问题版本，尝试降级到稳定版本..."
-        
-        # 标记 cloud-init 为保持状态，防止自动更新
-        sudo apt-mark hold cloud-init 2>/dev/null || true
-        
-        log_info "已标记 cloud-init 为保持状态，防止自动更新"
-    fi
-    
-    log_success "cloud-init 问题修复完成"
-}
-
-# 终极 dpkg 修复函数
-fix_dpkg_ultimate() {
-    log_info "执行终极 dpkg 问题修复..."
-    
-    # 第一步：强制终止所有相关进程
-    log_info "强制终止所有包管理进程..."
-    local process_patterns=("apt" "apt-get" "dpkg" "aptitude" "cloud-init" "systemd-networkd-wait-online")
-    
-    for pattern in "${process_patterns[@]}"; do
-        local pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v $$ || true)
-        for pid in $pids; do
-            if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
-                sudo kill -9 "$pid" 2>/dev/null || true
-            fi
-        done
-    done
-    
-    # 第二步：清理所有锁文件
-    log_info "清理所有包管理锁文件..."
-    local lock_files=(
-        "/var/lib/dpkg/lock"
-        "/var/lib/dpkg/lock-frontend"
-        "/var/lib/apt/lists/lock"
-        "/var/cache/apt/archives/lock"
-        "/var/cache/debconf/config.dat.lock"
-        "/var/cache/debconf/passwords.dat.lock"
-    )
-    
-    for lock_file in "${lock_files[@]}"; do
-        if [ -f "$lock_file" ]; then
-            log_info "删除锁文件: $lock_file"
-            sudo rm -f "$lock_file" 2>/dev/null || true
-        fi
-    done
-    
-    # 第三步：修复 dpkg 数据库
-    log_info "修复 dpkg 数据库..."
-    
-    # 备份原始配置
-    if [ -d "/var/lib/dpkg/info" ]; then
-        sudo cp -r /var/lib/dpkg/info /var/lib/dpkg/info.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
-    fi
-    
-    # 先修复 cloud-init 问题，再处理 dpkg
-    fix_cloud_init_comprehensive
-    
-    # 使用多种方法修复 dpkg（参考 Stack Overflow 解决方案）
-    log_info "方法1: 直接跳过卡死的配置..."
-    
-    # 创建临时的 dpkg 配置跳过脚本
-    cat > /tmp/dpkg_skip_cloudinit.sh << 'EOF'
-#!/bin/bash
-# 临时跳过 cloud-init 配置
-export DEBIAN_FRONTEND=noninteractive
-export DEBCONF_NONINTERACTIVE_SEEN=true
-
-# 设置 cloud-init 配置为已完成状态
-if [ -f /var/lib/dpkg/info/cloud-init.postinst ]; then
-    # 备份原始脚本
-    cp /var/lib/dpkg/info/cloud-init.postinst /var/lib/dpkg/info/cloud-init.postinst.backup
-    
-    # 创建空的 postinst 脚本
-    echo '#!/bin/bash' > /var/lib/dpkg/info/cloud-init.postinst
-    echo 'exit 0' >> /var/lib/dpkg/info/cloud-init.postinst
-    chmod +x /var/lib/dpkg/info/cloud-init.postinst
-fi
-EOF
-    
-    chmod +x /tmp/dpkg_skip_cloudinit.sh
-    sudo /tmp/dpkg_skip_cloudinit.sh
-    
-    # 使用超时保护执行 dpkg 配置
-    log_info "执行 dpkg 配置（带超时保护）..."
-    timeout 120 sudo dpkg --configure -a 2>/dev/null || {
-        log_warn "dpkg 配置超时，执行高级修复..."
-        
-        # 高级修复方法（参考社区解决方案）
-        sudo mv /var/lib/dpkg/info /var/lib/dpkg/info_silent 2>/dev/null || true
-        sudo mkdir -p /var/lib/dpkg/info 2>/dev/null || true
-        
-        timeout 60 sudo apt-get update 2>/dev/null || true
-        timeout 120 sudo apt-get -f install -y 2>/dev/null || true
-        
-        # 恢复信息目录
-        if [ -d "/var/lib/dpkg/info_silent" ]; then
-            sudo mv /var/lib/dpkg/info/* /var/lib/dpkg/info_silent/ 2>/dev/null || true
-            sudo rm -rf /var/lib/dpkg/info 2>/dev/null || true
-            sudo mv /var/lib/dpkg/info_silent /var/lib/dpkg/info 2>/dev/null || true
-        fi
-    }
-    
-    # 恢复 cloud-init postinst 脚本
-    if [ -f /var/lib/dpkg/info/cloud-init.postinst.backup ]; then
-        sudo mv /var/lib/dpkg/info/cloud-init.postinst.backup /var/lib/dpkg/info/cloud-init.postinst 2>/dev/null || true
-    fi
-    
-    # 清理临时文件
-    rm -f /tmp/dpkg_skip_cloudinit.sh
-    
-    # 最终清理
-    sudo apt clean 2>/dev/null || true
-    sudo apt autoclean 2>/dev/null || true
-    
-    log_success "终极 dpkg 修复完成"
-}
-
-# 超强化的安全 apt 命令执行器
-safe_apt_ultimate() {
-    local command="$1"
-    local max_retries=3
-    local retry_count=0
-    
-    while [ $retry_count -lt $max_retries ]; do
-        log_info "执行: $command (尝试 $((retry_count + 1))/$max_retries)"
-        
-        # 每次执行前先修复系统问题
-        if [ $retry_count -gt 0 ]; then
-            fix_dpkg_ultimate
-        fi
-        
-        # 设置所有可能的环境变量
-        export DEBIAN_FRONTEND=noninteractive
-        export DEBCONF_NONINTERACTIVE_SEEN=true
-        export APT_LISTCHANGES_FRONTEND=none
-        export NEEDRESTART_MODE=a
-        
-        local timeout_options="-o DPkg::Lock::Timeout=60 -o APT::Acquire::Retries=2 -o APT::Acquire::http::Timeout=30 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-        
-        local enhanced_command="$command $timeout_options"
-        
-        if timeout 300 eval "$enhanced_command"; then
-            log_success "命令执行成功: $command"
-            return 0
-        else
-            log_warn "命令执行失败，错误代码: $?"
-            retry_count=$((retry_count + 1))
-            
-            if [ $retry_count -lt $max_retries ]; then
-                log_info "等待 5 秒后重试..."
-                sleep 5
-            fi
-        fi
-    done
-    
-    log_error "命令执行失败，已达到最大重试次数: $command"
-    return 1
-}
-
-# 检查系统资源
-check_system_resources() {
-    log_info "检查系统资源..."
-    
-    local warnings=0
-    
-    # 检查内存
-    local total_mem=$(free -g | awk '/^Mem:/{print $2}')
-    if [ "$total_mem" -lt 32 ]; then
-        log_error "系统内存不足: ${total_mem}GB (最低要求32GB)"
-        warnings=$((warnings + 1))
+    # Check available RAM
+    local ram_gb=$(free -g | awk '/^Mem:/{print $2}')
+    if [ "$ram_gb" -lt 32 ]; then
+        print_warning "RAM不足32GB，当前：${ram_gb}GB，推荐64GB+"
     else
-        log_success "系统内存: ${total_mem}GB ✓"
+        print_status "RAM检查通过：${ram_gb}GB"
     fi
     
-    # 检查磁盘空间
-    local disk_space=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-    if [ "$disk_space" -lt 50 ]; then
-        log_error "可用磁盘空间不足: ${disk_space}GB (最低要求50GB)"
-        warnings=$((warnings + 1))
-    else
-        log_success "可用磁盘空间: ${disk_space}GB ✓"
-    fi
-    
-    # 检查CPU
+    # Check CPU cores
     local cpu_cores=$(nproc)
-    if [ "$cpu_cores" -lt 4 ]; then
-        log_warn "CPU核心数: ${cpu_cores}核 (推荐6核+)"
-        warnings=$((warnings + 1))
+    if [ "$cpu_cores" -lt 6 ]; then
+        print_warning "CPU核心数不足6个，当前：${cpu_cores}个"
     else
-        log_success "CPU核心数: ${cpu_cores}核 ✓"
+        print_status "CPU检查通过：${cpu_cores}个核心"
     fi
     
-    if [ $warnings -gt 0 ]; then
-        log_warn "发现 $warnings 个资源警告"
-        read -p "是否继续安装？(y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-}
-
-# 安装系统依赖 - 终极修复版
-install_system_dependencies_ultimate() {
-    log_info "开始安装系统依赖（终极修复版）..."
-    
-    # 首先执行终极修复
-    fix_dpkg_ultimate
-    
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        # 更新包列表
-        log_info "更新包列表..."
-        safe_apt_ultimate "sudo apt update"
-        
-        # 分组安装依赖，减少失败风险
-        local package_groups=(
-            "build-essential cmake pkg-config"
-            "git curl wget unzip"
-            "clang llvm llvm-dev"
-            "libclang-dev libssl-dev"
-            "autoconf automake libtool"
-            "libleveldb-dev zlib1g-dev"
-        )
-        
-        for group in "${package_groups[@]}"; do
-            log_info "安装依赖组: $group"
-            safe_apt_ultimate "sudo apt install -y $group"
-        done
-        
-        log_success "系统依赖安装完成"
-    fi
-    
-    # 安装 Rust
-    if ! command -v rustc &> /dev/null || ! command -v cargo &> /dev/null; then
-        log_info "安装 Rust..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-        source $HOME/.cargo/env
-        rustup component add rustfmt clippy
-        log_success "Rust 安装完成: $(rustc --version)"
+    # Check available disk space
+    local disk_space=$(df -BG "$HOME" | awk 'NR==2{gsub(/G/,"",$4); print $4}')
+    if [ "$disk_space" -lt 200 ]; then
+        print_warning "可用磁盘空间不足200GB，当前：${disk_space}GB"
     else
-        log_info "Rust 已安装: $(rustc --version)"
-        rustup update stable
-        rustup default stable
+        print_status "磁盘空间检查通过：${disk_space}GB"
     fi
 }
 
-# 检查项目根目录
-check_project_root() {
-    local current_dir=$(pwd)
-    log_debug "当前目录: $current_dir"
+optimize_system_settings() {
+    print_section "系统优化设置"
     
-    if [ -f "Cargo.toml" ] || [ -f "Makefile" ]; then
-        if [ -f "Cargo.toml" ] && grep -q "nockchain" "Cargo.toml" 2>/dev/null; then
-            log_success "检测到 Nockchain 项目根目录"
-            return 0
-        elif [ -f "Makefile" ] && grep -q "nockchain\|hoonc" "Makefile" 2>/dev/null; then
-            log_success "检测到 Nockchain 项目根目录"
-            return 0
-        fi
+    # Set stack size
+    export RUST_MIN_STACK="$RUST_MIN_STACK_SIZE"
+    print_status "设置RUST_MIN_STACK为83MB"
+    
+    # Increase file descriptor limits
+    if ! grep -q "^* soft nofile $MAX_FILE_DESCRIPTORS" /etc/security/limits.conf 2>/dev/null; then
+        echo "* soft nofile $MAX_FILE_DESCRIPTORS" | sudo tee -a /etc/security/limits.conf >/dev/null
+        echo "* hard nofile $MAX_FILE_DESCRIPTORS" | sudo tee -a /etc/security/limits.conf >/dev/null
+        print_status "增加文件描述符限制到$MAX_FILE_DESCRIPTORS"
     fi
     
-    return 1
-}
-
-# 自动查找 nockchain 目录
-find_nockchain_directory() {
-    log_info "正在查找 nockchain 项目目录..."
+    # Set current session limits
+    ulimit -n "$MAX_FILE_DESCRIPTORS" 2>/dev/null || print_warning "无法设置会话文件描述符限制"
     
-    local found_dirs=($(find . -maxdepth 3 -name "nockchain*" -type d 2>/dev/null))
-    
-    if [ ${#found_dirs[@]} -gt 0 ]; then
-        for dir in "${found_dirs[@]}"; do
-            if [ -f "$dir/Cargo.toml" ] || [ -f "$dir/Makefile" ]; then
-                log_success "找到 nockchain 项目目录: $dir"
-                cd "$dir"
-                return 0
-            fi
-        done
-    fi
-    
-    return 1
-}
-
-# 自动初始化项目
-auto_initialize_project() {
-    log_warn "未找到 nockchain 项目，将自动初始化..."
-    
-    read -p "是否自动克隆 nockchain 项目？(y/n): " -n 1 -r
-    echo
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        local target_dir="nockchain_$(date +%Y%m%d_%H%M%S)"
-        
-        log_info "正在克隆 nockchain 项目到: $target_dir"
-        
-        if git clone "$NOCKCHAIN_REPO" "$target_dir"; then
-            cd "$target_dir"
-            log_success "项目克隆成功，已切换到项目目录"
-            return 0
-        else
-            log_error "项目克隆失败"
-            return 1
-        fi
-    else
-        log_error "请手动进入 nockchain 项目根目录后重新运行脚本"
-        exit 1
+    # Add environment variables to bashrc if not present
+    if ! grep -q "RUST_MIN_STACK" ~/.bashrc; then
+        echo "export RUST_MIN_STACK=$RUST_MIN_STACK_SIZE" >> ~/.bashrc
+        echo "export PATH=\"\$HOME/.cargo/bin:\$PATH\"" >> ~/.bashrc
+        print_status "添加环境变量到~/.bashrc"
     fi
 }
 
-# 智能目录检测和初始化
-smart_directory_setup() {
-    log_info "开始智能目录检测..."
+install_dependencies() {
+    print_section "安装系统依赖"
     
-    if check_project_root; then
-        return 0
-    fi
+    # Update package list
+    sudo apt update
     
-    log_warn "当前目录不是 nockchain 项目根目录"
+    # Install required packages
+    sudo apt install -y \
+        screen curl iptables build-essential git wget lz4 jq make gcc nano \
+        automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev \
+        libleveldb-dev tar clang bsdmainutils ncdu unzip llvm-dev libclang-dev
     
-    if find_nockchain_directory; then
-        if check_project_root; then
-            return 0
-        fi
-    fi
-    
-    auto_initialize_project
+    print_status "系统依赖安装完成"
 }
 
-# 初始化环境配置
-initialize_environment() {
-    log_info "初始化环境配置..."
+install_rust() {
+    print_section "安装Rust开发环境"
     
-    # 设置 Rust 环境
-    if [ -f "$HOME/.cargo/env" ]; then
+    if ! command -v rustc &> /dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         source "$HOME/.cargo/env"
+        rustup default stable
+        print_status "Rust安装完成"
+    else
+        print_status "Rust已安装，版本：$(rustc --version)"
     fi
+}
+
+install_nockchain() {
+    print_section "下载并构建Nockchain"
+    
+    # Clone repository if not exists
+    if [ ! -d "$NOCKCHAIN_DIR" ]; then
+        git clone https://github.com/zorp-corp/nockchain "$NOCKCHAIN_DIR"
+        print_status "Nockchain代码库下载完成"
+    else
+        print_status "Nockchain目录已存在，跳过下载"
+    fi
+    
+    cd "$NOCKCHAIN_DIR"
+    
+    # Copy environment file
+    if [ ! -f ".env" ]; then
+        cp .env_example .env
+        print_status "环境配置文件已创建"
+    fi
+    
+    # Build process with optimizations
+    print_status "开始构建过程（这可能需要较长时间）..."
+    
+    export RUST_MIN_STACK="$RUST_MIN_STACK_SIZE"
+    
+    # Install hoonc compiler
+    make install-hoonc
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 设置编译优化环境变量
-    export RUSTFLAGS="-C target-cpu=native -C opt-level=3"
-    export CARGO_NET_RETRY=3
-    export CARGO_NET_TIMEOUT=300
-    export CARGO_HTTP_TIMEOUT=300
+    # Build the project
+    make build
     
-    # 设置 LLVM 环境变量
-    export LLVM_CONFIG_PATH="/usr/bin/llvm-config"
-    export LIBCLANG_PATH="/usr/lib/x86_64-linux-gnu"
+    # Install wallet
+    make install-nockchain-wallet
+    export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 设置非交互模式
-    export DEBIAN_FRONTEND=noninteractive
+    # Install nockchain
+    make install-nockchain
+    export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 创建环境文件
-    if [ ! -f "$ENV_FILE" ]; then
-        if [ -f "$ENV_EXAMPLE" ]; then
-            cp "$ENV_EXAMPLE" "$ENV_FILE"
-            log_success "已从 .env_example 创建 .env 文件"
-        else
-            log_info "创建默认 .env 文件"
-            cat > "$ENV_FILE" << 'EOF'
-RUST_LOG=info,nockchain=info,nockchain_libp2p_io=info,libp2p=info,libp2p_quic=info
-MINIMAL_LOG_FORMAT=true
-MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-EOF
-        fi
-    fi
-    
-    # 创建备份目录
-    [ ! -d "$BACKUP_DIR" ] && mkdir -p "$BACKUP_DIR"
-    
-    log_success "环境初始化完成"
+    print_status "Nockchain构建完成"
 }
 
-# 验证128位16进制挖矿公钥格式
-validate_mining_pubkey() {
-    local pubkey="$1"
+setup_wallet() {
+    print_section "钱包设置"
     
-    if [[ ! "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
-        log_error "无效的挖矿公钥格式"
-        log_error "挖矿公钥必须是128位16进制格式（128个十六进制字符）"
-        return 1
-    fi
+    cd "$NOCKCHAIN_DIR"
     
-    return 0
-}
-
-# 修复版 hoonc 安装
-install_hoonc_fixed() {
-    log_info "开始安装 hoonc 编译器..."
+    # Create backup directory
+    mkdir -p "$WALLET_BACKUP_DIR"
     
-    # 清理之前的构建产物
-    if [ -d "target" ]; then
-        log_info "清理之前的构建产物..."
-        rm -rf target/
-    fi
-    
-    cargo clean 2>/dev/null || true
-    
-    # 设置编译环境
-    local cpu_cores=$(nproc)
-    export CARGO_BUILD_JOBS=$(( cpu_cores / 2 ))
-    export CARGO_TARGET_DIR="$(pwd)/target"
-    
-    log_info "使用 $CARGO_BUILD_JOBS 个并行编译任务"
-    
-    # 尝试多种方法安装 hoonc
-    log_info "方法1: 使用 make install-hoonc..."
-    if timeout 1200 make install-hoonc; then
-        log_success "hoonc 编译器安装成功（方法1）"
-        return 0
-    else
-        log_warn "方法1失败，尝试方法2..."
-        
-        if timeout 1800 cargo install --locked --force --path crates/hoonc --bin hoonc; then
-            log_success "hoonc 编译器安装成功（方法2）"
-            return 0
-        else
-            log_warn "方法2失败，尝试方法3..."
-            
-            export RUSTFLAGS="-C opt-level=1"
-            if timeout 2400 cargo install --locked --force --path crates/hoonc --bin hoonc; then
-                log_success "hoonc 编译器安装成功（方法3）"
-                return 0
-            else
-                log_error "所有方法都失败，hoonc 编译器安装失败"
-                return 1
+    # Check if wallet already exists
+    if [ -f "$WALLET_BACKUP_DIR/wallet_info.txt" ]; then
+        echo -e "${YELLOW}发现现有钱包备份，是否使用现有钱包? (y/n):${NC}"
+        read -r use_existing
+        if [[ $use_existing =~ ^[Yy]$ ]]; then
+            if [ -f "$WALLET_BACKUP_DIR/wallet_info.txt" ]; then
+                MINING_PUBKEY=$(grep "Public Key:" "$WALLET_BACKUP_DIR/wallet_info.txt" | cut -d: -f2 | tr -d ' ')
+                print_status "使用现有钱包，公钥：$MINING_PUBKEY"
             fi
+        else
+            generate_new_wallet
         fi
+    else
+        generate_new_wallet
+    fi
+    
+    # Update .env file
+    if [ -n "$MINING_PUBKEY" ]; then
+        sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$MINING_PUBKEY/" .env
+        print_status "挖矿公钥已更新到.env文件"
+        
+        # Verify the setting
+        local current_key=$(grep "MINING_PUBKEY=" .env | cut -d= -f2)
+        print_status "当前配置的挖矿公钥：$current_key"
     fi
 }
 
-# 功能1：完整安装 Nockchain - 终极修复版
-install_nockchain_ultimate() {
-    log_info "开始终极修复版完整安装 Nockchain..."
+generate_new_wallet() {
+    print_status "生成新钱包..."
     
-    # 系统检查和修复
-    check_system_resources
-    fix_dpkg_ultimate
-    install_system_dependencies_ultimate
-    initialize_environment
+    # Generate new wallet
+    wallet_output=$(nockchain-wallet keygen 2>&1)
     
-    # 设置环境
-    source $HOME/.cargo/env 2>/dev/null || true
-    export PATH="$HOME/.cargo/bin:$PATH"
+    # Extract information from output
+    MINING_PUBKEY=$(echo "$wallet_output" | grep -E "New Public Key:" | awk -F': ' '{print $2}' | tr -d ' ')
+    private_key=$(echo "$wallet_output" | grep -E "New Private Key:" | awk -F': ' '{print $2}' | tr -d ' ')
+    chain_code=$(echo "$wallet_output" | grep -E "Chain Code:" | awk -F': ' '{print $2}' | tr -d ' ')
+    seed_phrase=$(echo "$wallet_output" | grep -A10 "Seed phrase:" | tail -n +2)
     
-    # 显示系统信息
-    log_info "系统信息："
-    log_info "- Rust: $(rustc --version)"
-    log_info "- Cargo: $(cargo --version)"
-    log_info "- LLVM: $(llvm-config --version 2>/dev/null || echo 'N/A')"
-    log_info "- Clang: $(clang --version | head -1 2>/dev/null || echo 'N/A')"
+    # Save wallet information
+    {
+        echo "Nockchain Wallet Information"
+        echo "=========================="
+        echo "Generated: $(date)"
+        echo "Public Key: $MINING_PUBKEY"
+        echo "Private Key: $private_key"
+        echo "Chain Code: $chain_code"
+        echo ""
+        echo "Seed Phrase:"
+        echo "$seed_phrase"
+    } > "$WALLET_BACKUP_DIR/wallet_info.txt"
     
-    # 安装 hoonc 编译器
-    install_hoonc_fixed || return 1
+    print_status "新钱包生成完成"
+    print_warning "重要：钱包信息已保存到 $WALLET_BACKUP_DIR/wallet_info.txt"
+    print_warning "请务必备份此文件！"
     
-    # 验证 hoonc 安装
-    if command -v hoonc &> /dev/null; then
-        log_success "hoonc 验证成功: $(command -v hoonc)"
-    else
-        log_error "hoonc 验证失败"
-        return 1
+    # Export keys
+    nockchain-wallet export-keys
+    if [ -f "keys.export" ]; then
+        mv keys.export "$WALLET_BACKUP_DIR/"
+        print_status "钱包密钥已导出到 $WALLET_BACKUP_DIR/keys.export"
     fi
-    
-    # 构建项目
-    log_info "构建 Nockchain 项目..."
-    if timeout 3600 make build; then
-        log_success "项目构建成功"
-    else
-        log_error "项目构建失败"
-        return 1
-    fi
-    
-    # 安装组件
-    log_info "安装 Nockchain 组件..."
-    
-    if make install-nockchain-wallet; then
-        log_success "Nockchain 钱包安装成功"
-    else
-        log_error "Nockchain 钱包安装失败"
-        return 1
-    fi
-    
-    if make install-nockchain; then
-        log_success "Nockchain 节点安装成功"
-    else
-        log_error "Nockchain 节点安装失败"
-        return 1
-    fi
-    
-    # 更新 PATH
-    if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.bashrc; then
-        echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-        log_success "已添加 Cargo bin 目录到 PATH"
-    fi
-    
-    # 生成默认的128位挖矿公钥
-    log_info "生成128位16进制挖矿公钥..."
-    local hex_pubkey
-    if command -v openssl &> /dev/null; then
-        hex_pubkey=$(openssl rand -hex 64)
-    else
-        hex_pubkey=$(xxd -l 64 -p /dev/urandom | tr -d '\n')
-    fi
-    
-    # 更新配置文件
-    if [ -f "$ENV_FILE" ]; then
-        cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-        sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$hex_pubkey/" "$ENV_FILE"
-        log_success "已生成并设置128位挖矿公钥"
-        log_info "挖矿公钥: $hex_pubkey"
-    fi
-    
-    log_success "Nockchain 完整安装成功！"
 }
 
-# 功能2：更改挖矿公钥
 change_mining_pubkey() {
-    log_info "更改挖矿公钥（128位16进制格式）"
-    echo
-    log_info "请输入128位16进制格式的挖矿公钥（128个十六进制字符）"
-    echo
+    print_section "更改挖矿公钥"
     
-    while true; do
-        read -p "挖矿公钥 (128位16进制): " new_pubkey
-        
-        if [ -z "$new_pubkey" ]; then
-            log_error "公钥不能为空"
-            continue
-        fi
-        
-        if validate_mining_pubkey "$new_pubkey"; then
-            if [ -f "$ENV_FILE" ]; then
-                cp "$ENV_FILE" "$BACKUP_DIR/.env.backup.$(date +%Y%m%d_%H%M%S)"
-                
-                if grep -q "MINING_PUBKEY=" "$ENV_FILE"; then
-                    sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" "$ENV_FILE"
-                else
-                    echo "MINING_PUBKEY=$new_pubkey" >> "$ENV_FILE"
-                fi
-                
-                log_success "挖矿公钥已更新"
-                log_info "新公钥: $new_pubkey"
-                break
-            else
-                log_error ".env 文件不存在，请先运行安装选项"
-                break
-            fi
-        else
-            log_error "请输入正确格式的128位16进制公钥"
-        fi
-    done
+    cd "$NOCKCHAIN_DIR"
+    
+    # Show current key
+    local current_key=$(grep "MINING_PUBKEY=" .env | cut -d= -f2)
+    echo -e "${CYAN}当前挖矿公钥：${NC}$current_key"
+    
+    echo -e "\n${YELLOW}请输入新的挖矿公钥（128位16进制格式或Base58格式）：${NC}"
+    read -r new_pubkey
+    
+    # Validate key format
+    if [[ ${#new_pubkey} -eq 128 && $new_pubkey =~ ^[0-9a-fA-F]+$ ]]; then
+        print_status "检测到128位16进制格式公钥"
+    elif [[ ${#new_pubkey} -gt 40 && $new_pubkey =~ ^[1-9A-HJ-NP-Za-km-z]+$ ]]; then
+        print_status "检测到Base58格式公钥"
+    else
+        print_error "无效的公钥格式！"
+        return 1
+    fi
+    
+    # Update .env file
+    sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" .env
+    print_status "挖矿公钥已更新"
+    
+    # Verify the change
+    local updated_key=$(grep "MINING_PUBKEY=" .env | cut -d= -f2)
+    print_status "新的挖矿公钥：$updated_key"
 }
 
-# 功能3：启动节点
-start_node() {
-    log_info "启动 Nockchain 挖矿节点"
+start_mining_node() {
+    print_section "启动挖矿节点"
     
-    if ! command -v nockchain &> /dev/null; then
-        log_error "nockchain 未安装，请先运行安装选项"
-        return 1
-    fi
+    cd "$NOCKCHAIN_DIR"
     
-    if [ ! -f "$ENV_FILE" ]; then
-        log_error ".env 文件不存在，请先运行安装选项"
-        return 1
-    fi
-    
-    source "$ENV_FILE"
-    export RUST_LOG MINIMAL_LOG_FORMAT MINING_PUBKEY
-    
-    if ! validate_mining_pubkey "$MINING_PUBKEY" 2>/dev/null; then
-        log_error "当前配置的挖矿公钥格式不正确"
-        return 1
-    fi
-    
-    if pgrep -f "nockchain" > /dev/null; then
-        local existing_pids=$(pgrep -f nockchain | tr '\n' ' ')
-        log_warn "检测到运行中的 Nockchain 进程: $existing_pids"
-        
-        read -p "是否停止现有进程并重新启动？(y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            pkill -TERM -f nockchain 2>/dev/null || true
-            sleep 3
-            if pgrep -f nockchain > /dev/null; then
-                pkill -KILL -f nockchain 2>/dev/null || true
-                sleep 2
-            fi
-            log_info "现有进程已停止"
+    # Check if mining session already exists
+    if screen -list | grep -q "$SCREEN_SESSION_NAME"; then
+        print_warning "挖矿节点已在运行中"
+        echo -e "${YELLOW}是否重启挖矿节点? (y/n):${NC}"
+        read -r restart_node
+        if [[ $restart_node =~ ^[Yy]$ ]]; then
+            screen -X -S "$SCREEN_SESSION_NAME" quit 2>/dev/null || true
+            sleep 2
         else
             return 0
         fi
     fi
     
-    log_info "配置信息："
-    log_info "- 挖矿公钥: $MINING_PUBKEY"
-    log_info "- 日志文件: $LOG_FILE"
-    
-    log_info "正在启动挖矿节点..."
-    
-    nohup nockchain --mining-pubkey "${MINING_PUBKEY}" --mine > "$LOG_FILE" 2>&1 &
-    local node_pid=$!
-    
-    sleep 5
-    
-    if kill -0 $node_pid 2>/dev/null; then
-        log_success "节点启动成功！进程ID: $node_pid"
-        
-        if [ -f "$LOG_FILE" ]; then
-            log_info "最近几行日志："
-            tail -n 5 "$LOG_FILE" 2>/dev/null || true
-        fi
-    else
-        log_error "节点启动失败"
-        if [ -f "$LOG_FILE" ]; then
-            tail -n 10 "$LOG_FILE"
-        fi
+    # Get current mining public key
+    local mining_pubkey=$(grep "MINING_PUBKEY=" .env | cut -d= -f2)
+    if [ -z "$mining_pubkey" ]; then
+        print_error "未找到挖矿公钥，请先设置钱包"
         return 1
+    fi
+    
+    # Prepare optimized mining command
+    local peer_args=""
+    for peer in "${PEER_LIST[@]}"; do
+        peer_args="$peer_args --peer $peer"
+    done
+    
+    # Create optimized mining script
+    cat > mining_optimized.sh << EOF
+#!/bin/bash
+export RUST_MIN_STACK=$RUST_MIN_STACK_SIZE
+export RUST_LOG=info
+export PATH="\$HOME/.cargo/bin:\$PATH"
+
+cd "$NOCKCHAIN_DIR"
+
+nockchain --mining-pubkey $mining_pubkey \\
+    --mine \\
+    $peer_args \\
+    --npc-socket .socket/nockchain.sock \\
+    --bind /ip4/0.0.0.0/udp/$BIND_PORT/quic-v1 \\
+    --max-established-incoming 1000 \\
+    --max-established-outgoing 1000 \\
+    --max-established $MAX_PEER_CONNECTIONS \\
+    --max-established-per-peer 10 \\
+    2>&1 | tee "$LOG_FILE"
+EOF
+    
+    chmod +x mining_optimized.sh
+    
+    # Start mining in screen session
+    screen -dmS "$SCREEN_SESSION_NAME" bash -c "./mining_optimized.sh"
+    
+    print_status "挖矿节点已启动"
+    print_status "会话名称：$SCREEN_SESSION_NAME"
+    print_status "使用 'screen -r $SCREEN_SESSION_NAME' 查看挖矿进程"
+    print_status "使用 Ctrl+A+D 退出screen会话（保持挖矿运行）"
+    
+    sleep 3
+    print_status "节点状态检查..."
+    if screen -list | grep -q "$SCREEN_SESSION_NAME"; then
+        print_status "挖矿节点正在运行中"
+    else
+        print_error "挖矿节点启动失败，请检查日志"
     fi
 }
 
-# 功能4：查看日志
-view_logs() {
-    log_info "查看 Nockchain 节点日志"
+view_mining_logs() {
+    print_section "查看挖矿日志"
     
     if [ ! -f "$LOG_FILE" ]; then
-        log_warn "日志文件不存在: $LOG_FILE"
+        print_warning "日志文件不存在，请先启动挖矿节点"
         return 1
     fi
     
-    echo
-    log_info "=== 日志文件信息 ==="
-    echo "文件位置: $(realpath $LOG_FILE)"
-    echo "文件大小: $(du -h "$LOG_FILE" | cut -f1)"
-    
-    echo
-    log_info "=== 最近50行日志 ==="
-    tail -n 50 "$LOG_FILE"
-    
-    echo
-    log_info "=== 实时日志监控 ==="
-    log_info "按 Ctrl+C 退出监控"
+    echo -e "${CYAN}实时挖矿日志（按Ctrl+C退出）：${NC}\n"
     tail -f "$LOG_FILE"
 }
 
-# 主菜单显示
-show_main_menu() {
-    clear
-    echo -e "${PURPLE}"
-    echo "╔════════════════════════════════════════════════════════════════╗"
-    echo "║                 Nockchain 节点管理工具                        ║"
-    echo "║     （彻底修复 cloud-init 24.4.1 卡死问题版 v11.0）          ║"
-    echo "╚════════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+check_wallet_balance() {
+    print_section "查看钱包余额"
     
-    echo
-    echo -e "${GREEN}🔧 核心功能菜单${NC}"
-    echo "────────────────────────────────────────────────────────────────"
-    echo "  1. 安装 Nockchain（彻底修复版）"
-    echo "  2. 更改挖矿公钥（128位16进制格式）"
-    echo "  3. 启动挖矿节点"
-    echo "  4. 查看节点日志"
-    echo
-    echo "  0. 退出"
-    echo
-    echo -e "${YELLOW}🔨 终极修复点：${NC}"
-    echo -e "${YELLOW}• 彻底禁用 cloud-init 24.4.1 和相关服务${NC}"
-    echo -e "${YELLOW}• 强制跳过 systemd-networkd-wait-online 服务${NC}"
-    echo -e "${YELLOW}• 终极 dpkg 配置死锁修复和进程清理${NC}"
-    echo -e "${YELLOW}• 多层次错误恢复和超时保护机制${NC}"
-    echo -e "${YELLOW}• 自动降级问题版本和锁定更新${NC}"
-    echo
+    cd "$NOCKCHAIN_DIR"
     
-    # 显示当前状态
-    if [ -f "$ENV_FILE" ]; then
-        local current_pubkey=$(grep "MINING_PUBKEY=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2)
-        if [ -n "$current_pubkey" ] && [ "$current_pubkey" != "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" ]; then
-            echo -e "${CYAN}📍 当前挖矿公钥: ${current_pubkey:0:20}...${current_pubkey: -20}${NC}"
-        else
-            echo -e "${CYAN}📍 当前挖矿公钥: 未设置或使用默认值${NC}"
-        fi
+    local mining_pubkey=$(grep "MINING_PUBKEY=" .env | cut -d= -f2)
+    if [ -z "$mining_pubkey" ]; then
+        print_error "未找到挖矿公钥"
+        return 1
     fi
     
-    if pgrep -f "nockchain" > /dev/null; then
-        echo -e "${CYAN}📍 节点状态: ✅ 运行中 (PID: $(pgrep -f nockchain | tr '\n' ' '))${NC}"
+    if [ -S ".socket/nockchain.sock" ]; then
+        print_status "查询钱包余额..."
+        nockchain-wallet --nockchain-socket "$PWD/.socket/nockchain.sock" list-notes-by-pubkey -p "$mining_pubkey" 2>/dev/null || print_warning "无法连接到节点或查询余额"
     else
-        echo -e "${CYAN}📍 节点状态: ❌ 未运行${NC}"
+        print_warning "节点未运行，无法查询余额"
     fi
-    echo
 }
 
-# 主程序
-main() {
-    log_info "Nockchain 节点管理工具启动中..."
+check_system_status() {
+    print_section "系统状态监控"
     
-    # 启动时立即执行终极修复
-    fix_dpkg_ultimate
+    echo -e "${CYAN}CPU使用率：${NC}"
+    top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1
     
-    if ! smart_directory_setup; then
-        log_error "无法初始化项目环境"
-        exit 1
+    echo -e "\n${CYAN}内存使用情况：${NC}"
+    free -h
+    
+    echo -e "\n${CYAN}磁盘使用情况：${NC}"
+    df -h "$HOME"
+    
+    echo -e "\n${CYAN}网络连接状态：${NC}"
+    if screen -list | grep -q "$SCREEN_SESSION_NAME"; then
+        echo "挖矿节点：运行中"
+    else
+        echo "挖矿节点：未运行"
     fi
     
-    # 主循环
+    echo -e "\n${CYAN}最近挖矿日志（最后10行）：${NC}"
+    if [ -f "$LOG_FILE" ]; then
+        tail -10 "$LOG_FILE"
+    else
+        echo "无日志文件"
+    fi
+}
+
+stop_mining() {
+    print_section "停止挖矿"
+    
+    if screen -list | grep -q "$SCREEN_SESSION_NAME"; then
+        screen -X -S "$SCREEN_SESSION_NAME" quit
+        print_status "挖矿节点已停止"
+    else
+        print_warning "挖矿节点未运行"
+    fi
+}
+
+show_menu() {
+    clear
+    print_banner
+    echo -e "${WHITE}请选择操作：${NC}\n"
+    echo -e "${GREEN}1.${NC} 安装Nockchain（完整安装）"
+    echo -e "${GREEN}2.${NC} 更改挖矿公钥"
+    echo -e "${GREEN}3.${NC} 启动挖矿节点"
+    echo -e "${GREEN}4.${NC} 查看挖矿日志"
+    echo -e "${GREEN}5.${NC} 查看钱包余额"
+    echo -e "${GREEN}6.${NC} 停止挖矿"
+    echo -e "${GREEN}7.${NC} 系统状态检查"
+    echo -e "${GREEN}8.${NC} 系统优化设置"
+    echo -e "${GREEN}0.${NC} 退出"
+    echo ""
+}
+
+main() {
     while true; do
-        show_main_menu
-        read -p "请选择操作 (0-4): " choice
+        show_menu
+        echo -e "${YELLOW}请输入选项 [0-8]:${NC} "
+        read -r choice
         
         case $choice in
             1)
-                install_nockchain_ultimate
+                check_system_requirements
+                optimize_system_settings
+                install_dependencies
+                install_rust
+                install_nockchain
+                setup_wallet
+                print_status "Nockchain安装完成！"
                 read -p "按回车键继续..."
                 ;;
             2)
@@ -804,27 +469,45 @@ main() {
                 read -p "按回车键继续..."
                 ;;
             3)
-                start_node
+                start_mining_node
                 read -p "按回车键继续..."
                 ;;
             4)
-                view_logs
+                view_mining_logs
+                ;;
+            5)
+                check_wallet_balance
+                read -p "按回车键继续..."
+                ;;
+            6)
+                stop_mining
+                read -p "按回车键继续..."
+                ;;
+            7)
+                check_system_status
+                read -p "按回车键继续..."
+                ;;
+            8)
+                optimize_system_settings
+                read -p "按回车键继续..."
                 ;;
             0)
-                log_info "感谢使用 Nockchain 节点管理工具！"
+                print_status "感谢使用Nockchain挖矿优化脚本！"
                 exit 0
                 ;;
             *)
-                log_error "无效选择，请输入 0-4 之间的数字"
-                sleep 2
+                print_error "无效选项，请重新选择"
+                read -p "按回车键继续..."
                 ;;
         esac
     done
 }
 
-# 脚本入口
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    set -eE
-    trap 'log_error "脚本在第 $LINENO 行出错"' ERR
-    main "$@"
+# Check if running as root
+if [ "$EUID" -eq 0 ]; then
+    print_error "请不要以root用户运行此脚本"
+    exit 1
 fi
+
+# Start main program
+main
