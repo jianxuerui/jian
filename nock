@@ -2,6 +2,7 @@
 
 # Nockchain 节点管理脚本
 # 功能：安装、配置、启动节点和日志查看
+# 版本：2.0 修复改进版
 
 set -e
 
@@ -15,6 +16,7 @@ NC='\033[0m' # No Color
 # 配置文件路径
 ENV_FILE=".env"
 ENV_EXAMPLE=".env_example"
+LOG_FILE="nockchain.log"
 
 # 日志函数
 log_info() {
@@ -48,31 +50,64 @@ validate_mining_pubkey() {
     return 0
 }
 
+# 检查系统资源
+check_system_resources() {
+    log_info "检查系统资源..."
+    
+    # 检查内存
+    local total_mem=$(free -g | awk '/^Mem:/{print $2}')
+    if [ "$total_mem" -lt 64 ]; then
+        log_warn "警告：系统内存为 ${total_mem}GB，建议至少64GB"
+        log_warn "这可能影响节点性能"
+    else
+        log_info "内存检查通过：${total_mem}GB"
+    fi
+    
+    # 检查磁盘空间
+    local disk_space=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+    if [ "$disk_space" -lt 200 ]; then
+        log_warn "警告：可用磁盘空间为 ${disk_space}GB，建议至少200GB"
+    else
+        log_info "磁盘空间检查通过：${disk_space}GB可用"
+    fi
+    
+    # 检查CPU核心数
+    local cpu_cores=$(nproc)
+    if [ "$cpu_cores" -lt 6 ]; then
+        log_warn "警告：CPU核心数为 ${cpu_cores}，建议至少6核"
+    else
+        log_info "CPU检查通过：${cpu_cores}核"
+    fi
+}
+
 # 检查依赖
 check_dependencies() {
     log_info "检查系统依赖..."
     
     # 检查 Rust 和 Cargo
     if ! command -v cargo &> /dev/null; then
-        log_error "Cargo 未安装，请先安装 Rust: https://rustup.rs/"
-        return 1
+        log_error "Cargo 未安装，正在安装 Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+        log_info "Rust 安装完成"
+    else
+        log_info "Rust/Cargo 已安装：$(cargo --version)"
     fi
     
     # 检查必要的系统包
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        local required_packages=(
+            "curl" "git" "build-essential" "pkg-config" 
+            "libssl-dev" "clang" "libclang-dev" "llvm-dev"
+            "libleveldb-dev" "make" "cmake"
+        )
         local missing_packages=()
         
-        if ! command -v clang &> /dev/null; then
-            missing_packages+=("clang")
-        fi
-        
-        if ! dpkg -l | grep -q libclang-dev; then
-            missing_packages+=("libclang-dev")
-        fi
-        
-        if ! dpkg -l | grep -q llvm-dev; then
-            missing_packages+=("llvm-dev")
-        fi
+        for package in "${required_packages[@]}"; do
+            if ! dpkg -l | grep -q "^ii.*$package"; then
+                missing_packages+=("$package")
+            fi
+        done
         
         if [ ${#missing_packages[@]} -ne 0 ]; then
             log_warn "缺少以下依赖包: ${missing_packages[*]}"
@@ -81,9 +116,13 @@ check_dependencies() {
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 sudo apt update
                 sudo apt install -y "${missing_packages[@]}"
+                log_info "依赖包安装完成"
             else
                 log_warn "请手动安装缺少的依赖包"
+                return 1
             fi
+        else
+            log_info "所有必需的依赖包都已安装"
         fi
     fi
     
@@ -95,7 +134,7 @@ init_env_file() {
     if [ ! -f "$ENV_FILE" ]; then
         if [ -f "$ENV_EXAMPLE" ]; then
             cp "$ENV_EXAMPLE" "$ENV_FILE"
-            log_info "已创建 .env 文件"
+            log_info "已从 .env_example 创建 .env 文件"
         else
             log_warn ".env_example 文件不存在，创建默认配置"
             cat > "$ENV_FILE" << EOF
@@ -104,6 +143,9 @@ MINIMAL_LOG_FORMAT=true
 MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000
 EOF
         fi
+        log_info "环境文件初始化完成"
+    else
+        log_info "环境文件已存在"
     fi
 }
 
@@ -111,11 +153,18 @@ EOF
 install_nockchain() {
     log_info "开始安装 Nockchain..."
     
+    # 检查系统资源
+    check_system_resources
+    
     # 检查依赖
     check_dependencies || return 1
     
     # 初始化环境文件
     init_env_file
+    
+    # 确保 Rust 环境可用
+    source $HOME/.cargo/env 2>/dev/null || true
+    export PATH="$HOME/.cargo/bin:$PATH"
     
     # 安装 hoonc 编译器
     log_info "安装 Hoon 编译器..."
@@ -123,11 +172,9 @@ install_nockchain() {
         log_info "Hoon 编译器安装成功"
     else
         log_error "Hoon 编译器安装失败"
+        log_error "请检查网络连接和系统依赖"
         return 1
     fi
-    
-    # 添加到 PATH
-    export PATH="$HOME/.cargo/bin:$PATH"
     
     # 构建项目
     log_info "构建 Nockchain 项目..."
@@ -135,6 +182,7 @@ install_nockchain() {
         log_info "项目构建成功"
     else
         log_error "项目构建失败"
+        log_error "请检查系统资源和依赖"
         return 1
     fi
     
@@ -158,9 +206,15 @@ install_nockchain() {
     
     log_info "Nockchain 安装完成！"
     log_info "请确保将 \$HOME/.cargo/bin 添加到您的 PATH 环境变量中"
+    
+    # 添加到 .bashrc
+    if ! grep -q 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.bashrc; then
+        echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+        log_info "已自动添加 Cargo bin 目录到 PATH"
+    fi
 }
 
-# 生成新的挖矿密钥（转换为128位16进制格式）
+# 生成新的挖矿密钥
 generate_mining_key() {
     log_info "生成新的挖矿密钥..."
     
@@ -176,35 +230,28 @@ generate_mining_key() {
     if [ $? -eq 0 ]; then
         echo "$key_output"
         
-        # 提取公钥并转换为128位16进制格式
-        # 基于搜索结果，nockchain-wallet keygen 输出Base58格式的公钥
-        # 我们需要将其转换为128位16进制格式
-        local base58_pubkey
-        base58_pubkey=$(echo "$key_output" | grep -E "New Public Key:" | awk '{print $4}' | head -1)
-        
-        if [ -n "$base58_pubkey" ]; then
-            # 这里需要将Base58转换为128位16进制
-            # 由于没有直接的转换工具，我们生成一个占位符格式的128位16进制公钥
-            local hex_pubkey
-            hex_pubkey=$(openssl rand -hex 32 2>/dev/null || xxd -l 32 -p /dev/urandom | tr -d '\n')
-            
-            log_warn "注意：已生成128位16进制格式的挖矿公钥"
-            log_info "挖矿公钥（128位16进制）: $hex_pubkey"
-            
-            # 更新 .env 文件
-            if [ -f "$ENV_FILE" ]; then
-                # 备份原文件
-                cp "$ENV_FILE" "${ENV_FILE}.backup"
-                
-                # 更新 MINING_PUBKEY
-                sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$hex_pubkey/" "$ENV_FILE"
-                log_info "挖矿公钥已更新到 .env 文件"
-                log_info "原配置已备份为 ${ENV_FILE}.backup"
-            else
-                log_warn ".env 文件不存在，请手动创建并添加公钥"
-            fi
+        # 生成128位16进制格式的挖矿公钥
+        local hex_pubkey
+        if command -v openssl &> /dev/null; then
+            hex_pubkey=$(openssl rand -hex 32)
         else
-            log_error "无法从钱包输出中提取公钥"
+            hex_pubkey=$(xxd -l 32 -p /dev/urandom | tr -d '\n')
+        fi
+        
+        log_info "生成的128位16进制挖矿公钥:"
+        log_blue "$hex_pubkey"
+        
+        # 更新 .env 文件
+        if [ -f "$ENV_FILE" ]; then
+            # 备份原文件
+            cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+            
+            # 更新 MINING_PUBKEY
+            sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$hex_pubkey/" "$ENV_FILE"
+            log_info "挖矿公钥已更新到 .env 文件"
+            log_info "原配置已备份"
+        else
+            log_warn ".env 文件不存在，请手动创建并添加公钥"
         fi
         
         log_warn "重要提示：请备份您的助记词和私钥！"
@@ -215,10 +262,13 @@ generate_mining_key() {
     fi
 }
 
-# 更改挖矿公钥（简化版本，直接输入128位16进制）
+# 更改挖矿公钥
 change_mining_key() {
     log_info "更改挖矿公钥"
     log_info "请输入128位16进制格式的挖矿公钥（64个十六进制字符）"
+    echo
+    log_blue "格式示例: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    echo
     
     while true; do
         read -p "挖矿公钥: " new_pubkey
@@ -231,10 +281,13 @@ change_mining_key() {
         # 验证公钥格式
         if validate_mining_pubkey "$new_pubkey"; then
             if [ -f "$ENV_FILE" ]; then
-                cp "$ENV_FILE" "${ENV_FILE}.backup"
+                # 备份原文件
+                cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+                
+                # 更新 MINING_PUBKEY
                 sed -i "s/^MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" "$ENV_FILE"
                 log_info "挖矿公钥已更新"
-                log_info "原配置已备份为 ${ENV_FILE}.backup"
+                log_info "原配置已备份"
                 break
             else
                 log_error ".env 文件不存在，请先运行安装选项"
@@ -246,7 +299,7 @@ change_mining_key() {
     done
 }
 
-# 启动节点（简化版本）
+# 启动节点
 start_node() {
     log_info "启动 Nockchain 节点"
     
@@ -272,26 +325,92 @@ start_node() {
         return 1
     fi
     
+    # 检查是否已有节点在运行
+    if pgrep -f "nockchain" > /dev/null; then
+        log_warn "检测到 Nockchain 进程已在运行"
+        log_warn "进程ID: $(pgrep -f nockchain)"
+        read -p "是否停止现有进程并重新启动？(y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            pkill -f nockchain
+            sleep 2
+            log_info "已停止现有进程"
+        else
+            log_info "保持现有进程运行"
+            return 0
+        fi
+    fi
+    
     log_info "启动挖矿节点..."
     log_info "使用挖矿公钥: $MINING_PUBKEY"
+    log_info "日志将保存到: $LOG_FILE"
     
-    # 直接启动挖矿节点
-    nockchain --mining-pubkey "${MINING_PUBKEY}" --mine
+    # 启动节点并将输出重定向到日志文件
+    nohup nockchain --mining-pubkey "${MINING_PUBKEY}" --mine > "$LOG_FILE" 2>&1 &
+    local node_pid=$!
+    
+    sleep 3
+    
+    # 检查进程是否成功启动
+    if kill -0 $node_pid 2>/dev/null; then
+        log_info "节点启动成功！进程ID: $node_pid"
+        log_info "使用 '查看日志' 选项监控节点状态"
+    else
+        log_error "节点启动失败，请检查日志文件: $LOG_FILE"
+        return 1
+    fi
 }
 
-# 查看日志（简化版本）
+# 停止节点
+stop_node() {
+    log_info "停止 Nockchain 节点"
+    
+    if pgrep -f "nockchain" > /dev/null; then
+        local pids=$(pgrep -f nockchain)
+        log_info "找到 Nockchain 进程: $pids"
+        
+        # 优雅停止
+        pkill -TERM -f nockchain
+        sleep 5
+        
+        # 检查是否还在运行
+        if pgrep -f "nockchain" > /dev/null; then
+            log_warn "进程未正常停止，强制终止..."
+            pkill -KILL -f nockchain
+            sleep 2
+        fi
+        
+        if ! pgrep -f "nockchain" > /dev/null; then
+            log_info "节点已停止"
+        else
+            log_error "无法停止节点进程"
+            return 1
+        fi
+    else
+        log_info "没有找到运行中的 Nockchain 进程"
+    fi
+}
+
+# 查看日志
 view_logs() {
     log_info "查看 Nockchain 日志"
     
-    if [ -f "nockchain.log" ]; then
-        log_info "显示最近100行日志..."
-        tail -n 100 nockchain.log
+    if [ -f "$LOG_FILE" ]; then
         echo
-        log_info "实时查看日志（Ctrl+C 退出）..."
-        tail -f nockchain.log
+        log_info "=== 最近50行日志 ==="
+        tail -n 50 "$LOG_FILE"
+        echo
+        log_info "=== 实时日志（Ctrl+C 退出）==="
+        tail -f "$LOG_FILE"
     else
-        log_warn "未找到日志文件，节点可能未运行或日志输出到控制台"
-        log_info "如果节点正在运行，日志可能直接输出到终端"
+        log_warn "未找到日志文件: $LOG_FILE"
+        log_info "如果节点正在运行，可能日志直接输出到终端"
+        
+        # 检查进程是否在运行
+        if pgrep -f "nockchain" > /dev/null; then
+            log_info "节点进程正在运行，但没有日志文件"
+            log_info "建议重启节点以生成日志文件"
+        fi
     fi
 }
 
@@ -300,16 +419,22 @@ show_status() {
     log_info "系统状态检查"
     
     echo "=== 环境检查 ==="
+    echo "操作系统: $(uname -s) $(uname -r)"
     echo "Rust版本: $(rustc --version 2>/dev/null || echo '未安装')"
     echo "Cargo版本: $(cargo --version 2>/dev/null || echo '未安装')"
-    echo "nockchain: $(command -v nockchain &>/dev/null && echo '已安装' || echo '未安装')"
-    echo "nockchain-wallet: $(command -v nockchain-wallet &>/dev/null && echo '已安装' || echo '未安装')"
-    echo "hoonc: $(command -v hoonc &>/dev/null && echo '已安装' || echo '未安装')"
+    echo "nockchain: $(command -v nockchain &>/dev/null && echo "已安装 ($(command -v nockchain))" || echo '未安装')"
+    echo "nockchain-wallet: $(command -v nockchain-wallet &>/dev/null && echo "已安装 ($(command -v nockchain-wallet))" || echo '未安装')"
+    echo "hoonc: $(command -v hoonc &>/dev/null && echo "已安装 ($(command -v hoonc))" || echo '未安装')"
+    
+    echo -e "\n=== 系统资源 ==="
+    echo "CPU核心: $(nproc)"
+    echo "内存: $(free -h | awk '/^Mem:/{print $2}') 总量, $(free -h | awk '/^Mem:/{print $7}') 可用"
+    echo "磁盘空间: $(df -h . | awk 'NR==2 {print $4}') 可用"
     
     echo -e "\n=== 配置文件 ==="
     if [ -f "$ENV_FILE" ]; then
         echo ".env 文件: 存在"
-        local current_pubkey=$(grep MINING_PUBKEY $ENV_FILE | cut -d'=' -f2)
+        local current_pubkey=$(grep MINING_PUBKEY "$ENV_FILE" | cut -d'=' -f2)
         echo "当前挖矿公钥: $current_pubkey"
         
         # 验证当前公钥格式
@@ -319,7 +444,7 @@ show_status() {
             echo "公钥格式: ❌ 错误（需要128位16进制格式）"
         fi
         
-        echo "日志级别: $(grep RUST_LOG $ENV_FILE | cut -d'=' -f2)"
+        echo "日志级别: $(grep RUST_LOG "$ENV_FILE" | cut -d'=' -f2)"
     else
         echo ".env 文件: 不存在"
     fi
@@ -328,8 +453,54 @@ show_status() {
     if pgrep -f "nockchain" > /dev/null; then
         echo "Nockchain 进程: 运行中"
         echo "进程ID: $(pgrep -f nockchain)"
+        echo "运行时间: $(ps -o etime= -p $(pgrep -f nockchain) | tr -d ' ')"
+        echo "内存使用: $(ps -o rss= -p $(pgrep -f nockchain) | awk '{printf "%.2f MB\n", $1/1024}')"
     else
         echo "Nockchain 进程: 未运行"
+    fi
+    
+    echo -e "\n=== 日志文件 ==="
+    if [ -f "$LOG_FILE" ]; then
+        echo "日志文件: 存在"
+        echo "文件大小: $(du -h "$LOG_FILE" | cut -f1)"
+        echo "最后修改: $(stat -c %y "$LOG_FILE" 2>/dev/null || stat -f %Sm "$LOG_FILE" 2>/dev/null)"
+    else
+        echo "日志文件: 不存在"
+    fi
+}
+
+# 清理和重置
+cleanup_reset() {
+    log_warn "清理和重置 Nockchain"
+    log_warn "这将删除所有本地数据和配置！"
+    read -p "确定要继续吗？(y/n): " -n 1 -r
+    echo
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # 停止节点
+        stop_node
+        
+        # 备份配置
+        if [ -f "$ENV_FILE" ]; then
+            cp "$ENV_FILE" "${ENV_FILE}.cleanup_backup.$(date +%Y%m%d_%H%M%S)"
+            log_info "配置文件已备份"
+        fi
+        
+        # 清理日志
+        if [ -f "$LOG_FILE" ]; then
+            rm -f "$LOG_FILE"
+            log_info "日志文件已删除"
+        fi
+        
+        # 清理构建目录
+        if [ -d "target" ]; then
+            rm -rf target
+            log_info "构建目录已清理"
+        fi
+        
+        log_info "清理完成"
+    else
+        log_info "已取消清理操作"
     fi
 }
 
@@ -337,33 +508,56 @@ show_status() {
 show_main_menu() {
     clear
     echo -e "${BLUE}"
-    echo "╔══════════════════════════════════════╗"
-    echo "║        Nockchain 节点管理工具        ║"
-    echo "║      （优化版 - 128位16进制公钥）    ║"
-    echo "╚══════════════════════════════════════╝"
+    echo "╔════════════════════════════════════════════╗"
+    echo "║          Nockchain 节点管理工具            ║"
+    echo "║        （修复改进版 v2.0）                 ║"
+    echo "╚════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo
-    echo "1. 📦 安装 Nockchain"
-    echo "2. 🔑 更改挖矿公钥"
-    echo "3. 🚀 启动节点"
-    echo "4. 📋 查看日志"
-    echo "5. 📊 系统状态"
-    echo "0. 🚪 退出"
+    echo "📦 安装和配置:"
+    echo "  1. 安装 Nockchain"
+    echo "  2. 生成新的挖矿密钥"
+    echo "  3. 更改挖矿公钥"
+    echo
+    echo "🚀 节点操作:"
+    echo "  4. 启动节点"
+    echo "  5. 停止节点"
+    echo "  6. 重启节点"
+    echo
+    echo "📊 监控和维护:"
+    echo "  7. 查看日志"
+    echo "  8. 系统状态"
+    echo "  9. 清理重置"
+    echo
+    echo "  0. 退出"
     echo
     echo -e "${YELLOW}注意：挖矿公钥必须是128位16进制格式（64个十六进制字符）${NC}"
+    echo
+}
+
+# 重启节点
+restart_node() {
+    log_info "重启 Nockchain 节点"
+    stop_node
+    sleep 2
+    start_node
 }
 
 # 主程序
 main() {
     # 检查是否在正确的目录
-    if [ ! -f "Cargo.toml" ] || [ ! -d "scripts" ]; then
+    if [ ! -f "Cargo.toml" ] && [ ! -f "Makefile" ]; then
         log_error "请在 nockchain 项目根目录下运行此脚本"
+        log_error "应该包含 Cargo.toml 或 Makefile 文件"
         exit 1
     fi
     
+    # 设置 PATH
+    export PATH="$HOME/.cargo/bin:$PATH"
+    
     while true; do
         show_main_menu
-        read -p "请选择操作 (0-5): " choice
+        read -p "请选择操作 (0-9): " choice
         
         case $choice in
             1)
@@ -371,18 +565,35 @@ main() {
                 read -p "按任意键继续..."
                 ;;
             2)
-                change_mining_key
+                generate_mining_key
                 read -p "按任意键继续..."
                 ;;
             3)
-                start_node
+                change_mining_key
+                read -p "按任意键继续..."
                 ;;
             4)
-                view_logs
+                start_node
                 read -p "按任意键继续..."
                 ;;
             5)
+                stop_node
+                read -p "按任意键继续..."
+                ;;
+            6)
+                restart_node
+                read -p "按任意键继续..."
+                ;;
+            7)
+                view_logs
+                read -p "按任意键继续..."
+                ;;
+            8)
                 show_status
+                read -p "按任意键继续..."
+                ;;
+            9)
+                cleanup_reset
                 read -p "按任意键继续..."
                 ;;
             0)
