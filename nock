@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Nockchain 节点管理脚本 - 修复 cloud-init 24.4.1 卡死问题版
-# 版本：9.0 解决 cloud-init 配置卡死专版
-# 主要修复：cloud-init 24.4.1 卡死、dpkg 配置死锁、网络服务冲突
+# Nockchain 节点管理脚本 - 修复 dpkg 中断错误版
+# 版本：10.0 解决 dpkg 中断和配置错误专版
+# 主要修复：dpkg 中断错误、包配置失败、锁文件冲突、数据库损坏
 
 set -e
 
@@ -43,48 +43,43 @@ log_success() {
     echo -e "${PURPLE}[SUCCESS]${NC} $1"
 }
 
-# 修复 cloud-init 24.4.1 卡死问题
-fix_cloud_init_hang() {
-    log_info "检查并修复 cloud-init 24.4.1 卡死问题..."
+# 强化的 dpkg 修复函数
+fix_dpkg_issues_comprehensive() {
+    log_info "执行全面的 dpkg 问题修复..."
     
-    # 检查当前 cloud-init 版本
-    local cloud_init_version=$(dpkg -l | grep cloud-init | awk '{print $3}' | head -1)
-    log_info "当前 cloud-init 版本: $cloud_init_version"
+    # 第一步：检查并终止相关进程
+    log_info "检查正在运行的包管理进程..."
+    local apt_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg" | wc -l)
     
-    # 检查是否是问题版本
-    if [[ "$cloud_init_version" == *"24.4"* ]]; then
-        log_warn "检测到问题版本 cloud-init 24.4.x，开始修复..."
+    if [ "$apt_processes" -gt 0 ]; then
+        log_warn "发现正在运行的包管理进程，准备终止..."
+        ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg"
         
-        # 强制终止可能卡死的进程
-        log_info "终止可能卡死的 cloud-init 相关进程..."
-        sudo pkill -9 cloud-init 2>/dev/null || true
-        sudo pkill -9 systemd-networkd-wait-online 2>/dev/null || true
+        # 获取进程 ID 并优雅终止
+        local pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg" | awk '{print $2}')
         
-        # 禁用 cloud-init
-        log_info "临时禁用 cloud-init..."
-        sudo touch /etc/cloud/cloud-init.disabled
+        for pid in $pids; do
+            if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+                log_info "终止进程 PID: $pid"
+                sudo kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
         
-        # 禁用网络配置
-        sudo mkdir -p /etc/cloud/cloud.cfg.d/
-        echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg > /dev/null
+        # 等待优雅终止
+        sleep 5
         
-        # 停止相关服务
-        sudo systemctl stop cloud-init 2>/dev/null || true
-        sudo systemctl stop cloud-init-local 2>/dev/null || true
-        sudo systemctl stop cloud-config 2>/dev/null || true
-        sudo systemctl stop cloud-final 2>/dev/null || true
-        
-        log_success "cloud-init 已临时禁用"
-    else
-        log_info "cloud-init 版本正常，无需修复"
+        # 强制终止仍在运行的进程
+        pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg" | awk '{print $2}')
+        for pid in $pids; do
+            if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+                log_warn "强制终止进程 PID: $pid"
+                sudo kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
     fi
-}
-
-# 修复 dpkg 锁文件问题 - 增强版
-fix_dpkg_lock_issues_enhanced() {
-    log_info "检查并修复 dpkg 锁文件问题..."
     
-    # 检查是否存在锁文件冲突
+    # 第二步：清理锁文件
+    log_info "清理包管理锁文件..."
     local lock_files=(
         "/var/lib/dpkg/lock"
         "/var/lib/dpkg/lock-frontend"
@@ -92,127 +87,124 @@ fix_dpkg_lock_issues_enhanced() {
         "/var/cache/apt/archives/lock"
     )
     
-    local has_lock_issue=false
-    
-    # 检查是否有正在运行的 apt/dpkg 进程
-    local dpkg_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
-    
-    if [ "$dpkg_processes" -gt 0 ]; then
-        log_warn "检测到正在运行的包管理进程"
-        ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock"
-        has_lock_issue=true
-    fi
-    
-    # 检查锁文件是否存在
     for lock_file in "${lock_files[@]}"; do
         if [ -f "$lock_file" ]; then
-            log_warn "发现锁文件: $lock_file"
-            has_lock_issue=true
+            log_info "删除锁文件: $lock_file"
+            sudo rm -f "$lock_file" 2>/dev/null || true
         fi
     done
     
-    if [ "$has_lock_issue" = true ]; then
-        log_warn "发现 dpkg 锁文件问题，开始修复..."
+    # 第三步：修复 dpkg 数据库
+    log_info "修复 dpkg 数据库和配置..."
+    
+    # 备份原始配置
+    if [ -d "/var/lib/dpkg/info" ]; then
+        sudo cp -r /var/lib/dpkg/info /var/lib/dpkg/info.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    fi
+    
+    # 使用多种方法修复 dpkg
+    log_info "方法1: 执行 dpkg --configure -a（带超时保护）..."
+    timeout 300 sudo dpkg --configure -a 2>/dev/null || {
+        log_warn "dpkg --configure -a 超时或失败，尝试其他方法..."
         
-        # 首先修复 cloud-init 问题
-        fix_cloud_init_hang
-        
-        # 等待进程自然完成
-        log_info "等待 30 秒让进程自然完成..."
-        sleep 30
-        
-        # 再次检查进程
-        dpkg_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
-        
-        if [ "$dpkg_processes" -gt 0 ]; then
-            log_warn "进程仍在运行，准备强制终止..."
+        # 方法2: 使用 apt --fix-broken install
+        log_info "方法2: 执行 apt --fix-broken install..."
+        timeout 300 sudo apt --fix-broken install -y 2>/dev/null || {
+            log_warn "apt --fix-broken install 失败，尝试高级修复..."
             
-            # 获取进程 ID 并终止
-            local pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | awk '{print $2}')
+            # 方法3: 高级 dpkg 修复（参考 Stack Overflow 解决方案）
+            log_info "方法3: 执行高级 dpkg 修复..."
+            sudo mv /var/lib/dpkg/info /var/lib/dpkg/info_silent 2>/dev/null || true
+            sudo mkdir -p /var/lib/dpkg/info 2>/dev/null || true
             
-            for pid in $pids; do
-                if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
-                    log_info "终止进程 PID: $pid"
-                    sudo kill -TERM "$pid" 2>/dev/null || true
-                fi
-            done
+            timeout 180 sudo apt-get update 2>/dev/null || true
+            timeout 300 sudo apt-get -f install -y 2>/dev/null || true
             
-            # 等待优雅终止
-            sleep 5
-            
-            # 强制终止仍在运行的进程
-            pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | awk '{print $2}')
-            for pid in $pids; do
-                if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
-                    log_warn "强制终止进程 PID: $pid"
-                    sudo kill -9 "$pid" 2>/dev/null || true
-                fi
-            done
-        fi
-        
-        # 删除锁文件
-        log_info "清理锁文件..."
-        for lock_file in "${lock_files[@]}"; do
-            if [ -f "$lock_file" ]; then
-                log_info "删除锁文件: $lock_file"
-                sudo rm -f "$lock_file" 2>/dev/null || true
+            # 恢复信息目录
+            if [ -d "/var/lib/dpkg/info_silent" ]; then
+                sudo mv /var/lib/dpkg/info/* /var/lib/dpkg/info_silent/ 2>/dev/null || true
+                sudo rm -rf /var/lib/dpkg/info 2>/dev/null || true
+                sudo mv /var/lib/dpkg/info_silent /var/lib/dpkg/info 2>/dev/null || true
             fi
-        done
-        
-        # 重新配置 dpkg（带超时保护）
-        log_info "重新配置 dpkg（带超时保护）..."
-        timeout 60 sudo dpkg --configure -a 2>/dev/null || {
-            log_warn "dpkg 配置超时，跳过配置步骤"
         }
-        
-        # 清理并更新包缓存
-        log_info "清理包缓存..."
-        sudo apt clean 2>/dev/null || true
-        
-        log_success "dpkg 锁文件问题修复完成"
+    }
+    
+    # 第四步：清理和更新包缓存
+    log_info "清理和更新包缓存..."
+    sudo apt clean 2>/dev/null || true
+    sudo apt autoclean 2>/dev/null || true
+    
+    # 第五步：验证修复结果
+    log_info "验证 dpkg 修复结果..."
+    if timeout 60 sudo dpkg --configure -a 2>/dev/null; then
+        log_success "dpkg 修复成功"
+        return 0
     else
-        log_success "没有发现 dpkg 锁文件问题"
+        log_warn "dpkg 修复可能未完全成功，但继续执行..."
+        return 1
     fi
 }
 
-# 安全的 apt 命令执行器 - 带 cloud-init 检查
+# 增强的安全 apt 命令执行器
 safe_apt_command_enhanced() {
     local command="$1"
-    local max_retries=3
+    local max_retries=5
     local retry_count=0
     
     while [ $retry_count -lt $max_retries ]; do
         log_info "执行: $command (尝试 $((retry_count + 1))/$max_retries)"
         
-        # 设置非交互模式和锁定超时
+        # 设置非交互模式和各种超时选项
         export DEBIAN_FRONTEND=noninteractive
+        local timeout_options="-o DPkg::Lock::Timeout=300 -o APT::Acquire::Retries=3 -o APT::Acquire::http::Timeout=30"
         
-        # 添加 dpkg 锁定超时选项
-        local timeout_option="-o DPkg::Lock::Timeout=300"
-        local enhanced_command="$command $timeout_option"
+        # 在执行前先修复可能的 dpkg 问题
+        if [ $retry_count -gt 0 ]; then
+            fix_dpkg_issues_comprehensive
+        fi
         
-        if eval "$enhanced_command"; then
+        local enhanced_command="$command $timeout_options"
+        
+        if timeout 600 eval "$enhanced_command"; then
             log_success "命令执行成功: $command"
             return 0
         else
-            log_warn "命令执行失败，检查系统状态..."
+            log_warn "命令执行失败，错误代码: $?"
             retry_count=$((retry_count + 1))
             
             if [ $retry_count -lt $max_retries ]; then
-                fix_cloud_init_hang
-                fix_dpkg_lock_issues_enhanced
+                log_info "等待 10 秒后重试..."
                 sleep 10
+                
+                # 执行更深层的修复
+                fix_dpkg_issues_comprehensive
+                
+                # 尝试使用 aptitude 作为备选方案
+                if [ $retry_count -eq 3 ] && command -v aptitude &> /dev/null; then
+                    log_info "尝试使用 aptitude 作为备选方案..."
+                    local aptitude_cmd=$(echo "$command" | sed 's/apt/aptitude/g')
+                    if timeout 600 eval "$aptitude_cmd $timeout_options"; then
+                        log_success "aptitude 命令执行成功"
+                        return 0
+                    fi
+                fi
             fi
         fi
     done
     
     log_error "命令执行失败，已达到最大重试次数: $command"
+    log_error "建议手动执行以下命令："
+    log_error "1. sudo dpkg --configure -a"
+    log_error "2. sudo apt --fix-broken install"
+    log_error "3. sudo apt update"
+    log_error "4. 然后重新尝试安装"
+    
     return 1
 }
 
 # 检查系统资源
 check_system_resources_enhanced() {
-    log_info "执行增强系统资源检查..."
+    log_info "执行系统资源检查..."
     
     local warnings=0
     
@@ -221,27 +213,19 @@ check_system_resources_enhanced() {
     local available_mem=$(free -g | awk '/^Mem:/{print $7}')
     
     if [ "$total_mem" -lt 32 ]; then
-        log_error "系统内存不足: ${total_mem}GB (最低要求32GB，推荐64GB+)"
+        log_error "系统内存不足: ${total_mem}GB (最低要求32GB)"
         warnings=$((warnings + 1))
     elif [ "$total_mem" -lt 64 ]; then
-        log_warn "系统内存: ${total_mem}GB (推荐64GB+，可能影响编译速度)"
+        log_warn "系统内存: ${total_mem}GB (推荐64GB+)"
         warnings=$((warnings + 1))
     else
         log_success "系统内存: ${total_mem}GB ✓"
-    fi
-    
-    if [ "$available_mem" -lt 16 ]; then
-        log_warn "可用内存不足: ${available_mem}GB，建议释放内存或重启系统"
-        warnings=$((warnings + 1))
     fi
     
     # 检查磁盘空间
     local disk_space=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
     if [ "$disk_space" -lt 50 ]; then
         log_error "可用磁盘空间不足: ${disk_space}GB (最低要求50GB)"
-        warnings=$((warnings + 1))
-    elif [ "$disk_space" -lt 100 ]; then
-        log_warn "可用磁盘空间: ${disk_space}GB (推荐100GB+)"
         warnings=$((warnings + 1))
     else
         log_success "可用磁盘空间: ${disk_space}GB ✓"
@@ -257,7 +241,7 @@ check_system_resources_enhanced() {
     fi
     
     if [ $warnings -gt 0 ]; then
-        log_warn "发现 $warnings 个资源警告，可能影响编译成功率"
+        log_warn "发现 $warnings 个资源警告"
         read -p "是否继续安装？(y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -266,75 +250,54 @@ check_system_resources_enhanced() {
     fi
 }
 
-# 优化系统设置
-optimize_system_for_compilation() {
-    log_info "优化系统设置以提高编译成功率..."
-    
-    # 启用内存过量分配
-    sudo sysctl -w vm.overcommit_memory=1 2>/dev/null || true
-    
-    # 调整文件描述符限制
-    ulimit -n 65536 2>/dev/null || true
-    ulimit -s 16384 2>/dev/null || true
-    
-    # 清理系统缓存
-    sudo sync 2>/dev/null || true
-    sudo echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
-    
-    log_success "系统优化完成"
-}
-
-# 安装系统依赖 - 集成 cloud-init 修复
+# 安装系统依赖 - 集成强化的 dpkg 修复
 install_system_dependencies_enhanced() {
-    log_info "安装增强系统依赖..."
+    log_info "开始安装系统依赖..."
     
-    # 首先修复可能的系统问题
-    fix_cloud_init_hang
-    fix_dpkg_lock_issues_enhanced
+    # 首先执行全面的 dpkg 修复
+    fix_dpkg_issues_comprehensive
     
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         # 更新包列表
+        log_info "更新包列表..."
         safe_apt_command_enhanced "sudo apt update"
         
-        # 核心编译工具
-        local core_packages=(
-            "build-essential" "cmake" "ninja-build"
-            "pkg-config" "autoconf" "automake" "libtool"
-            "git" "curl" "wget" "unzip" "lz4"
-        )
+        # 核心编译工具 - 分批安装以减少失败风险
+        log_info "安装核心编译工具..."
+        local core_packages_1=("build-essential" "cmake" "ninja-build" "pkg-config")
+        local core_packages_2=("autoconf" "automake" "libtool" "git")
+        local core_packages_3=("curl" "wget" "unzip" "lz4")
+        
+        safe_apt_command_enhanced "sudo apt install -y ${core_packages_1[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${core_packages_2[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${core_packages_3[*]}"
         
         # LLVM 和 Clang 相关
-        local llvm_packages=(
-            "clang" "clang-tools" "clang-format"
-            "llvm" "llvm-dev" "llvm-runtime"
-            "libclang-dev" "libclang1" "libclang-common-dev"
-            "lld" "libc++-dev" "libc++abi-dev"
-        )
+        log_info "安装 LLVM 和 Clang..."
+        local llvm_packages_1=("clang" "clang-tools" "llvm" "llvm-dev")
+        local llvm_packages_2=("libclang-dev" "libclang1" "lld")
+        local llvm_packages_3=("libc++-dev" "libc++abi-dev")
+        
+        safe_apt_command_enhanced "sudo apt install -y ${llvm_packages_1[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${llvm_packages_2[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${llvm_packages_3[*]}"
         
         # 系统库
-        local system_packages=(
-            "libssl-dev" "libffi-dev" "zlib1g-dev"
-            "libbz2-dev" "libreadline-dev" "libsqlite3-dev"
-            "libncursesw5-dev" "xz-utils" "tk-dev"
-            "libxml2-dev" "libxmlsec1-dev"
-            "liblzma-dev" "libleveldb-dev"
-        )
-        
-        log_info "安装核心编译工具..."
-        safe_apt_command_enhanced "sudo apt install -y ${core_packages[*]}"
-        
-        log_info "安装 LLVM 和 Clang..."
-        safe_apt_command_enhanced "sudo apt install -y ${llvm_packages[*]}"
-        
         log_info "安装系统库..."
-        safe_apt_command_enhanced "sudo apt install -y ${system_packages[*]}"
+        local system_packages_1=("libssl-dev" "libffi-dev" "zlib1g-dev" "libbz2-dev")
+        local system_packages_2=("libreadline-dev" "libsqlite3-dev" "libncursesw5-dev")
+        local system_packages_3=("xz-utils" "tk-dev" "libxml2-dev" "liblzma-dev" "libleveldb-dev")
+        
+        safe_apt_command_enhanced "sudo apt install -y ${system_packages_1[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${system_packages_2[*]}"
+        safe_apt_command_enhanced "sudo apt install -y ${system_packages_3[*]}"
         
         log_success "系统依赖安装完成"
     fi
     
     # 安装 Rust
     if ! command -v rustc &> /dev/null || ! command -v cargo &> /dev/null; then
-        log_info "安装 Rust 最新稳定版..."
+        log_info "安装 Rust..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
         source $HOME/.cargo/env
         rustup component add rustfmt clippy
@@ -476,7 +439,6 @@ EOF
 validate_mining_pubkey() {
     local pubkey="$1"
     
-    # 检查是否为128个十六进制字符（128位16进制）
     if [[ ! "$pubkey" =~ ^[0-9a-fA-F]{128}$ ]]; then
         log_error "无效的挖矿公钥格式"
         log_error "挖矿公钥必须是128位16进制格式（128个十六进制字符）"
@@ -488,7 +450,7 @@ validate_mining_pubkey() {
 
 # 修复版 hoonc 安装
 install_hoonc_fixed() {
-    log_info "开始修复版 hoonc 编译器安装..."
+    log_info "开始安装 hoonc 编译器..."
     
     # 清理之前的构建产物
     if [ -d "target" ]; then
@@ -505,20 +467,19 @@ install_hoonc_fixed() {
     
     log_info "使用 $CARGO_BUILD_JOBS 个并行编译任务"
     
-    # 尝试使用不同的方法安装 hoonc
-    log_info "尝试方法1: 使用 make install-hoonc（超时 20 分钟）..."
-    
+    # 尝试多种方法安装 hoonc
+    log_info "方法1: 使用 make install-hoonc..."
     if timeout 1200 make install-hoonc; then
         log_success "hoonc 编译器安装成功（方法1）"
         return 0
     else
-        log_warn "方法1失败，尝试方法2: 直接使用 cargo 安装..."
+        log_warn "方法1失败，尝试方法2..."
         
         if timeout 1800 cargo install --locked --force --path crates/hoonc --bin hoonc; then
             log_success "hoonc 编译器安装成功（方法2）"
             return 0
         else
-            log_warn "方法2失败，尝试方法3: 降低优化级别..."
+            log_warn "方法2失败，尝试方法3..."
             
             export RUSTFLAGS="-C opt-level=1"
             if timeout 2400 cargo install --locked --force --path crates/hoonc --bin hoonc; then
@@ -532,13 +493,12 @@ install_hoonc_fixed() {
     fi
 }
 
-# 功能1：完整安装 Nockchain - 修复版
+# 功能1：完整安装 Nockchain
 install_nockchain_complete_fixed() {
-    log_info "开始修复版完整安装 Nockchain..."
+    log_info "开始完整安装 Nockchain..."
     
     # 系统检查和优化
     check_system_resources_enhanced
-    optimize_system_for_compilation
     install_system_dependencies_enhanced
     initialize_environment
     
@@ -560,19 +520,16 @@ install_nockchain_complete_fixed() {
     if command -v hoonc &> /dev/null; then
         log_success "hoonc 验证成功: $(command -v hoonc)"
     else
-        log_error "hoonc 验证失败，未找到可执行文件"
+        log_error "hoonc 验证失败"
         return 1
     fi
     
     # 构建项目
-    log_info "构建 Nockchain 项目（这可能需要很长时间）..."
-    local cpu_cores=$(nproc)
-    export CARGO_BUILD_JOBS=$(( cpu_cores / 2 ))
-    
+    log_info "构建 Nockchain 项目..."
     if timeout 3600 make build; then
         log_success "项目构建成功"
     else
-        log_error "项目构建失败或超时"
+        log_error "项目构建失败"
         return 1
     fi
     
@@ -619,7 +576,7 @@ install_nockchain_complete_fixed() {
     log_success "Nockchain 完整安装成功！"
 }
 
-# 功能2：更改挖矿公钥（128位16进制格式）
+# 功能2：更改挖矿公钥
 change_mining_pubkey() {
     log_info "更改挖矿公钥（128位16进制格式）"
     echo
@@ -652,7 +609,7 @@ change_mining_pubkey() {
                 break
             fi
         else
-            log_error "请输入正确格式的128位16进制公钥（128个十六进制字符）"
+            log_error "请输入正确格式的128位16进制公钥"
         fi
     done
 }
@@ -755,14 +712,14 @@ show_main_menu() {
     echo -e "${PURPLE}"
     echo "╔════════════════════════════════════════════════════════════════╗"
     echo "║                 Nockchain 节点管理工具                        ║"
-    echo "║        （修复 cloud-init 24.4.1 卡死问题版 v9.0）            ║"
+    echo "║            （修复 dpkg 中断错误版 v10.0）                     ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
     echo
     echo -e "${GREEN}🔧 核心功能菜单${NC}"
     echo "────────────────────────────────────────────────────────────────"
-    echo "  1. 安装 Nockchain（修复 cloud-init 卡死问题版）"
+    echo "  1. 安装 Nockchain（修复 dpkg 中断问题版）"
     echo "  2. 更改挖矿公钥（128位16进制格式）"
     echo "  3. 启动挖矿节点"
     echo "  4. 查看节点日志"
@@ -770,10 +727,11 @@ show_main_menu() {
     echo "  0. 退出"
     echo
     echo -e "${YELLOW}🔨 修复改进点：${NC}"
-    echo -e "${YELLOW}• 修复 cloud-init 24.4.1 版本卡死问题${NC}"
-    echo -e "${YELLOW}• 增强 dpkg 锁文件处理和超时保护${NC}"
-    echo -e "${YELLOW}• 智能系统服务冲突检测和处理${NC}"
-    echo -e "${YELLOW}• 防止 systemd-networkd-wait-online 服务卡死${NC}"
+    echo -e "${YELLOW}• 强化 dpkg 中断错误处理和自动修复${NC}"
+    echo -e "${YELLOW}• 多层次包管理修复策略和超时保护${NC}"
+    echo -e "${YELLOW}• 智能进程冲突检测和锁文件清理${NC}"
+    echo -e "${YELLOW}• 分批安装依赖减少单点失败风险${NC}"
+    echo -e "${YELLOW}• 集成 aptitude 备选方案和高级修复${NC}"
     echo
     
     # 显示当前状态
@@ -798,9 +756,8 @@ show_main_menu() {
 main() {
     log_info "Nockchain 节点管理工具启动中..."
     
-    # 立即修复可能的系统问题
-    fix_cloud_init_hang
-    fix_dpkg_lock_issues_enhanced
+    # 启动时立即修复可能的 dpkg 问题
+    fix_dpkg_issues_comprehensive
     
     if ! smart_directory_setup; then
         log_error "无法初始化项目环境"
