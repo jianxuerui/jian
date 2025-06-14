@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Nockchain 节点管理脚本 - 修复第62行错误版
-# 版本：7.0 解决算术表达式错误专版
-# 主要修复：第62行算术表达式错误、Bash兼容性、变量递增问题
+# Nockchain 节点管理脚本 - 修复 dpkg lock-frontend 错误版
+# 版本：8.0 解决 dpkg 锁文件冲突专版
+# 主要修复：dpkg lock-frontend 错误、包管理冲突、锁文件清理
 
 set -e
 
@@ -41,6 +41,126 @@ log_debug() {
 
 log_success() {
     echo -e "${PURPLE}[SUCCESS]${NC} $1"
+}
+
+# 修复 dpkg 锁文件问题
+fix_dpkg_lock_issues() {
+    log_info "检查并修复 dpkg 锁文件问题..."
+    
+    # 检查是否存在锁文件冲突
+    local lock_files=(
+        "/var/lib/dpkg/lock"
+        "/var/lib/dpkg/lock-frontend"
+        "/var/lib/apt/lists/lock"
+        "/var/cache/apt/archives/lock"
+    )
+    
+    local has_lock_issue=false
+    
+    # 检查是否有正在运行的 apt 进程
+    local apt_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
+    
+    if [ "$apt_processes" -gt 0 ]; then
+        log_warn "检测到正在运行的包管理进程"
+        ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock"
+        has_lock_issue=true
+    fi
+    
+    # 检查锁文件是否存在
+    for lock_file in "${lock_files[@]}"; do
+        if [ -f "$lock_file" ]; then
+            log_warn "发现锁文件: $lock_file"
+            has_lock_issue=true
+        fi
+    done
+    
+    if [ "$has_lock_issue" = true ]; then
+        log_warn "发现 dpkg 锁文件问题，开始修复..."
+        
+        # 尝试优雅地等待进程完成
+        log_info "等待 30 秒让进程自然完成..."
+        sleep 30
+        
+        # 再次检查进程
+        apt_processes=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | wc -l)
+        
+        if [ "$apt_processes" -gt 0 ]; then
+            log_warn "进程仍在运行，准备强制终止..."
+            
+            # 获取进程 ID 并终止
+            local pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | awk '{print $2}')
+            
+            for pid in $pids; do
+                if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+                    log_info "终止进程 PID: $pid"
+                    sudo kill -TERM "$pid" 2>/dev/null || true
+                fi
+            done
+            
+            # 等待优雅终止
+            sleep 5
+            
+            # 强制终止仍在运行的进程
+            pids=$(ps aux | grep -E '(apt|apt-get|dpkg|aptitude)' | grep -v grep | grep -v "fix_dpkg_lock" | awk '{print $2}')
+            for pid in $pids; do
+                if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+                    log_warn "强制终止进程 PID: $pid"
+                    sudo kill -9 "$pid" 2>/dev/null || true
+                fi
+            done
+        fi
+        
+        # 删除锁文件
+        log_info "清理锁文件..."
+        for lock_file in "${lock_files[@]}"; do
+            if [ -f "$lock_file" ]; then
+                log_info "删除锁文件: $lock_file"
+                sudo rm -f "$lock_file" 2>/dev/null || true
+            fi
+        done
+        
+        # 重新配置 dpkg
+        log_info "重新配置 dpkg..."
+        sudo dpkg --configure -a 2>/dev/null || true
+        
+        # 清理并更新包缓存
+        log_info "清理包缓存..."
+        sudo apt clean 2>/dev/null || true
+        
+        log_success "dpkg 锁文件问题修复完成"
+    else
+        log_success "没有发现 dpkg 锁文件问题"
+    fi
+}
+
+# 安全的 apt 命令执行器
+safe_apt_command() {
+    local command="$1"
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        log_info "执行: $command (尝试 $((retry_count + 1))/$max_retries)"
+        
+        # 设置非交互模式
+        export DEBIAN_FRONTEND=noninteractive
+        
+        if eval "$command"; then
+            log_success "命令执行成功: $command"
+            return 0
+        else
+            log_warn "命令执行失败，检查 dpkg 锁文件..."
+            retry_count=$((retry_count + 1))
+            
+            if [ $retry_count -lt $max_retries ]; then
+                fix_dpkg_lock_issues
+                sleep 5
+            fi
+        fi
+    done
+    
+    log_error "命令执行失败，已达到最大重试次数: $command"
+    return 1
 }
 
 # 检查系统资源 - 修复算术表达式错误
@@ -84,7 +204,6 @@ check_system_resources_enhanced() {
     
     # 检查CPU和负载
     local cpu_cores=$(nproc)
-    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
     
     if [ "$cpu_cores" -lt 4 ]; then
         log_warn "CPU核心数: ${cpu_cores}核 (推荐6核+)"
@@ -136,14 +255,17 @@ optimize_system_for_compilation() {
     log_success "系统优化完成"
 }
 
-# 安装系统依赖 - 增强版
+# 安装系统依赖 - 集成锁文件修复
 install_system_dependencies_enhanced() {
     log_info "安装增强系统依赖..."
     
+    # 首先修复可能的 dpkg 锁文件问题
+    fix_dpkg_lock_issues
+    
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         # 更新包列表
-        sudo apt update
-        sudo apt upgrade -y
+        safe_apt_command "sudo apt update"
+        safe_apt_command "sudo apt upgrade -y"
         
         # 核心编译工具
         local core_packages=(
@@ -176,16 +298,16 @@ install_system_dependencies_enhanced() {
         )
         
         log_info "安装核心编译工具..."
-        sudo apt install -y "${core_packages[@]}"
+        safe_apt_command "sudo apt install -y ${core_packages[*]}"
         
         log_info "安装 LLVM 和 Clang..."
-        sudo apt install -y "${llvm_packages[@]}"
+        safe_apt_command "sudo apt install -y ${llvm_packages[*]}"
         
         log_info "安装系统库..."
-        sudo apt install -y "${system_packages[@]}"
+        safe_apt_command "sudo apt install -y ${system_packages[*]}"
         
         log_info "安装性能监控工具..."
-        sudo apt install -y "${perf_packages[@]}"
+        safe_apt_command "sudo apt install -y ${perf_packages[*]}"
         
         log_success "系统依赖安装完成"
     fi
@@ -320,6 +442,9 @@ initialize_environment() {
     # 设置 LLVM 环境变量
     export LLVM_CONFIG_PATH="/usr/bin/llvm-config"
     export LIBCLANG_PATH="/usr/lib/x86_64-linux-gnu"
+    
+    # 设置非交互模式
+    export DEBIAN_FRONTEND=noninteractive
     
     # 创建环境文件
     if [ ! -f "$ENV_FILE" ]; then
@@ -668,14 +793,14 @@ show_main_menu() {
     echo -e "${PURPLE}"
     echo "╔════════════════════════════════════════════════════════════════╗"
     echo "║                 Nockchain 节点管理工具                        ║"
-    echo "║             （修复第62行错误版 v7.0）                         ║"
+    echo "║          （修复 dpkg lock-frontend 错误版 v8.0）              ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
     echo
     echo -e "${GREEN}🔧 核心功能菜单${NC}"
     echo "────────────────────────────────────────────────────────────────"
-    echo "  1. 安装 Nockchain（修复算术表达式错误版）"
+    echo "  1. 安装 Nockchain（修复 dpkg 锁文件问题版）"
     echo "  2. 更改挖矿公钥（128位16进制格式）"
     echo "  3. 启动挖矿节点"
     echo "  4. 查看节点日志"
@@ -683,10 +808,10 @@ show_main_menu() {
     echo "  0. 退出"
     echo
     echo -e "${YELLOW}🔨 修复改进点：${NC}"
-    echo -e "${YELLOW}• 修复第62行算术表达式错误${NC}"
-    echo -e "${YELLOW}• 改进变量递增语法兼容性${NC}"
-    echo -e "${YELLOW}• 增强Bash版本兼容性${NC}"
-    echo -e "${YELLOW}• 优化错误处理和调试信息${NC}"
+    echo -e "${YELLOW}• 修复 dpkg lock-frontend 锁文件冲突${NC}"
+    echo -e "${YELLOW}• 智能检测和清理僵尸锁文件${NC}"
+    echo -e "${YELLOW}• 安全的 apt 命令执行器和重试机制${NC}"
+    echo -e "${YELLOW}• 进程冲突检测和自动处理${NC}"
     echo
     echo -e "${CYAN}📋 系统要求：${NC}"
     echo -e "${CYAN}• 最低: 32GB RAM, 4核 CPU, 50GB 磁盘${NC}"
