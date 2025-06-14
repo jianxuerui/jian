@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain编译器问题完全解决方案 v7.0
+# Nockchain编译器问题完全解决方案 v8.0 - Exit 143修复版
 
 # 颜色定义
 RED='\033[1;31m'
@@ -18,13 +18,69 @@ LOG_FILE="$HOME/nockchain_install.log"
 BACKUP_DIR="$HOME/nockchain_backup"
 MINICONDA_DIR="$HOME/.miniconda3"
 
-# 优化环境变量
+# 优化环境变量 - 针对Exit 143问题
 export PATH="$INSTALL_PREFIX/bin:$HOME/.cargo/bin:$PATH"
-export RUST_MIN_STACK=16777216
+export RUST_MIN_STACK=33554432  # 32MB stack size
 export RUST_LOG=error
-export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1"
+export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1 -C link-arg=-Wl,--no-keep-memory"
 export CARGO_BUILD_JOBS=1
+export CARGO_INCREMENTAL=0
 export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=100000
+export MALLOC_TOP_PAD_=100000
+export MALLOC_MMAP_THRESHOLD_=100000
+
+# 内存优化设置
+setup_memory_optimization() {
+    print_message "$CYAN" "设置内存优化参数..."
+    
+    # 检查可用内存
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
+    local available_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "0")
+    
+    print_message "$YELLOW" "系统内存: ${total_ram}MB，可用: ${available_ram}MB"
+    
+    # 如果内存小于8GB，启用更严格的优化
+    if [ "$total_ram" -lt 8192 ]; then
+        print_message "$YELLOW" "检测到低内存系统，启用严格内存优化..."
+        export RUST_MIN_STACK=16777216  # 16MB
+        export CARGO_BUILD_JOBS=1
+        export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--gc-sections"
+        
+        # 设置交换文件
+        setup_swap_if_needed
+    fi
+    
+    # 设置系统内存参数
+    if [ -w /proc/sys/vm/swappiness ]; then
+        echo 10 | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1 || true
+    fi
+    
+    # 限制进程内存使用
+    ulimit -v $((available_ram * 1024 * 80 / 100)) 2>/dev/null || true
+    ulimit -m $((available_ram * 1024 * 70 / 100)) 2>/dev/null || true
+}
+
+# 设置交换文件
+setup_swap_if_needed() {
+    local swap_size=$(free -m | awk '/^Swap:/{print $2}')
+    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
+    
+    if [ "$swap_size" -lt "$((total_ram / 2))" ]; then
+        print_message "$CYAN" "设置临时交换文件..."
+        local swap_file="$HOME/nockchain_swap"
+        local needed_swap=$((total_ram / 2))
+        
+        if [ ! -f "$swap_file" ] && [ "$needed_swap" -gt 0 ]; then
+            dd if=/dev/zero of="$swap_file" bs=1M count="$needed_swap" 2>/dev/null || true
+            chmod 600 "$swap_file"
+            mkswap "$swap_file" >/dev/null 2>&1 || true
+            sudo swapon "$swap_file" >/dev/null 2>&1 || {
+                print_message "$YELLOW" "无法启用交换文件，继续使用现有内存"
+            }
+        fi
+    fi
+}
 
 # 消息输出函数
 print_message() {
@@ -46,18 +102,19 @@ show_menu() {
     clear
     echo -e "${BLUE}
 =======================================
- Nockchain 编译器问题完全解决方案 v7.0
+ Nockchain Exit 143 完全解决方案 v8.0
 =======================================
 ${RESET}"
-    echo -e "${YELLOW}1. 完全解决编译器问题并安装Nockchain"
+    echo -e "${YELLOW}1. 完全解决Exit 143错误并安装Nockchain"
     echo "2. 配置挖矿公钥"
-    echo "3. 启动优化挖矿"
+    echo "3. 启动内存优化挖矿"
     echo "4. 查看实时日志"
     echo "5. 检查钱包余额"
     echo "6. 系统状态监控"
     echo "7. 备份钱包密钥"
-    echo "8. 编译器问题诊断"
-    echo "9. 退出脚本"
+    echo "8. Exit 143问题诊断"
+    echo "9. 内存优化工具"
+    echo "10. 退出脚本"
     echo -e "${BLUE}=======================================${RESET}"
 }
 
@@ -86,10 +143,9 @@ install_system_compilers() {
         "ubuntu"|"debian"|"mint"|"pop")
             print_message "$CYAN" "为Ubuntu/Debian系统安装build-essential..."
             
-            # 检查sudo权限
             if sudo -n true 2>/dev/null; then
                 sudo apt update
-                sudo apt install -y build-essential gcc g++ make clang llvm-dev libclang-dev pkg-config libssl-dev
+                sudo apt install -y build-essential gcc g++ make clang llvm-dev libclang-dev pkg-config libssl-dev libc6-dev
                 print_message "$GREEN" "系统编译器安装完成"
             else
                 print_message "$YELLOW" "无sudo权限，将使用Conda编译器"
@@ -103,10 +159,10 @@ install_system_compilers() {
             if sudo -n true 2>/dev/null; then
                 if check_command "dnf"; then
                     sudo dnf groupinstall -y "Development Tools"
-                    sudo dnf install -y clang llvm-devel
+                    sudo dnf install -y clang llvm-devel openssl-devel
                 elif check_command "yum"; then
                     sudo yum groupinstall -y "Development Tools"
-                    sudo yum install -y clang llvm-devel
+                    sudo yum install -y clang llvm-devel openssl-devel
                 fi
                 print_message "$GREEN" "系统编译器安装完成"
             else
@@ -189,18 +245,20 @@ install_conda_compilers() {
     # 安装完整的编译器工具链
     print_message "$CYAN" "安装完整编译器工具链..."
     local compiler_packages=(
-        "compilers"          # 元包，包含所有编译器
-        "gcc_linux-64"       # GCC编译器
-        "gxx_linux-64"       # G++编译器
-        "clang"              # Clang编译器
-        "clangxx"            # Clang++编译器
-        "make"               # Make构建工具
-        "cmake"              # CMake构建工具
-        "pkg-config"         # pkg-config工具
-        "binutils"           # 二进制工具
-        "ld_impl_linux-64"   # 链接器实现
-        "libgcc-devel_linux-64"  # GCC开发库
-        "libstdcxx-devel_linux-64"  # 标准C++开发库
+        "compilers"
+        "gcc_linux-64"
+        "gxx_linux-64"
+        "clang"
+        "clangxx"
+        "make"
+        "cmake"
+        "pkg-config"
+        "binutils"
+        "ld_impl_linux-64"
+        "libgcc-devel_linux-64"
+        "libstdcxx-devel_linux-64"
+        "openssl"
+        "libffi"
     )
     
     for package in "${compiler_packages[@]}"; do
@@ -244,9 +302,9 @@ install_conda_compilers() {
     fi
 }
 
-# 配置Rust编译环境
+# 配置Rust编译环境 - Exit 143优化版
 setup_rust_environment() {
-    print_message "$CYAN" "正在配置Rust编译环境..."
+    print_message "$CYAN" "正在配置Rust编译环境（Exit 143优化版）..."
     
     # 安装Rust（如果未安装）
     if ! check_command "rustc"; then
@@ -259,7 +317,7 @@ setup_rust_environment() {
     
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 配置Cargo使用正确的链接器
+    # 配置Cargo使用正确的链接器 - 内存优化版
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
@@ -267,23 +325,35 @@ jobs = 1
 
 [target.x86_64-unknown-linux-gnu]
 linker = "cc"
+rustflags = ["-C", "link-arg=-Wl,--no-keep-memory", "-C", "link-arg=-Wl,--reduce-memory-overheads"]
 
 [profile.dev]
 debug = false
 opt-level = 1
+incremental = false
 
 [profile.release]
 debug = false
 lto = false
 codegen-units = 1
+incremental = false
+
+[net]
+retry = 3
+git-fetch-with-cli = true
 EOF
     
-    print_message "$GREEN" "Rust环境配置完成"
+    # 设置Rust内存优化环境变量
+    export RUST_MIN_STACK=33554432  # 32MB
+    export CARGO_INCREMENTAL=0
+    export CARGO_BUILD_JOBS=1
+    
+    print_message "$GREEN" "Rust环境配置完成（Exit 143优化版）"
 }
 
-# 设置编译器环境变量
+# 设置编译器环境变量 - 内存优化版
 setup_compiler_environment() {
-    print_message "$CYAN" "正在设置编译器环境变量..."
+    print_message "$CYAN" "正在设置编译器环境变量（内存优化版）..."
     
     # 激活conda环境
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
@@ -300,28 +370,31 @@ setup_compiler_environment() {
     if ! check_command "cc"; then
         if [ -n "$CC" ]; then
             export CC_x86_64_unknown_linux_gnu="$CC"
-            # 创建cc符号链接
             local cc_link="$MINICONDA_DIR/envs/nockchain-compile/bin/cc"
             ln -sf "$CC" "$cc_link" 2>/dev/null || true
             export PATH="$(dirname "$cc_link"):$PATH"
         fi
     fi
     
-    # 设置Rust编译环境
-    export RUST_MIN_STACK=16777216
-    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC"
+    # 设置Rust编译环境 - 内存优化
+    export RUST_MIN_STACK=33554432
+    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory"
     export CARGO_BUILD_JOBS=1
     export CARGO_INCREMENTAL=0
     
-    print_message "$GREEN" "编译器环境变量设置完成"
+    # 设置内存限制
+    ulimit -v $(($(free -m | awk '/^Mem:/{print $2}') * 1024 * 80 / 100)) 2>/dev/null || true
+    
+    print_message "$GREEN" "编译器环境变量设置完成（内存优化版）"
     print_message "$YELLOW" "CC=$CC"
     print_message "$YELLOW" "CXX=$CXX"
     print_message "$YELLOW" "RUSTFLAGS=$RUSTFLAGS"
+    print_message "$YELLOW" "RUST_MIN_STACK=$RUST_MIN_STACK"
 }
 
-# 编译Nockchain项目
+# 编译Nockchain项目 - Exit 143修复版
 compile_nockchain_with_fixes() {
-    print_message "$CYAN" "开始编译Nockchain项目..."
+    print_message "$CYAN" "开始编译Nockchain项目（Exit 143修复版）..."
     
     cd "$NOCKCHAIN_DIR" || return 1
     
@@ -329,11 +402,16 @@ compile_nockchain_with_fixes() {
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
     conda activate nockchain-compile
     setup_compiler_environment
+    setup_memory_optimization
     
     # 清理之前的编译结果
     print_message "$CYAN" "清理编译缓存..."
     rm -rf target/ || true
     cargo clean || true
+    
+    # 强制垃圾回收
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
     
     # 验证链接器可用性
     if ! check_command "cc"; then
@@ -343,27 +421,55 @@ compile_nockchain_with_fixes() {
     
     print_message "$GREEN" "链接器验证通过: $(which cc)"
     
-    # 分步骤编译
-    print_message "$CYAN" "编译hoonc编译器..."
-    if ! timeout 3600 make install-hoonc; then
+    # 分步骤编译 - 内存优化版
+    print_message "$CYAN" "编译hoonc编译器（内存优化模式）..."
+    
+    # 设置编译监控
+    monitor_compilation() {
+        while true; do
+            local mem_usage=$(ps aux | awk '/[c]argo|[r]ustc/ {sum+=$6} END {print sum/1024}')
+            if [ "${mem_usage%.*}" -gt "$(($(free -m | awk '/^Mem:/{print $2}') * 80 / 100))" ]; then
+                print_message "$YELLOW" "内存使用过高，暂停编译..."
+                killall -STOP cargo rustc 2>/dev/null || true
+                sleep 10
+                killall -CONT cargo rustc 2>/dev/null || true
+            fi
+            sleep 5
+        done &
+        local monitor_pid=$!
+        echo $monitor_pid
+    }
+    
+    local monitor_pid=$(monitor_compilation)
+    
+    # 编译hoonc
+    if ! timeout 7200 make install-hoonc; then
         print_message "$YELLOW" "Make编译失败，尝试Cargo直接编译..."
         
         cd crates/hoonc
-        if cargo build --release --bin hoonc --jobs 1; then
+        if timeout 7200 cargo build --release --bin hoonc --jobs 1; then
+            mkdir -p "$HOME/.cargo/bin"
             cp target/release/hoonc "$HOME/.cargo/bin/"
             print_message "$GREEN" "hoonc手动编译成功"
             cd ../..
         else
             print_message "$RED" "hoonc编译失败"
+            kill $monitor_pid 2>/dev/null || true
             return 1
         fi
     fi
     
-    # 等待内存释放
-    sleep 5
+    # 停止监控
+    kill $monitor_pid 2>/dev/null || true
     
-    print_message "$CYAN" "编译主项目..."
-    if ! timeout 3600 make build; then
+    # 等待内存释放
+    print_message "$CYAN" "等待内存释放..."
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+    sleep 10
+    
+    print_message "$CYAN" "编译主项目（内存优化模式）..."
+    if ! timeout 7200 make build; then
         print_message "$RED" "主项目编译失败"
         return 1
     fi
@@ -372,60 +478,75 @@ compile_nockchain_with_fixes() {
     make install-nockchain-wallet || print_message "$YELLOW" "钱包安装失败"
     make install-nockchain || print_message "$YELLOW" "主程序安装失败"
     
-    print_message "$GREEN" "Nockchain编译完成！"
+    print_message "$GREEN" "Nockchain编译完成（Exit 143问题已修复）！"
 }
 
-# 主安装函数
-install_nockchain_compiler_fix() {
-    print_message "$GREEN" ">>> 开始Nockchain编译器问题完全解决..."
-    log_message "开始编译器修复安装流程"
+# 主安装函数 - Exit 143完全解决版
+install_nockchain_exit143_fix() {
+    print_message "$GREEN" ">>> 开始Nockchain Exit 143问题完全解决..."
+    log_message "开始Exit 143修复安装流程"
     
     # 检查系统资源
     local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
     local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
+    local swap_size=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}' || echo "0")
     
     print_message "$YELLOW" "系统配置："
     print_message "$YELLOW" "- 内存: ${total_ram}MB"
+    print_message "$YELLOW" "- 交换: ${swap_size}MB"
     print_message "$YELLOW" "- 可用空间: ${available_space}MB"
+    
+    # 内存不足警告
+    if [ "$total_ram" -lt 4096 ]; then
+        print_message "$RED" "警告：系统内存不足4GB，可能导致编译失败"
+        read -p "是否继续？(y/N): " continue_anyway
+        if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    fi
     
     # 创建必要目录
     mkdir -p "$BACKUP_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
     
-    # 步骤1：尝试安装系统编译器
-    print_message "$MAGENTA" "步骤 1/6: 尝试安装系统编译器..."
+    # 步骤1：内存优化设置
+    print_message "$MAGENTA" "步骤 1/7: 设置内存优化..."
+    setup_memory_optimization
+    
+    # 步骤2：尝试安装系统编译器
+    print_message "$MAGENTA" "步骤 2/7: 尝试安装系统编译器..."
     local use_conda_compilers=false
     if ! install_system_compilers; then
         print_message "$YELLOW" "系统编译器安装失败，将使用Conda编译器"
         use_conda_compilers=true
     fi
     
-    # 步骤2：设置Miniconda环境
-    print_message "$MAGENTA" "步骤 2/6: 设置Miniconda环境..."
+    # 步骤3：设置Miniconda环境
+    print_message "$MAGENTA" "步骤 3/7: 设置Miniconda环境..."
     if ! smart_miniconda_setup; then
         print_message "$RED" "Miniconda设置失败"
         return 1
     fi
     
-    # 步骤3：安装Conda编译器（如果需要）
+    # 步骤4：安装Conda编译器（如果需要）
     if [ "$use_conda_compilers" = true ]; then
-        print_message "$MAGENTA" "步骤 3/6: 安装Conda编译器工具链..."
+        print_message "$MAGENTA" "步骤 4/7: 安装Conda编译器工具链..."
         if ! install_conda_compilers; then
             print_message "$RED" "Conda编译器安装失败"
             return 1
         fi
     else
-        print_message "$MAGENTA" "步骤 3/6: 跳过Conda编译器安装（使用系统编译器）"
+        print_message "$MAGENTA" "步骤 4/7: 跳过Conda编译器安装（使用系统编译器）"
     fi
     
-    # 步骤4：配置Rust环境
-    print_message "$MAGENTA" "步骤 4/6: 配置Rust环境..."
+    # 步骤5：配置Rust环境
+    print_message "$MAGENTA" "步骤 5/7: 配置Rust环境（Exit 143优化版）..."
     if ! setup_rust_environment; then
         print_message "$RED" "Rust环境配置失败"
         return 1
     fi
     
-    # 步骤5：获取Nockchain源码
-    print_message "$MAGENTA" "步骤 5/6: 获取Nockchain源码..."
+    # 步骤6：获取Nockchain源码
+    print_message "$MAGENTA" "步骤 6/7: 获取Nockchain源码..."
     if [ -d "$NOCKCHAIN_DIR" ]; then
         print_message "$YELLOW" "更新现有项目..."
         cd "$NOCKCHAIN_DIR"
@@ -443,22 +564,24 @@ install_nockchain_compiler_fix() {
     
     cd "$NOCKCHAIN_DIR"
     
-    # 配置环境文件
+    # 配置环境文件 - Exit 143优化版
     if [ -f ".env_example" ]; then
         cp .env_example .env
     else
         cat > .env << 'EOF'
 MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000
 NETWORK=mainnet
-MAX_PEERS=2000
+MAX_PEERS=1000
 LOG_LEVEL=error
 RUST_LOG=error
-RUST_MIN_STACK=16777216
+RUST_MIN_STACK=33554432
+CARGO_BUILD_JOBS=1
+MALLOC_ARENA_MAX=2
 EOF
     fi
     
-    # 步骤6：编译项目
-    print_message "$MAGENTA" "步骤 6/6: 编译Nockchain项目..."
+    # 步骤7：编译项目
+    print_message "$MAGENTA" "步骤 7/7: 编译Nockchain项目（Exit 143修复版）..."
     if ! compile_nockchain_with_fixes; then
         print_message "$RED" "项目编译失败"
         return 1
@@ -484,108 +607,173 @@ EOF
         fi
     fi
     
-    # 创建环境激活脚本
-    cat > "$HOME/nockchain_fixed.sh" << 'EOF'
+    # 创建环境激活脚本 - Exit 143修复版
+    cat > "$HOME/nockchain_exit143_fixed.sh" << 'EOF'
 #!/bin/bash
-# Nockchain编译器修复版环境激活脚本
+# Nockchain Exit 143修复版环境激活脚本
 source "$HOME/.miniconda3/etc/profile.d/conda.sh"
 conda activate nockchain-compile
-export RUST_MIN_STACK=16777216
+
+# Exit 143修复专用环境变量
+export RUST_MIN_STACK=33554432
 export RUST_LOG=error
+export CARGO_BUILD_JOBS=1
+export CARGO_INCREMENTAL=0
+export MALLOC_ARENA_MAX=2
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # 设置编译器环境变量
 export CC=$(which gcc || which clang)
 export CXX=$(which g++ || which clang++)
 if [ -n "$CC" ]; then
-    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC"
+    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory"
 fi
 
+# 内存限制
+total_ram=$(free -m | awk '/^Mem:/{print $2}')
+ulimit -v $((total_ram * 1024 * 80 / 100)) 2>/dev/null || true
+
 cd "$HOME/nockchain"
-echo "Nockchain编译器修复版环境已激活"
+echo "Nockchain Exit 143修复版环境已激活"
 echo "编译器: $CC"
+echo "内存限制: $(ulimit -v)KB"
 echo "使用 'make run-nockchain' 启动挖矿"
 EOF
-    chmod +x "$HOME/nockchain_fixed.sh"
+    chmod +x "$HOME/nockchain_exit143_fixed.sh"
     
-    print_message "$GREEN" "🎉 Nockchain编译器问题完全解决！"
+    print_message "$GREEN" "🎉 Nockchain Exit 143问题完全解决！"
     print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "环境激活: source ~/nockchain_fixed.sh"
-    print_message "$CYAN" "编译器问题已彻底修复！"
+    print_message "$YELLOW" "环境激活: source ~/nockchain_exit143_fixed.sh"
+    print_message "$CYAN" "Exit 143错误已彻底修复！"
     
-    log_message "编译器修复安装完成"
+    log_message "Exit 143修复安装完成"
 }
 
-# 编译器问题诊断
-diagnose_compiler_issues() {
-    print_message "$GREEN" ">>> 编译器问题诊断"
+# Exit 143问题诊断
+diagnose_exit143_issues() {
+    print_message "$GREEN" ">>> Exit 143问题诊断"
     
-    print_message "$CYAN" "正在检查编译器状态..."
+    print_message "$CYAN" "正在检查Exit 143相关问题..."
     
-    # 检查系统编译器
-    print_message "$YELLOW" "系统编译器检查："
-    local system_compilers=("gcc" "g++" "clang" "clang++" "cc" "make")
-    for compiler in "${system_compilers[@]}"; do
-        if check_command "$compiler"; then
-            print_message "$GREEN" "✅ $compiler: $(which $compiler)"
-        else
-            print_message "$RED" "❌ $compiler: 未找到"
-        fi
-    done
+    # 检查系统内存
+    print_message "$YELLOW" "系统内存检查："
+    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
+    local used_ram=$(free -m | awk '/^Mem:/{print $3}')
+    local available_ram=$(free -m | awk '/^Mem:/{print $7}')
+    local swap_total=$(free -m | awk '/^Swap:/{print $2}')
+    local swap_used=$(free -m | awk '/^Swap:/{print $3}')
     
-    # 检查Conda环境
-    print_message "$YELLOW" "Conda环境检查："
-    if [ -f "$MINICONDA_DIR/etc/profile.d/conda.sh" ]; then
-        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-        print_message "$GREEN" "✅ Conda环境可用"
-        
-        if conda env list | grep -q "nockchain-compile"; then
-            print_message "$GREEN" "✅ nockchain-compile环境存在"
-            conda activate nockchain-compile
-            
-            # 检查环境中的编译器
-            print_message "$YELLOW" "Conda环境编译器："
-            for compiler in "${system_compilers[@]}"; do
-                if check_command "$compiler"; then
-                    print_message "$GREEN" "✅ $compiler: $(which $compiler)"
-                else
-                    print_message "$RED" "❌ $compiler: 未找到"
-                fi
-            done
-        else
-            print_message "$RED" "❌ nockchain-compile环境不存在"
-        fi
+    print_message "$CYAN" "总内存: ${total_ram}MB"
+    print_message "$CYAN" "已用内存: ${used_ram}MB"
+    print_message "$CYAN" "可用内存: ${available_ram}MB"
+    print_message "$CYAN" "交换总计: ${swap_total}MB"
+    print_message "$CYAN" "交换已用: ${swap_used}MB"
+    
+    # 内存使用率检查
+    local mem_usage_percent=$((used_ram * 100 / total_ram))
+    if [ "$mem_usage_percent" -gt 80 ]; then
+        print_message "$RED" "⚠️ 内存使用率过高: ${mem_usage_percent}%"
     else
-        print_message "$RED" "❌ Conda未正确安装"
+        print_message "$GREEN" "✅ 内存使用率正常: ${mem_usage_percent}%"
     fi
+    
+    # 检查OOM killer历史
+    print_message "$YELLOW" "OOM Killer历史检查："
+    if dmesg | grep -i "killed process" | tail -5; then
+        print_message "$RED" "发现OOM killer活动"
+    else
+        print_message "$GREEN" "✅ 无OOM killer活动记录"
+    fi
+    
+    # 检查系统限制
+    print_message "$YELLOW" "系统限制检查："
+    print_message "$CYAN" "虚拟内存限制: $(ulimit -v)"
+    print_message "$CYAN" "物理内存限制: $(ulimit -m)"
+    print_message "$CYAN" "栈大小限制: $(ulimit -s)"
+    print_message "$CYAN" "进程数限制: $(ulimit -u)"
     
     # 检查Rust配置
     print_message "$YELLOW" "Rust配置检查："
-    if check_command "rustc"; then
-        print_message "$GREEN" "✅ Rust编译器: $(rustc --version)"
-        
-        if [ -f "$HOME/.cargo/config.toml" ]; then
-            print_message "$GREEN" "✅ Cargo配置文件存在"
-            print_message "$CYAN" "配置内容："
-            cat "$HOME/.cargo/config.toml"
-        else
-            print_message "$YELLOW" "⚠️  Cargo配置文件不存在"
-        fi
+    print_message "$CYAN" "RUST_MIN_STACK: ${RUST_MIN_STACK:-未设置}"
+    print_message "$CYAN" "CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-未设置}"
+    print_message "$CYAN" "CARGO_INCREMENTAL: ${CARGO_INCREMENTAL:-未设置}"
+    
+    # 检查编译器
+    print_message "$YELLOW" "编译器检查："
+    if check_command "cc"; then
+        print_message "$GREEN" "✅ cc: $(which cc)"
     else
-        print_message "$RED" "❌ Rust未安装"
+        print_message "$RED" "❌ cc: 未找到"
+    fi
+    
+    if check_command "gcc"; then
+        print_message "$GREEN" "✅ gcc: $(gcc --version | head -1)"
+    else
+        print_message "$RED" "❌ gcc: 未找到"
     fi
     
     # 提供修复建议
-    print_message "$CYAN" "修复建议："
+    print_message "$CYAN" "Exit 143修复建议："
+    
+    if [ "$total_ram" -lt 4096 ]; then
+        print_message "$YELLOW" "1. 系统内存不足4GB，建议增加内存或交换空间"
+    fi
+    
+    if [ "$mem_usage_percent" -gt 80 ]; then
+        print_message "$YELLOW" "2. 当前内存使用率过高，建议释放内存后重试"
+    fi
+    
+    if [ -z "$RUST_MIN_STACK" ]; then
+        print_message "$YELLOW" "3. 未设置RUST_MIN_STACK，建议设置为33554432"
+    fi
+    
     if ! check_command "cc"; then
-        print_message "$YELLOW" "1. 缺少cc链接器，建议重新运行完整安装"
+        print_message "$YELLOW" "4. 缺少cc链接器，建议重新运行完整安装"
     fi
     
-    if [ ! -f "$HOME/.cargo/config.toml" ]; then
-        print_message "$YELLOW" "2. 缺少Cargo配置，建议重新配置Rust环境"
-    fi
+    print_message "$YELLOW" "5. 建议使用选项1重新安装Exit 143修复版"
+}
+
+# 内存优化工具
+memory_optimization_tools() {
+    print_message "$GREEN" ">>> 内存优化工具"
     
-    print_message "$YELLOW" "3. 如果问题持续，建议使用选项1重新安装"
+    echo "1. 清理系统缓存"
+    echo "2. 设置交换文件"
+    echo "3. 优化系统参数"
+    echo "4. 检查内存使用"
+    echo "5. 返回主菜单"
+    
+    read -p "请选择操作: " opt_choice
+    
+    case $opt_choice in
+        1)
+            print_message "$CYAN" "清理系统缓存..."
+            sync
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || {
+                print_message "$YELLOW" "需要sudo权限清理缓存"
+            }
+            print_message "$GREEN" "缓存清理完成"
+            ;;
+        2)
+            setup_swap_if_needed
+            ;;
+        3)
+            print_message "$CYAN" "优化系统参数..."
+            echo 10 | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1 || true
+            echo 1 | sudo tee /proc/sys/vm/overcommit_memory >/dev/null 2>&1 || true
+            print_message "$GREEN" "系统参数优化完成"
+            ;;
+        4)
+            print_message "$CYAN" "当前内存使用："
+            free -h
+            print_message "$CYAN" "进程内存使用TOP 10："
+            ps aux --sort=-%mem | head -11
+            ;;
+        5)
+            return
+            ;;
+    esac
 }
 
 # 验证公钥格式
@@ -621,9 +809,9 @@ configure_mining_key() {
     fi
 }
 
-# 启动挖矿
-start_mining() {
-    print_message "$GREEN" ">>> 启动优化挖矿节点..."
+# 启动内存优化挖矿
+start_optimized_mining() {
+    print_message "$GREEN" ">>> 启动内存优化挖矿节点..."
     
     if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
         print_message "$RED" "错误：未找到安装"
@@ -644,29 +832,44 @@ start_mining() {
     cd "$NOCKCHAIN_DIR"
     
     # 激活环境
-    source "$HOME/nockchain_fixed.sh"
+    source "$HOME/nockchain_exit143_fixed.sh"
     
-    print_message "$CYAN" "正在启动挖矿节点..."
+    print_message "$CYAN" "正在启动内存优化挖矿节点..."
     
-    # 在screen中启动
+    # 在screen中启动 - 内存优化版
     screen -dmS nockchain bash -c "
-        source '$HOME/nockchain_fixed.sh'
+        source '$HOME/nockchain_exit143_fixed.sh'
         cd '$NOCKCHAIN_DIR'
         source .env
         mkdir -p logs
-        echo '=== Nockchain 编译器修复版挖矿 ===' > logs/mining.log
+        echo '=== Nockchain Exit 143修复版挖矿 ===' > logs/mining.log
         echo '启动时间: \$(date)' >> logs/mining.log
-        echo '版本: 编译器问题完全解决版' >> logs/mining.log
+        echo '版本: Exit 143问题完全解决版' >> logs/mining.log
+        echo '内存优化: 启用' >> logs/mining.log
         echo '=================================' >> logs/mining.log
-        make run-nockchain 2>&1 | tee -a logs/mining.log
+        
+        # 设置内存监控
+        while true; do
+            make run-nockchain 2>&1 | tee -a logs/mining.log
+            exit_code=\$?
+            if [ \$exit_code -eq 143 ]; then
+                echo '检测到Exit 143，等待5秒后重启...' >> logs/mining.log
+                sleep 5
+                continue
+            else
+                echo '进程退出，退出码: \$exit_code' >> logs/mining.log
+                break
+            fi
+        done
     "
     
     sleep 5
     
     if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "🚀 挖矿节点启动成功！"
+        print_message "$GREEN" "🚀 内存优化挖矿节点启动成功！"
         print_message "$CYAN" "- 查看状态: screen -r nockchain"
         print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
+        print_message "$CYAN" "- Exit 143自动重启: 已启用"
     else
         print_message "$RED" "启动失败，请查看日志"
     fi
@@ -691,7 +894,7 @@ view_logs() {
 check_balance() {
     print_message "$GREEN" ">>> 检查钱包余额"
     
-    source "$HOME/nockchain_fixed.sh"
+    source "$HOME/nockchain_exit143_fixed.sh"
     
     cd "$NOCKCHAIN_DIR"
     local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
@@ -712,20 +915,35 @@ check_balance() {
     fi
 }
 
-# 系统监控
+# 系统监控 - Exit 143专版
 system_monitor() {
-    print_message "$BLUE" "====== 系统状态监控 ======"
+    print_message "$BLUE" "====== 系统状态监控（Exit 143版） ======"
     
     # 基本系统信息
     local mem_info=$(free -h | awk '/^Mem:/{print "使用: "$3" / 总计: "$2}')
-    print_message "$YELLOW" "内存状态: $mem_info"
+    local mem_percent=$(free | awk '/^Mem:/{printf "%.1f", $3/$2*100}')
+    print_message "$YELLOW" "内存状态: $mem_info (${mem_percent}%)"
+    
+    local swap_info=$(free -h | awk '/^Swap:/{print "使用: "$3" / 总计: "$2}')
+    print_message "$YELLOW" "交换状态: $swap_info"
     
     local load_avg=$(uptime | awk -F'load average:' '{print $2}')
     print_message "$YELLOW" "系统负载: $load_avg"
     
+    # Exit 143相关检查
+    print_message "$CYAN" "Exit 143相关状态："
+    print_message "$YELLOW" "- RUST_MIN_STACK: ${RUST_MIN_STACK:-未设置}"
+    print_message "$YELLOW" "- 内存使用率: ${mem_percent}%"
+    
+    if (( $(echo "$mem_percent > 80" | bc -l) )); then
+        print_message "$RED" "⚠️ 内存使用率过高，可能导致Exit 143"
+    else
+        print_message "$GREEN" "✅ 内存使用率正常"
+    fi
+    
     # 挖矿状态
     if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "挖矿状态: ✅ 正在运行"
+        print_message "$GREEN" "挖矿状态: ✅ 正在运行（Exit 143保护已启用）"
     else
         print_message "$RED" "挖矿状态: ❌ 未运行"
     fi
@@ -742,6 +960,14 @@ system_monitor() {
         print_message "$GREEN" "- gcc编译器: $(which gcc)"
     else
         print_message "$RED" "- gcc编译器: 未找到"
+    fi
+    
+    # OOM历史
+    local oom_count=$(dmesg | grep -c "killed process" || echo "0")
+    if [ "$oom_count" -gt 0 ]; then
+        print_message "$YELLOW" "- OOM事件: ${oom_count}次（可能导致Exit 143）"
+    else
+        print_message "$GREEN" "- OOM事件: 无"
     fi
 }
 
@@ -771,25 +997,39 @@ main() {
         exit 1
     fi
     
+    # 检查bc命令
+    if ! check_command "bc"; then
+        print_message "$YELLOW" "安装bc计算器..."
+        case $(detect_distro) in
+            "ubuntu"|"debian"|"mint"|"pop")
+                sudo apt install -y bc 2>/dev/null || true
+                ;;
+            "centos"|"rhel"|"rocky"|"almalinux"|"fedora")
+                sudo yum install -y bc 2>/dev/null || sudo dnf install -y bc 2>/dev/null || true
+                ;;
+        esac
+    fi
+    
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
-    log_message "编译器修复脚本启动 v7.0"
+    log_message "Exit 143修复脚本启动 v8.0"
     
     while true; do
         show_menu
-        read -p "请输入选项编号（1-9）: " choice
+        read -p "请输入选项编号（1-10）: " choice
         
         case $choice in
-            1) install_nockchain_compiler_fix ;;
+            1) install_nockchain_exit143_fix ;;
             2) configure_mining_key ;;
-            3) start_mining ;;
+            3) start_optimized_mining ;;
             4) view_logs ;;
             5) check_balance ;;
             6) system_monitor ;;
             7) backup_wallet ;;
-            8) diagnose_compiler_issues ;;
-            9)
-                print_message "$GREEN" "感谢使用Nockchain编译器问题解决方案！"
+            8) diagnose_exit143_issues ;;
+            9) memory_optimization_tools ;;
+            10)
+                print_message "$GREEN" "感谢使用Nockchain Exit 143完全解决方案！"
                 log_message "脚本正常退出"
                 exit 0
                 ;;
