@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain中文优化挖矿脚本 v3.0 - 修复版
+# Nockchain中文优化挖矿脚本 v3.1 - 修复make命令问题版
 
 # 颜色定义
 RED='\033[1;31m'
@@ -8,11 +8,13 @@ GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[1;34m'
 CYAN='\033[1;36m'
+MAGENTA='\033[1;35m'
 RESET='\033[0m'
 
 # 脚本配置
 NOCKCHAIN_DIR="$HOME/nockchain"
 LOG_FILE="$HOME/nockchain_install.log"
+BACKUP_DIR="$HOME/nockchain_backup"
 
 # 显示带颜色的消息
 print_message() {
@@ -35,22 +37,39 @@ check_command() {
     fi
 }
 
+# 检测Linux发行版
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO=$ID
+        VERSION=$VERSION_ID
+    elif [ -f /etc/redhat-release ]; then
+        DISTRO="centos"
+    elif [ -f /etc/debian_version ]; then
+        DISTRO="debian"
+    else
+        DISTRO="unknown"
+    fi
+    echo "$DISTRO"
+}
+
 # 显示主菜单
 show_menu() {
     clear
     echo -e "${BLUE}
 =======================================
- Nockchain 中文优化挖矿脚本 v3.0
+ Nockchain 中文优化挖矿脚本 v3.1
 =======================================
 ${RESET}"
-    echo -e "${YELLOW}1. 安装Nockchain节点（从源码编译）"
+    echo -e "${YELLOW}1. 安装Nockchain节点（自动解决依赖问题）"
     echo "2. 配置挖矿公钥"
     echo "3. 启动优化挖矿"
     echo "4. 查看实时日志"
     echo "5. 检查钱包余额"
     echo "6. 系统状态监控"
     echo "7. 备份钱包密钥"
-    echo "8. 退出脚本"
+    echo "8. 修复系统依赖"
+    echo "9. 退出脚本"
     echo -e "${BLUE}=======================================${RESET}"
 }
 
@@ -72,181 +91,327 @@ validate_pubkey() {
     fi
 }
 
-# 安装系统依赖
-install_dependencies() {
-    print_message "$CYAN" "正在安装系统依赖..."
+# 检查并安装系统依赖
+install_system_dependencies() {
+    print_message "$CYAN" "正在检查并安装系统依赖..."
     
-    # 检测系统类型
-    if check_command "apt"; then
-        # Ubuntu/Debian系统
-        sudo apt update
-        sudo apt install -y curl git build-essential clang llvm-dev libclang-dev \
-            pkg-config libssl-dev wget screen htop
-    elif check_command "yum"; then
-        # CentOS/RHEL系统
-        sudo yum update -y
-        sudo yum groupinstall -y "Development Tools"
-        sudo yum install -y curl git clang llvm-devel wget screen htop
-    elif check_command "dnf"; then
-        # Fedora系统
-        sudo dnf update -y
-        sudo dnf groupinstall -y "Development Tools"
-        sudo dnf install -y curl git clang llvm-devel wget screen htop
-    else
-        print_message "$RED" "不支持的系统类型，请手动安装依赖"
+    local distro=$(detect_distro)
+    print_message "$YELLOW" "检测到系统类型: $distro"
+    
+    case $distro in
+        "ubuntu"|"debian"|"mint"|"pop")
+            print_message "$CYAN" "正在为Ubuntu/Debian系统安装开发工具..."
+            
+            # 检查是否有sudo权限
+            if ! sudo -n true 2>/dev/null; then
+                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
+                print_message "$YELLOW" "请运行以下命令手动安装："
+                print_message "$YELLOW" "sudo apt update && sudo apt install -y build-essential curl git clang llvm-dev libclang-dev pkg-config libssl-dev wget screen htop"
+                return 1
+            fi
+            
+            # 更新包索引
+            if ! sudo apt update; then
+                print_message "$RED" "包索引更新失败"
+                return 1
+            fi
+            
+            # 安装build-essential和其他必要工具
+            local packages="build-essential curl git clang llvm-dev libclang-dev pkg-config libssl-dev wget screen htop"
+            
+            if ! sudo apt install -y $packages; then
+                print_message "$RED" "系统依赖安装失败"
+                return 1
+            fi
+            ;;
+            
+        "centos"|"rhel"|"rocky"|"almalinux")
+            print_message "$CYAN" "正在为CentOS/RHEL系统安装开发工具..."
+            
+            if ! sudo -n true 2>/dev/null; then
+                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
+                print_message "$YELLOW" "请运行以下命令手动安装："
+                print_message "$YELLOW" "sudo dnf groupinstall -y \"Development Tools\" && sudo dnf install -y curl git clang llvm-devel wget screen htop"
+                return 1
+            fi
+            
+            # 检查包管理器
+            if check_command "dnf"; then
+                PKG_MGR="dnf"
+            elif check_command "yum"; then
+                PKG_MGR="yum"
+            else
+                print_message "$RED" "未找到包管理器 (dnf/yum)"
+                return 1
+            fi
+            
+            # 安装开发工具组
+            if ! sudo $PKG_MGR groupinstall -y "Development Tools"; then
+                print_message "$YELLOW" "Development Tools组安装失败，尝试单独安装..."
+                if ! sudo $PKG_MGR install -y gcc gcc-c++ make; then
+                    print_message "$RED" "核心编译工具安装失败"
+                    return 1
+                fi
+            fi
+            
+            # 安装其他必要工具
+            sudo $PKG_MGR install -y curl git clang llvm-devel wget screen htop
+            ;;
+            
+        "fedora")
+            print_message "$CYAN" "正在为Fedora系统安装开发工具..."
+            
+            if ! sudo -n true 2>/dev/null; then
+                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
+                print_message "$YELLOW" "请运行以下命令手动安装："
+                print_message "$YELLOW" "sudo dnf groupinstall -y \"Development Tools\" && sudo dnf install -y curl git clang llvm-devel wget screen htop"
+                return 1
+            fi
+            
+            # 更新系统
+            sudo dnf update -y
+            
+            # 安装开发工具组
+            if ! sudo dnf groupinstall -y "Development Tools"; then
+                print_message "$YELLOW" "Development Tools组安装失败，尝试单独安装..."
+                if ! sudo dnf install -y gcc gcc-c++ make; then
+                    print_message "$RED" "核心编译工具安装失败"
+                    return 1
+                fi
+            fi
+            
+            # 安装其他必要工具
+            sudo dnf install -y curl git clang llvm-devel wget screen htop
+            ;;
+            
+        *)
+            print_message "$RED" "不支持的系统类型: $distro"
+            print_message "$YELLOW" "请手动安装以下工具: gcc, g++, make, clang, curl, git"
+            return 1
+            ;;
+    esac
+    
+    # 验证关键命令是否安装成功
+    local missing_commands=()
+    for cmd in gcc g++ make clang curl git; do
+        if ! check_command "$cmd"; then
+            missing_commands+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing_commands[@]} -gt 0 ]; then
+        print_message "$RED" "以下命令仍然缺失: ${missing_commands[*]}"
         return 1
     fi
     
     print_message "$GREEN" "系统依赖安装完成"
+    log_message "系统依赖安装完成"
+    return 0
 }
 
 # 安装Rust工具链
 install_rust() {
-    print_message "$CYAN" "正在安装Rust工具链..."
+    print_message "$CYAN" "正在检查Rust安装状态..."
     
-    if check_command "rustc"; then
-        print_message "$YELLOW" "Rust已安装，版本: $(rustc --version)"
+    if check_command "rustc" && check_command "cargo"; then
+        local rust_version=$(rustc --version 2>/dev/null)
+        print_message "$YELLOW" "Rust已安装: $rust_version"
+        export PATH="$HOME/.cargo/bin:$PATH"
+        return 0
     else
+        print_message "$CYAN" "正在安装Rust工具链..."
+        
+        # 下载并安装rustup
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        
+        if [ $? -ne 0 ]; then
+            print_message "$RED" "Rust安装失败"
+            return 1
+        fi
+        
+        # 设置环境变量
         source "$HOME/.cargo/env"
+        export PATH="$HOME/.cargo/bin:$PATH"
+        
         print_message "$GREEN" "Rust安装完成"
+        log_message "Rust工具链安装完成"
     fi
-    
-    # 确保PATH包含cargo
-    export PATH="$HOME/.cargo/bin:$PATH"
 }
 
 # 主安装函数
 install_nockchain() {
-    print_message "$GREEN" ">>> 开始安装Nockchain节点（从源码编译）..."
-    log_message "开始Nockchain安装"
+    print_message "$GREEN" ">>> 开始安装Nockchain节点（包含依赖修复）..."
+    log_message "开始Nockchain完整安装"
     
     # 检查系统要求
-    print_message "$CYAN" "检查系统要求..."
-    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
-    local cpu_cores=$(nproc)
-    local available_space=$(df -m ~ | awk 'NR==2{print $4}')
+    print_message "$CYAN" "检查系统配置..."
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
+    local cpu_cores=$(nproc 2>/dev/null || echo "1")
+    local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
     
-    print_message "$YELLOW" "系统配置："
+    print_message "$YELLOW" "系统配置检查："
     print_message "$YELLOW" "- 内存: ${total_ram}MB"
     print_message "$YELLOW" "- CPU核心: ${cpu_cores}"
     print_message "$YELLOW" "- 可用空间: ${available_space}MB"
     
-    if [ "$total_ram" -lt 8192 ]; then
-        print_message "$RED" "警告：推荐内存至少8GB，当前仅${total_ram}MB"
+    if [ "$total_ram" -lt 4096 ] && [ "$total_ram" -gt 0 ]; then
+        print_message "$YELLOW" "警告：推荐内存至少4GB，当前仅${total_ram}MB"
         read -p "是否继续安装？(y/N): " continue_install
         if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
             return 1
         fi
     fi
     
-    # 安装依赖
-    install_dependencies || {
-        print_message "$RED" "依赖安装失败"
+    # 步骤1：安装系统依赖
+    print_message "$MAGENTA" "步骤 1/5: 安装系统依赖..."
+    if ! install_system_dependencies; then
+        print_message "$RED" "系统依赖安装失败，请检查错误信息"
         return 1
-    }
-    
-    # 安装Rust
-    install_rust || {
-        print_message "$RED" "Rust安装失败"
-        return 1
-    }
-    
-    # 克隆仓库
-    print_message "$CYAN" "正在克隆Nockchain仓库..."
-    if [ -d "$NOCKCHAIN_DIR" ]; then
-        print_message "$YELLOW" "发现现有安装，正在更新..."
-        cd "$NOCKCHAIN_DIR"
-        git pull origin main
-    else
-        git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR" || {
-            print_message "$RED" "仓库克隆失败，请检查网络连接"
-            return 1
-        }
-        cd "$NOCKCHAIN_DIR"
     fi
     
+    # 步骤2：安装Rust
+    print_message "$MAGENTA" "步骤 2/5: 安装Rust工具链..."
+    if ! install_rust; then
+        print_message "$RED" "Rust安装失败"
+        return 1
+    fi
+    
+    # 步骤3：克隆仓库
+    print_message "$MAGENTA" "步骤 3/5: 克隆Nockchain仓库..."
+    if [ -d "$NOCKCHAIN_DIR" ]; then
+        print_message "$YELLOW" "发现现有安装目录，正在更新..."
+        cd "$NOCKCHAIN_DIR"
+        if ! git pull origin main; then
+            print_message "$YELLOW" "Git更新失败，尝试重新克隆..."
+            cd "$HOME"
+            rm -rf "$NOCKCHAIN_DIR"
+            if ! git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR"; then
+                print_message "$RED" "仓库克隆失败，请检查网络连接"
+                return 1
+            fi
+        fi
+    else
+        if ! git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR"; then
+            print_message "$RED" "仓库克隆失败，请检查网络连接"
+            return 1
+        fi
+    fi
+    
+    cd "$NOCKCHAIN_DIR"
+    
+    # 步骤4：配置环境
+    print_message "$MAGENTA" "步骤 4/5: 配置编译环境..."
+    
     # 复制环境配置文件
-    print_message "$CYAN" "配置环境文件..."
-    cp .env_example .env
+    if [ -f ".env_example" ]; then
+        cp .env_example .env
+    elif [ ! -f ".env" ]; then
+        print_message "$YELLOW" "创建默认.env配置文件..."
+        cat > .env << 'EOF'
+MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000
+NETWORK=mainnet
+MAX_PEERS=4000
+LOG_LEVEL=info
+RUST_LOG=info
+RUST_MIN_STACK=8388608
+EOF
+    fi
     
-    # 设置环境变量
+    # 设置编译环境变量
     export RUST_MIN_STACK=8388608
+    export RUST_LOG=info
     export PATH="$HOME/.cargo/bin:$PATH"
+    export CC=clang
+    export CXX=clang++
     
-    # 编译安装hoonc编译器
+    # 验证make命令
+    if ! check_command "make"; then
+        print_message "$RED" "make命令仍然不可用，依赖安装可能失败"
+        return 1
+    fi
+    
+    print_message "$GREEN" "make命令验证通过: $(make --version | head -1)"
+    
+    # 步骤5：编译项目
+    print_message "$MAGENTA" "步骤 5/5: 编译Nockchain项目..."
+    print_message "$YELLOW" "注意：编译过程可能需要15-30分钟，请耐心等待..."
+    
+    # 创建编译日志文件
+    local build_log="$NOCKCHAIN_DIR/build.log"
+    
+    # 安装hoonc编译器
     print_message "$CYAN" "正在安装hoonc编译器..."
-    make install-hoonc || {
+    if ! make install-hoonc 2>&1 | tee -a "$build_log"; then
         print_message "$RED" "hoonc编译器安装失败"
+        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
-    }
+    fi
     
-    # 构建项目
-    print_message "$CYAN" "正在构建Nockchain项目（此过程可能需要15-30分钟）..."
-    make build || {
+    # 构建主项目
+    print_message "$CYAN" "正在构建Nockchain主项目..."
+    if ! make build 2>&1 | tee -a "$build_log"; then
         print_message "$RED" "项目构建失败"
+        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
-    }
+    fi
     
     # 安装钱包
     print_message "$CYAN" "正在安装Nockchain钱包..."
-    make install-nockchain-wallet || {
+    if ! make install-nockchain-wallet 2>&1 | tee -a "$build_log"; then
         print_message "$RED" "钱包安装失败"
+        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
-    }
+    fi
     
     # 安装主程序
     print_message "$CYAN" "正在安装Nockchain主程序..."
-    make install-nockchain || {
+    if ! make install-nockchain 2>&1 | tee -a "$build_log"; then
         print_message "$RED" "主程序安装失败"
+        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
-    }
+    fi
     
-    # 生成钱包密钥
+    # 生成钱包
     print_message "$CYAN" "正在生成钱包密钥..."
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 创建钱包生成脚本
-    cat > generate_wallet.sh << 'EOF'
-#!/bin/bash
-export PATH="$HOME/.cargo/bin:$PATH"
-cd "$HOME/nockchain"
-nockchain-wallet keygen
-EOF
-    chmod +x generate_wallet.sh
-    
-    # 执行钱包生成
-    ./generate_wallet.sh > wallet_output.txt 2>&1
-    
-    if [ $? -eq 0 ]; then
-        print_message "$GREEN" "钱包生成成功！"
-        print_message "$YELLOW" "钱包信息："
-        cat wallet_output.txt
+    if check_command "nockchain-wallet"; then
+        # 生成钱包并捕获输出
+        local wallet_output
+        wallet_output=$(nockchain-wallet keygen 2>&1)
         
-        # 提取公钥并更新.env文件
-        local pubkey=$(grep -E "Public key:" wallet_output.txt | awk '{print $3}' | head -1)
-        if [ -n "$pubkey" ]; then
-            sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$pubkey/" .env
-            print_message "$GREEN" "公钥已自动配置到.env文件"
+        if [ $? -eq 0 ]; then
+            print_message "$GREEN" "钱包生成成功！"
+            print_message "$YELLOW" "钱包信息："
+            echo "$wallet_output"
+            
+            # 提取公钥并更新.env文件
+            local pubkey=$(echo "$wallet_output" | grep -E "Public key:|公钥:" | awk '{print $NF}' | head -1)
+            if [ -n "$pubkey" ] && [ "$pubkey" != "0000000000000000000000000000000000000000000000000000000000000000" ]; then
+                sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$pubkey/" .env
+                print_message "$GREEN" "公钥已自动配置: $pubkey"
+            fi
+            
+            # 备份钱包信息
+            mkdir -p "$BACKUP_DIR"
+            echo "$wallet_output" > "$BACKUP_DIR/wallet_$(date +%Y%m%d_%H%M%S).txt"
+            print_message "$GREEN" "钱包信息已备份到: $BACKUP_DIR/"
+        else
+            print_message "$YELLOW" "钱包生成可能失败，请手动生成"
+            echo "$wallet_output"
         fi
-        
-        # 备份钱包信息
-        mkdir -p "$HOME/nockchain_backup"
-        cp wallet_output.txt "$HOME/nockchain_backup/wallet_$(date +%Y%m%d_%H%M%S).txt"
-        print_message "$GREEN" "钱包信息已备份到 $HOME/nockchain_backup/"
     else
-        print_message "$RED" "钱包生成失败，请查看错误信息"
-        cat wallet_output.txt
+        print_message "$YELLOW" "nockchain-wallet命令不可用，请检查安装"
     fi
     
-    # 清理临时文件
-    rm -f generate_wallet.sh wallet_output.txt
-    
-    print_message "$GREEN" "Nockchain安装完成！"
+    print_message "$GREEN" "🎉 Nockchain安装完成！"
     print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "请妥善保存钱包信息，并记录助记词和私钥"
+    print_message "$YELLOW" "配置文件: $NOCKCHAIN_DIR/.env"
+    print_message "$YELLOW" "构建日志: $build_log"
+    print_message "$YELLOW" "备份目录: $BACKUP_DIR"
+    print_message "$CYAN" "请妥善保存钱包信息，包括助记词和私钥！"
     
-    log_message "Nockchain安装完成"
+    log_message "Nockchain完整安装成功"
 }
 
 # 配置挖矿公钥
@@ -259,16 +424,27 @@ configure_mining_key() {
     fi
     
     print_message "$YELLOW" "当前配置的公钥："
-    grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2
+    local current_key=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
+    print_message "$CYAN" "$current_key"
     
     echo
     read -p "请输入新的挖矿公钥（128位十六进制或Base58格式）: " new_pubkey
     
+    if [ -z "$new_pubkey" ]; then
+        print_message "$YELLOW" "输入为空，取消操作"
+        return 0
+    fi
+    
     if validate_pubkey "$new_pubkey"; then
         cd "$NOCKCHAIN_DIR"
+        # 备份原配置
+        cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
+        
+        # 更新公钥
         sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" .env
         print_message "$GREEN" "挖矿公钥更新成功！"
-        log_message "挖矿公钥已更新"
+        print_message "$YELLOW" "原配置已备份"
+        log_message "挖矿公钥已更新为: $new_pubkey"
     else
         print_message "$RED" "公钥格式验证失败"
         return 1
@@ -289,12 +465,28 @@ start_mining() {
     # 检查是否已在运行
     if screen -list | grep -q "nockchain"; then
         print_message "$YELLOW" "检测到已有挖矿进程在运行"
+        print_message "$CYAN" "进程信息:"
+        screen -list | grep nockchain
         read -p "是否重启挖矿节点？(y/N): " restart_choice
         if [[ "$restart_choice" =~ ^[Yy]$ ]]; then
             screen -S nockchain -X quit 2>/dev/null
+            sleep 2
             print_message "$YELLOW" "已停止现有挖矿进程"
         else
             return 0
+        fi
+    fi
+    
+    # 检查公钥配置
+    local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
+    if [ -z "$pubkey" ] || [ "$pubkey" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
+        print_message "$RED" "警告：未配置有效的挖矿公钥"
+        read -p "是否现在配置公钥？(Y/n): " config_key
+        if [[ ! "$config_key" =~ ^[Nn]$ ]]; then
+            configure_mining_key
+            if [ $? -ne 0 ]; then
+                return 1
+            fi
         fi
     fi
     
@@ -304,7 +496,12 @@ start_mining() {
     export PATH="$HOME/.cargo/bin:$PATH"
     
     # 清理旧的socket文件
-    rm -f nockchain.sock
+    rm -f *.sock
+    
+    # 创建日志目录
+    mkdir -p logs
+    
+    print_message "$CYAN" "正在启动挖矿节点，请稍候..."
     
     # 在screen会话中启动挖矿
     screen -dmS nockchain bash -c "
@@ -313,21 +510,26 @@ start_mining() {
         export RUST_LOG=info
         export PATH='$HOME/.cargo/bin:$PATH'
         source .env
-        echo '启动时间: $(date)' > mining.log
-        make run-nockchain 2>&1 | tee -a mining.log
+        echo '=== Nockchain 挖矿启动日志 ===' > logs/mining.log
+        echo '启动时间: $(date)' >> logs/mining.log
+        echo '公钥: $MINING_PUBKEY' >> logs/mining.log
+        echo '==============================' >> logs/mining.log
+        make run-nockchain 2>&1 | tee -a logs/mining.log
     "
     
-    sleep 3
+    sleep 5
     
     if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "挖矿节点启动成功！"
-        print_message "$YELLOW" "使用以下命令管理挖矿进程："
-        print_message "$YELLOW" "- 查看挖矿状态: screen -r nockchain"
-        print_message "$YELLOW" "- 退出查看模式: Ctrl+A, 然后按D"
-        print_message "$YELLOW" "- 停止挖矿: screen -S nockchain -X quit"
+        print_message "$GREEN" "🚀 挖矿节点启动成功！"
+        print_message "$YELLOW" "管理命令："
+        print_message "$CYAN" "- 查看挖矿状态: screen -r nockchain"
+        print_message "$CYAN" "- 退出查看模式: Ctrl+A, 然后按D"
+        print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
+        print_message "$CYAN" "- 查看日志: tail -f $NOCKCHAIN_DIR/logs/mining.log"
         log_message "挖矿节点启动成功"
     else
-        print_message "$RED" "挖矿节点启动失败，请查看日志"
+        print_message "$RED" "挖矿节点启动失败"
+        print_message "$YELLOW" "请检查日志文件: $NOCKCHAIN_DIR/logs/mining.log"
         return 1
     fi
 }
@@ -336,14 +538,32 @@ start_mining() {
 view_logs() {
     print_message "$GREEN" ">>> 显示挖矿日志（按Ctrl+C退出）"
     
-    if [ -f "$NOCKCHAIN_DIR/mining.log" ]; then
-        tail -f "$NOCKCHAIN_DIR/mining.log"
+    local log_files=(
+        "$NOCKCHAIN_DIR/logs/mining.log"
+        "$NOCKCHAIN_DIR/mining.log"
+        "$NOCKCHAIN_DIR/nockchain.log"
+    )
+    
+    local active_log=""
+    for log_file in "${log_files[@]}"; do
+        if [ -f "$log_file" ]; then
+            active_log="$log_file"
+            break
+        fi
+    done
+    
+    if [ -n "$active_log" ]; then
+        print_message "$CYAN" "正在显示日志文件: $active_log"
+        echo
+        tail -f "$active_log"
     else
         print_message "$YELLOW" "未找到日志文件，尝试连接到screen会话..."
         if screen -list | grep -q "nockchain"; then
+            print_message "$CYAN" "连接到挖矿进程..."
             screen -r nockchain
         else
             print_message "$RED" "未找到运行中的挖矿进程"
+            print_message "$YELLOW" "请先启动挖矿节点"
         fi
     fi
 }
@@ -368,16 +588,40 @@ check_balance() {
         return 1
     fi
     
-    print_message "$CYAN" "正在查询余额，公钥: $pubkey"
+    print_message "$CYAN" "正在查询余额..."
+    print_message "$YELLOW" "公钥: $pubkey"
     
-    # 检查socket文件是否存在
-    if [ -f "nockchain.sock" ]; then
-        nockchain-wallet --nockchain-socket ./nockchain.sock list-notes-by-pubkey -p "$pubkey" 2>/dev/null || {
-            print_message "$YELLOW" "无法连接到节点，请确保挖矿节点正在运行"
-        }
-    else
-        print_message "$YELLOW" "节点未运行，无法查询余额"
-        print_message "$YELLOW" "请先启动挖矿节点"
+    # 检查钱包命令
+    if ! check_command "nockchain-wallet"; then
+        print_message "$RED" "nockchain-wallet命令不可用"
+        return 1
+    fi
+    
+    # 尝试不同的socket文件
+    local socket_files=(
+        "./nockchain.sock"
+        "./nockchain-leader.sock"
+        "./nockchain-follower.sock"
+    )
+    
+    local balance_found=false
+    for socket_file in "${socket_files[@]}"; do
+        if [ -S "$socket_file" ]; then
+            print_message "$CYAN" "尝试连接socket: $socket_file"
+            if nockchain-wallet --nockchain-socket "$socket_file" list-notes-by-pubkey -p "$pubkey" 2>/dev/null; then
+                balance_found=true
+                break
+            fi
+        fi
+    done
+    
+    if [ "$balance_found" = false ]; then
+        print_message "$YELLOW" "无法连接到节点查询余额"
+        print_message "$YELLOW" "可能的原因："
+        print_message "$YELLOW" "1. 挖矿节点未运行"
+        print_message "$YELLOW" "2. 节点正在同步中"
+        print_message "$YELLOW" "3. Socket文件不存在"
+        print_message "$CYAN" "请确保挖矿节点正在运行后再试"
     fi
 }
 
@@ -386,36 +630,58 @@ system_monitor() {
     print_message "$BLUE" "====== 系统状态监控 ======"
     
     # CPU使用率
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    print_message "$YELLOW" "CPU使用率: ${cpu_usage}%"
+    if check_command "top"; then
+        local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 2>/dev/null || echo "N/A")
+        print_message "$YELLOW" "CPU使用率: ${cpu_usage}%"
+    fi
     
     # 内存使用
-    local mem_used=$(free -m | awk '/^Mem:/{print $3}')
-    local mem_total=$(free -m | awk '/^Mem:/{print $2}')
-    local mem_percent=$((mem_used * 100 / mem_total))
-    print_message "$YELLOW" "内存使用: ${mem_used}MB / ${mem_total}MB (${mem_percent}%)"
+    if check_command "free"; then
+        local mem_used=$(free -m | awk '/^Mem:/{print $3}' 2>/dev/null || echo "0")
+        local mem_total=$(free -m | awk '/^Mem:/{print $2}' 2>/dev/null || echo "0")
+        if [ "$mem_total" -gt 0 ]; then
+            local mem_percent=$((mem_used * 100 / mem_total))
+            print_message "$YELLOW" "内存使用: ${mem_used}MB / ${mem_total}MB (${mem_percent}%)"
+        fi
+    fi
     
     # 磁盘空间
-    local disk_info=$(df -h ~ | awk 'NR==2{print $4" 可用，使用率 "$5}')
+    local disk_info=$(df -h ~ 2>/dev/null | awk 'NR==2{print $4" 可用，使用率 "$5}' || echo "N/A")
     print_message "$YELLOW" "磁盘空间: $disk_info"
     
     # 网络连接
-    local network_connections=$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l)
-    print_message "$YELLOW" "网络连接数: $network_connections"
+    if check_command "netstat"; then
+        local network_connections=$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l || echo "N/A")
+        print_message "$YELLOW" "网络连接数: $network_connections"
+    fi
     
     # 挖矿进程状态
-    if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "挖矿状态: 正在运行"
+    if screen -list 2>/dev/null | grep -q "nockchain"; then
+        print_message "$GREEN" "挖矿状态: ✅ 正在运行"
         
         # 显示最近的挖矿日志
-        if [ -f "$NOCKCHAIN_DIR/mining.log" ]; then
-            print_message "$CYAN" "最近的挖矿日志："
-            tail -n 5 "$NOCKCHAIN_DIR/mining.log" | while read -r line; do
-                print_message "$YELLOW" "  $line"
-            done
-        fi
+        local log_files=(
+            "$NOCKCHAIN_DIR/logs/mining.log"
+            "$NOCKCHAIN_DIR/mining.log"
+        )
+        
+        for log_file in "${log_files[@]}"; do
+            if [ -f "$log_file" ]; then
+                print_message "$CYAN" "最近的挖矿日志 ($log_file)："
+                tail -n 3 "$log_file" 2>/dev/null | while read -r line; do
+                    print_message "$YELLOW" "  $line"
+                done
+                break
+            fi
+        done
     else
-        print_message "$RED" "挖矿状态: 未运行"
+        print_message "$RED" "挖矿状态: ❌ 未运行"
+    fi
+    
+    # 系统负载
+    if [ -f "/proc/loadavg" ]; then
+        local load_avg=$(cat /proc/loadavg | cut -d' ' -f1-3)
+        print_message "$YELLOW" "系统负载: $load_avg"
     fi
     
     echo
@@ -433,37 +699,138 @@ backup_wallet() {
     cd "$NOCKCHAIN_DIR"
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    local backup_dir="$HOME/nockchain_backup"
-    local backup_file="$backup_dir/keys_backup_$(date +%Y%m%d_%H%M%S).export"
+    local backup_file="$BACKUP_DIR/keys_backup_$(date +%Y%m%d_%H%M%S).export"
     
-    mkdir -p "$backup_dir"
+    mkdir -p "$BACKUP_DIR"
     
-    print_message "$CYAN" "正在导出钱包密钥..."
-    if nockchain-wallet export-keys --output "$backup_file" 2>/dev/null; then
-        print_message "$GREEN" "钱包密钥备份成功！"
-        print_message "$YELLOW" "备份文件: $backup_file"
-        print_message "$YELLOW" "请妥善保存此文件，它包含您的私钥信息"
-        
-        # 同时备份.env文件
-        cp .env "$backup_dir/.env_$(date +%Y%m%d_%H%M%S).backup"
-        print_message "$GREEN" "配置文件也已备份"
-        
-        log_message "钱包密钥已备份到 $backup_file"
-    else
-        print_message "$RED" "钱包密钥备份失败"
+    print_message "$CYAN" "正在备份钱包密钥..."
+    
+    # 尝试导出钱包密钥
+    if check_command "nockchain-wallet"; then
+        if nockchain-wallet export-keys --output "$backup_file" 2>/dev/null; then
+            print_message "$GREEN" "钱包密钥备份成功！"
+            print_message "$YELLOW" "备份文件: $backup_file"
+        else
+            print_message "$YELLOW" "使用备用方法进行备份..."
+        fi
+    fi
+    
+    # 备份配置文件和相关信息
+    local config_backup="$BACKUP_DIR/config_$(date +%Y%m%d_%H%M%S).backup"
+    
+    echo "# Nockchain 配置备份 - $(date)" > "$config_backup"
+    echo "# ======================" >> "$config_backup"
+    echo "" >> "$config_backup"
+    
+    if [ -f ".env" ]; then
+        echo "## .env 配置文件" >> "$config_backup"
+        cat .env >> "$config_backup"
+        echo "" >> "$config_backup"
+    fi
+    
+    # 备份已有的钱包信息文件
+    for wallet_file in "$BACKUP_DIR"/wallet_*.txt; do
+        if [ -f "$wallet_file" ]; then
+            echo "## 钱包信息文件: $(basename "$wallet_file")" >> "$config_backup"
+            cat "$wallet_file" >> "$config_backup"
+            echo "" >> "$config_backup"
+            break
+        fi
+    done
+    
+    print_message "$GREEN" "配置信息备份完成！"
+    print_message "$YELLOW" "配置备份文件: $config_backup"
+    print_message "$CYAN" "请妥善保存备份文件，它们包含重要的钱包信息"
+    
+    # 显示备份目录内容
+    print_message "$YELLOW" "备份目录内容:"
+    ls -la "$BACKUP_DIR" 2>/dev/null || print_message "$RED" "无法列出备份目录"
+    
+    log_message "钱包和配置已备份到 $BACKUP_DIR"
+}
+
+# 修复系统依赖
+fix_dependencies() {
+    print_message "$GREEN" ">>> 修复系统依赖"
+    
+    print_message "$CYAN" "正在检查系统依赖状态..."
+    
+    # 检查关键命令
+    local missing_commands=()
+    local commands_to_check=("gcc" "g++" "make" "clang" "curl" "git" "rustc" "cargo")
+    
+    for cmd in "${commands_to_check[@]}"; do
+        if check_command "$cmd"; then
+            print_message "$GREEN" "✅ $cmd: $(which $cmd)"
+        else
+            print_message "$RED" "❌ $cmd: 未找到"
+            missing_commands+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing_commands[@]} -eq 0 ]; then
+        print_message "$GREEN" "所有依赖都已正确安装！"
+        return 0
+    fi
+    
+    print_message "$YELLOW" "发现缺失的命令: ${missing_commands[*]}"
+    read -p "是否立即修复这些依赖？(Y/n): " fix_choice
+    
+    if [[ "$fix_choice" =~ ^[Nn]$ ]]; then
+        return 0
+    fi
+    
+    # 重新安装系统依赖
+    if ! install_system_dependencies; then
+        print_message "$RED" "依赖修复失败"
         return 1
+    fi
+    
+    # 如果Rust相关命令缺失，重新安装Rust
+    if [[ " ${missing_commands[*]} " =~ " rustc " ]] || [[ " ${missing_commands[*]} " =~ " cargo " ]]; then
+        print_message "$CYAN" "正在修复Rust安装..."
+        if ! install_rust; then
+            print_message "$RED" "Rust修复失败"
+            return 1
+        fi
+    fi
+    
+    print_message "$GREEN" "依赖修复完成！"
+    
+    # 再次检查
+    print_message "$CYAN" "验证修复结果..."
+    local still_missing=()
+    for cmd in "${missing_commands[@]}"; do
+        if ! check_command "$cmd"; then
+            still_missing+=("$cmd")
+        fi
+    done
+    
+    if [ ${#still_missing[@]} -eq 0 ]; then
+        print_message "$GREEN" "🎉 所有依赖修复成功！"
+    else
+        print_message "$YELLOW" "以下命令仍然缺失: ${still_missing[*]}"
+        print_message "$YELLOW" "可能需要手动安装或系统重启"
     fi
 }
 
 # 主循环
 main() {
-    # 创建日志文件
+    # 检查是否以root用户运行
+    if [ "$EUID" -eq 0 ]; then
+        print_message "$RED" "请不要以root用户运行此脚本"
+        print_message "$YELLOW" "建议使用普通用户账户运行"
+        exit 1
+    fi
+    
+    # 创建必要目录和日志文件
+    mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
-    log_message "脚本启动"
+    log_message "脚本启动 - 修复版 v3.1"
     
     while true; do
         show_menu
-        read -p "请输入选项编号（1-8）: " choice
+        read -p "请输入选项编号（1-9）: " choice
         
         case $choice in
             1)
@@ -488,12 +855,15 @@ main() {
                 backup_wallet
                 ;;
             8)
+                fix_dependencies
+                ;;
+            9)
                 print_message "$GREEN" "感谢使用Nockchain优化脚本，再见！"
                 log_message "脚本正常退出"
                 exit 0
                 ;;
             *)
-                print_message "$RED" "无效选项，请输入1-8之间的数字"
+                print_message "$RED" "无效选项，请输入1-9之间的数字"
                 ;;
         esac
         
@@ -501,13 +871,6 @@ main() {
         read -p "按回车键继续..." -r
     done
 }
-
-# 检查是否以root用户运行
-if [ "$EUID" -eq 0 ]; then
-    print_message "$RED" "请不要以root用户运行此脚本"
-    print_message "$YELLOW" "建议使用普通用户账户运行"
-    exit 1
-fi
 
 # 启动主程序
 main
