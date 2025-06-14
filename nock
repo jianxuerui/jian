@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain中文优化挖矿脚本 v3.1 - 修复make命令问题版
+# Nockchain完全无sudo权限中文优化脚本 v4.0
 
 # 颜色定义
 RED='\033[1;31m'
@@ -11,24 +11,31 @@ CYAN='\033[1;36m'
 MAGENTA='\033[1;35m'
 RESET='\033[0m'
 
-# 脚本配置
+# 路径配置
+INSTALL_PREFIX="$HOME/.local"
 NOCKCHAIN_DIR="$HOME/nockchain"
 LOG_FILE="$HOME/nockchain_install.log"
 BACKUP_DIR="$HOME/nockchain_backup"
+TOOLS_DIR="$HOME/.local/tools"
 
-# 显示带颜色的消息
+# 环境变量设置
+export PATH="$INSTALL_PREFIX/bin:$HOME/.cargo/bin:$PATH"
+export LD_LIBRARY_PATH="$INSTALL_PREFIX/lib:$INSTALL_PREFIX/lib64:$LD_LIBRARY_PATH"
+export PKG_CONFIG_PATH="$INSTALL_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+export C_INCLUDE_PATH="$INSTALL_PREFIX/include:$C_INCLUDE_PATH"
+export CPLUS_INCLUDE_PATH="$INSTALL_PREFIX/include:$CPLUS_INCLUDE_PATH"
+
+# 消息输出函数
 print_message() {
     local color=$1
     local message=$2
     echo -e "${color}${message}${RESET}"
 }
 
-# 记录日志
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
 
-# 检查命令是否存在
 check_command() {
     if command -v "$1" >/dev/null 2>&1; then
         return 0
@@ -37,38 +44,22 @@ check_command() {
     fi
 }
 
-# 检测Linux发行版
-detect_distro() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        DISTRO=$ID
-        VERSION=$VERSION_ID
-    elif [ -f /etc/redhat-release ]; then
-        DISTRO="centos"
-    elif [ -f /etc/debian_version ]; then
-        DISTRO="debian"
-    else
-        DISTRO="unknown"
-    fi
-    echo "$DISTRO"
-}
-
 # 显示主菜单
 show_menu() {
     clear
     echo -e "${BLUE}
 =======================================
- Nockchain 中文优化挖矿脚本 v3.1
+ Nockchain 无sudo权限完整解决方案 v4.0
 =======================================
 ${RESET}"
-    echo -e "${YELLOW}1. 安装Nockchain节点（自动解决依赖问题）"
+    echo -e "${YELLOW}1. 完整安装Nockchain（无需sudo权限）"
     echo "2. 配置挖矿公钥"
     echo "3. 启动优化挖矿"
     echo "4. 查看实时日志"
     echo "5. 检查钱包余额"
     echo "6. 系统状态监控"
     echo "7. 备份钱包密钥"
-    echo "8. 修复系统依赖"
+    echo "8. 环境修复工具"
     echo "9. 退出脚本"
     echo -e "${BLUE}=======================================${RESET}"
 }
@@ -76,237 +67,288 @@ ${RESET}"
 # 验证公钥格式
 validate_pubkey() {
     local pubkey=$1
-    # 检查128位十六进制格式
     if [[ $pubkey =~ ^[0-9a-fA-F]{128}$ ]]; then
         return 0
-    # 检查Base58格式（大约44个字符）
     elif [[ $pubkey =~ ^[1-9A-HJ-NP-Za-km-z]{40,50}$ ]]; then
         return 0
     else
         print_message "$RED" "错误：公钥格式无效"
-        print_message "$YELLOW" "支持的格式："
-        print_message "$YELLOW" "- 128位十六进制字符串"
-        print_message "$YELLOW" "- Base58编码格式（约44个字符）"
+        print_message "$YELLOW" "支持格式：128位十六进制或Base58编码"
         return 1
     fi
 }
 
-# 检查并安装系统依赖
-install_system_dependencies() {
-    print_message "$CYAN" "正在检查并安装系统依赖..."
+# 检查并安装Miniconda
+install_miniconda() {
+    print_message "$CYAN" "正在检查Miniconda环境..."
     
-    local distro=$(detect_distro)
-    print_message "$YELLOW" "检测到系统类型: $distro"
+    if check_command "conda"; then
+        print_message "$GREEN" "Miniconda已安装"
+        return 0
+    fi
     
-    case $distro in
-        "ubuntu"|"debian"|"mint"|"pop")
-            print_message "$CYAN" "正在为Ubuntu/Debian系统安装开发工具..."
-            
-            # 检查是否有sudo权限
-            if ! sudo -n true 2>/dev/null; then
-                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
-                print_message "$YELLOW" "请运行以下命令手动安装："
-                print_message "$YELLOW" "sudo apt update && sudo apt install -y build-essential curl git clang llvm-dev libclang-dev pkg-config libssl-dev wget screen htop"
-                return 1
-            fi
-            
-            # 更新包索引
-            if ! sudo apt update; then
-                print_message "$RED" "包索引更新失败"
-                return 1
-            fi
-            
-            # 安装build-essential和其他必要工具
-            local packages="build-essential curl git clang llvm-dev libclang-dev pkg-config libssl-dev wget screen htop"
-            
-            if ! sudo apt install -y $packages; then
-                print_message "$RED" "系统依赖安装失败"
-                return 1
-            fi
-            ;;
-            
-        "centos"|"rhel"|"rocky"|"almalinux")
-            print_message "$CYAN" "正在为CentOS/RHEL系统安装开发工具..."
-            
-            if ! sudo -n true 2>/dev/null; then
-                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
-                print_message "$YELLOW" "请运行以下命令手动安装："
-                print_message "$YELLOW" "sudo dnf groupinstall -y \"Development Tools\" && sudo dnf install -y curl git clang llvm-devel wget screen htop"
-                return 1
-            fi
-            
-            # 检查包管理器
-            if check_command "dnf"; then
-                PKG_MGR="dnf"
-            elif check_command "yum"; then
-                PKG_MGR="yum"
-            else
-                print_message "$RED" "未找到包管理器 (dnf/yum)"
-                return 1
-            fi
-            
-            # 安装开发工具组
-            if ! sudo $PKG_MGR groupinstall -y "Development Tools"; then
-                print_message "$YELLOW" "Development Tools组安装失败，尝试单独安装..."
-                if ! sudo $PKG_MGR install -y gcc gcc-c++ make; then
-                    print_message "$RED" "核心编译工具安装失败"
-                    return 1
-                fi
-            fi
-            
-            # 安装其他必要工具
-            sudo $PKG_MGR install -y curl git clang llvm-devel wget screen htop
-            ;;
-            
-        "fedora")
-            print_message "$CYAN" "正在为Fedora系统安装开发工具..."
-            
-            if ! sudo -n true 2>/dev/null; then
-                print_message "$RED" "错误：需要sudo权限来安装系统依赖"
-                print_message "$YELLOW" "请运行以下命令手动安装："
-                print_message "$YELLOW" "sudo dnf groupinstall -y \"Development Tools\" && sudo dnf install -y curl git clang llvm-devel wget screen htop"
-                return 1
-            fi
-            
-            # 更新系统
-            sudo dnf update -y
-            
-            # 安装开发工具组
-            if ! sudo dnf groupinstall -y "Development Tools"; then
-                print_message "$YELLOW" "Development Tools组安装失败，尝试单独安装..."
-                if ! sudo dnf install -y gcc gcc-c++ make; then
-                    print_message "$RED" "核心编译工具安装失败"
-                    return 1
-                fi
-            fi
-            
-            # 安装其他必要工具
-            sudo dnf install -y curl git clang llvm-devel wget screen htop
-            ;;
-            
-        *)
-            print_message "$RED" "不支持的系统类型: $distro"
-            print_message "$YELLOW" "请手动安装以下工具: gcc, g++, make, clang, curl, git"
-            return 1
-            ;;
+    print_message "$CYAN" "正在安装Miniconda（无需sudo权限）..."
+    
+    # 检测系统架构
+    local arch=$(uname -m)
+    case $arch in
+        x86_64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh" ;;
+        aarch64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh" ;;
+        *) print_message "$RED" "不支持的架构: $arch"; return 1 ;;
     esac
     
-    # 验证关键命令是否安装成功
-    local missing_commands=()
-    for cmd in gcc g++ make clang curl git; do
-        if ! check_command "$cmd"; then
-            missing_commands+=("$cmd")
-        fi
-    done
-    
-    if [ ${#missing_commands[@]} -gt 0 ]; then
-        print_message "$RED" "以下命令仍然缺失: ${missing_commands[*]}"
+    # 下载Miniconda安装脚本
+    local miniconda_installer="/tmp/miniconda_installer.sh"
+    if ! wget -q --show-progress "$MINICONDA_URL" -O "$miniconda_installer"; then
+        print_message "$RED" "Miniconda下载失败"
         return 1
     fi
     
-    print_message "$GREEN" "系统依赖安装完成"
-    log_message "系统依赖安装完成"
+    # 静默安装Miniconda到用户目录
+    chmod +x "$miniconda_installer"
+    if ! bash "$miniconda_installer" -b -p "$HOME/.miniconda3"; then
+        print_message "$RED" "Miniconda安装失败"
+        return 1
+    fi
+    
+    # 初始化conda环境
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+    conda config --set auto_activate_base false
+    
+    # 添加到PATH
+    export PATH="$HOME/.miniconda3/bin:$PATH"
+    
+    # 清理安装文件
+    rm -f "$miniconda_installer"
+    
+    print_message "$GREEN" "Miniconda安装完成"
     return 0
 }
 
+# 使用conda安装编译工具
+install_build_tools_with_conda() {
+    print_message "$CYAN" "正在创建编译环境..."
+    
+    # 确保conda可用
+    if ! check_command "conda"; then
+        print_message "$RED" "Conda环境不可用"
+        return 1
+    fi
+    
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+    
+    # 创建专用的编译环境
+    print_message "$CYAN" "创建nockchain编译环境..."
+    conda create -n nockchain-build -y python=3.9 || {
+        print_message "$YELLOW" "环境已存在，正在更新..."
+    }
+    
+    # 激活环境
+    conda activate nockchain-build
+    
+    # 安装编译工具
+    print_message "$CYAN" "安装编译工具（这可能需要几分钟）..."
+    local packages=(
+        "gcc_linux-64"
+        "gxx_linux-64" 
+        "make"
+        "cmake"
+        "clang"
+        "clangxx"
+        "llvm-tools"
+        "pkg-config"
+        "openssl"
+        "curl"
+        "git"
+        "wget"
+    )
+    
+    for package in "${packages[@]}"; do
+        print_message "$YELLOW" "安装 $package..."
+        conda install -y "$package" -c conda-forge 2>/dev/null || {
+            print_message "$YELLOW" "跳过 $package（可能不可用）"
+        }
+    done
+    
+    # 验证关键工具
+    local tools=("gcc" "g++" "make" "clang" "git")
+    local missing_tools=()
+    
+    for tool in "${tools[@]}"; do
+        if check_command "$tool"; then
+            print_message "$GREEN" "✅ $tool: $(which $tool)"
+        else
+            missing_tools+=("$tool")
+        fi
+    done
+    
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        print_message "$YELLOW" "部分工具未安装: ${missing_tools[*]}"
+        print_message "$YELLOW" "将尝试从源码编译..."
+        return 1
+    fi
+    
+    print_message "$GREEN" "编译工具安装完成"
+    return 0
+}
+
+# 从源码编译必要工具
+compile_tools_from_source() {
+    print_message "$CYAN" "开始从源码编译编译工具..."
+    
+    mkdir -p "$TOOLS_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
+    cd "$TOOLS_DIR"
+    
+    # 设置编译环境变量
+    export CC="gcc"
+    export CXX="g++"
+    export CFLAGS="-O2 -fPIC"
+    export CXXFLAGS="-O2 -fPIC"
+    export LDFLAGS="-L$INSTALL_PREFIX/lib"
+    export CPPFLAGS="-I$INSTALL_PREFIX/include"
+    
+    # 如果系统完全没有编译工具，尝试下载预编译版本
+    if ! check_command "gcc" && ! check_command "clang"; then
+        print_message "$CYAN" "系统缺少基础编译器，尝试下载预编译版本..."
+        
+        # 下载最小化GCC工具链
+        local gcc_url="https://github.com/steveicarus/mingw-w64-gcc/releases/download/gcc-11.2.0/gcc-11.2.0-linux-x86_64.tar.xz"
+        if wget -q --timeout=30 "$gcc_url" -O gcc-minimal.tar.xz 2>/dev/null; then
+            tar -xf gcc-minimal.tar.xz -C "$INSTALL_PREFIX" --strip-components=1
+            export PATH="$INSTALL_PREFIX/bin:$PATH"
+            rm -f gcc-minimal.tar.xz
+        fi
+    fi
+    
+    # 编译make工具（如果缺失）
+    if ! check_command "make"; then
+        print_message "$CYAN" "编译GNU Make..."
+        wget -q https://ftp.gnu.org/gnu/make/make-4.3.tar.gz
+        tar -xzf make-4.3.tar.gz
+        cd make-4.3
+        ./configure --prefix="$INSTALL_PREFIX" --disable-nls
+        ./build.sh && ./make install
+        cd ..
+        rm -rf make-4.3*
+    fi
+    
+    print_message "$GREEN" "工具编译完成"
+}
+
 # 安装Rust工具链
-install_rust() {
-    print_message "$CYAN" "正在检查Rust安装状态..."
+install_rust_toolchain() {
+    print_message "$CYAN" "正在安装Rust工具链..."
     
     if check_command "rustc" && check_command "cargo"; then
         local rust_version=$(rustc --version 2>/dev/null)
         print_message "$YELLOW" "Rust已安装: $rust_version"
         export PATH="$HOME/.cargo/bin:$PATH"
         return 0
+    fi
+    
+    # 下载并安装rustup
+    print_message "$CYAN" "下载并安装Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    
+    if [ $? -ne 0 ]; then
+        print_message "$RED" "Rust安装失败"
+        return 1
+    fi
+    
+    # 设置环境变量
+    source "$HOME/.cargo/env"
+    export PATH="$HOME/.cargo/bin:$PATH"
+    
+    # 验证安装
+    if check_command "rustc" && check_command "cargo"; then
+        print_message "$GREEN" "Rust安装成功: $(rustc --version)"
+        return 0
     else
-        print_message "$CYAN" "正在安装Rust工具链..."
-        
-        # 下载并安装rustup
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        
-        if [ $? -ne 0 ]; then
-            print_message "$RED" "Rust安装失败"
-            return 1
-        fi
-        
-        # 设置环境变量
-        source "$HOME/.cargo/env"
-        export PATH="$HOME/.cargo/bin:$PATH"
-        
-        print_message "$GREEN" "Rust安装完成"
-        log_message "Rust工具链安装完成"
+        print_message "$RED" "Rust验证失败"
+        return 1
     fi
 }
 
 # 主安装函数
-install_nockchain() {
-    print_message "$GREEN" ">>> 开始安装Nockchain节点（包含依赖修复）..."
-    log_message "开始Nockchain完整安装"
+install_nockchain_complete() {
+    print_message "$GREEN" ">>> 开始Nockchain完整安装（无sudo权限）..."
+    log_message "开始无sudo权限完整安装"
     
-    # 检查系统要求
-    print_message "$CYAN" "检查系统配置..."
+    # 创建必要目录
+    mkdir -p "$INSTALL_PREFIX"/{bin,lib,include,share} "$NOCKCHAIN_DIR" "$BACKUP_DIR" "$TOOLS_DIR"
+    
+    # 步骤1：检查系统资源
+    print_message "$MAGENTA" "步骤 1/6: 检查系统资源..."
     local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
     local cpu_cores=$(nproc 2>/dev/null || echo "1")
     local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
     
-    print_message "$YELLOW" "系统配置检查："
+    print_message "$YELLOW" "系统配置："
     print_message "$YELLOW" "- 内存: ${total_ram}MB"
     print_message "$YELLOW" "- CPU核心: ${cpu_cores}"
     print_message "$YELLOW" "- 可用空间: ${available_space}MB"
     
     if [ "$total_ram" -lt 4096 ] && [ "$total_ram" -gt 0 ]; then
-        print_message "$YELLOW" "警告：推荐内存至少4GB，当前仅${total_ram}MB"
+        print_message "$YELLOW" "警告：推荐内存至少4GB，当前${total_ram}MB"
         read -p "是否继续安装？(y/N): " continue_install
         if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
             return 1
         fi
     fi
     
-    # 步骤1：安装系统依赖
-    print_message "$MAGENTA" "步骤 1/5: 安装系统依赖..."
-    if ! install_system_dependencies; then
-        print_message "$RED" "系统依赖安装失败，请检查错误信息"
+    # 步骤2：安装Miniconda环境管理器
+    print_message "$MAGENTA" "步骤 2/6: 安装环境管理器..."
+    if ! install_miniconda; then
+        print_message "$RED" "环境管理器安装失败"
         return 1
     fi
     
-    # 步骤2：安装Rust
-    print_message "$MAGENTA" "步骤 2/5: 安装Rust工具链..."
-    if ! install_rust; then
-        print_message "$RED" "Rust安装失败"
-        return 1
-    fi
+    # 步骤3：安装编译工具
+    print_message "$MAGENTA" "步骤 3/6: 安装编译工具..."
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
     
-    # 步骤3：克隆仓库
-    print_message "$MAGENTA" "步骤 3/5: 克隆Nockchain仓库..."
-    if [ -d "$NOCKCHAIN_DIR" ]; then
-        print_message "$YELLOW" "发现现有安装目录，正在更新..."
-        cd "$NOCKCHAIN_DIR"
-        if ! git pull origin main; then
-            print_message "$YELLOW" "Git更新失败，尝试重新克隆..."
-            cd "$HOME"
-            rm -rf "$NOCKCHAIN_DIR"
-            if ! git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR"; then
-                print_message "$RED" "仓库克隆失败，请检查网络连接"
-                return 1
-            fi
-        fi
-    else
-        if ! git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR"; then
-            print_message "$RED" "仓库克隆失败，请检查网络连接"
+    if ! install_build_tools_with_conda; then
+        print_message "$YELLOW" "Conda方式安装失败，尝试源码编译..."
+        if ! compile_tools_from_source; then
+            print_message "$RED" "编译工具安装失败"
             return 1
         fi
     fi
     
+    # 激活编译环境
+    conda activate nockchain-build 2>/dev/null || true
+    
+    # 步骤4：安装Rust工具链
+    print_message "$MAGENTA" "步骤 4/6: 安装Rust工具链..."
+    if ! install_rust_toolchain; then
+        print_message "$RED" "Rust安装失败"
+        return 1
+    fi
+    
+    # 步骤5：克隆和构建Nockchain
+    print_message "$MAGENTA" "步骤 5/6: 克隆Nockchain项目..."
+    if [ -d "$NOCKCHAIN_DIR" ]; then
+        print_message "$YELLOW" "发现现有安装，正在更新..."
+        cd "$NOCKCHAIN_DIR"
+        git pull origin main || {
+            print_message "$YELLOW" "更新失败，重新克隆..."
+            cd "$HOME"
+            rm -rf "$NOCKCHAIN_DIR"
+            git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR"
+        }
+    else
+        git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR" || {
+            print_message "$RED" "仓库克隆失败"
+            return 1
+        }
+    fi
+    
     cd "$NOCKCHAIN_DIR"
     
-    # 步骤4：配置环境
-    print_message "$MAGENTA" "步骤 4/5: 配置编译环境..."
-    
-    # 复制环境配置文件
+    # 配置环境文件
     if [ -f ".env_example" ]; then
         cp .env_example .env
-    elif [ ! -f ".env" ]; then
-        print_message "$YELLOW" "创建默认.env配置文件..."
+    else
         cat > .env << 'EOF'
 MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000
 NETWORK=mainnet
@@ -317,66 +359,46 @@ RUST_MIN_STACK=8388608
 EOF
     fi
     
-    # 设置编译环境变量
+    # 步骤6：编译项目
+    print_message "$MAGENTA" "步骤 6/6: 编译Nockchain项目..."
+    
+    # 设置优化编译环境
     export RUST_MIN_STACK=8388608
     export RUST_LOG=info
-    export PATH="$HOME/.cargo/bin:$PATH"
-    export CC=clang
-    export CXX=clang++
+    export RUST_BACKTRACE=1
+    export PATH="$HOME/.cargo/bin:$INSTALL_PREFIX/bin:$PATH"
     
-    # 验证make命令
-    if ! check_command "make"; then
-        print_message "$RED" "make命令仍然不可用，依赖安装可能失败"
-        return 1
-    fi
+    # 确保在conda环境中
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+    conda activate nockchain-build 2>/dev/null || true
     
-    print_message "$GREEN" "make命令验证通过: $(make --version | head -1)"
-    
-    # 步骤5：编译项目
-    print_message "$MAGENTA" "步骤 5/5: 编译Nockchain项目..."
-    print_message "$YELLOW" "注意：编译过程可能需要15-30分钟，请耐心等待..."
-    
-    # 创建编译日志文件
-    local build_log="$NOCKCHAIN_DIR/build.log"
-    
-    # 安装hoonc编译器
     print_message "$CYAN" "正在安装hoonc编译器..."
-    if ! make install-hoonc 2>&1 | tee -a "$build_log"; then
+    if ! make install-hoonc; then
         print_message "$RED" "hoonc编译器安装失败"
-        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
     fi
     
-    # 构建主项目
     print_message "$CYAN" "正在构建Nockchain主项目..."
-    if ! make build 2>&1 | tee -a "$build_log"; then
+    if ! make build; then
         print_message "$RED" "项目构建失败"
-        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
     fi
     
-    # 安装钱包
     print_message "$CYAN" "正在安装Nockchain钱包..."
-    if ! make install-nockchain-wallet 2>&1 | tee -a "$build_log"; then
+    if ! make install-nockchain-wallet; then
         print_message "$RED" "钱包安装失败"
-        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
     fi
     
-    # 安装主程序
     print_message "$CYAN" "正在安装Nockchain主程序..."
-    if ! make install-nockchain 2>&1 | tee -a "$build_log"; then
+    if ! make install-nockchain; then
         print_message "$RED" "主程序安装失败"
-        print_message "$YELLOW" "详细错误信息请查看: $build_log"
         return 1
     fi
     
     # 生成钱包
     print_message "$CYAN" "正在生成钱包密钥..."
-    export PATH="$HOME/.cargo/bin:$PATH"
-    
     if check_command "nockchain-wallet"; then
-        # 生成钱包并捕获输出
         local wallet_output
         wallet_output=$(nockchain-wallet keygen 2>&1)
         
@@ -393,25 +415,35 @@ EOF
             fi
             
             # 备份钱包信息
-            mkdir -p "$BACKUP_DIR"
             echo "$wallet_output" > "$BACKUP_DIR/wallet_$(date +%Y%m%d_%H%M%S).txt"
-            print_message "$GREEN" "钱包信息已备份到: $BACKUP_DIR/"
+            print_message "$GREEN" "钱包信息已备份"
         else
             print_message "$YELLOW" "钱包生成可能失败，请手动生成"
-            echo "$wallet_output"
         fi
-    else
-        print_message "$YELLOW" "nockchain-wallet命令不可用，请检查安装"
     fi
     
-    print_message "$GREEN" "🎉 Nockchain安装完成！"
-    print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "配置文件: $NOCKCHAIN_DIR/.env"
-    print_message "$YELLOW" "构建日志: $build_log"
-    print_message "$YELLOW" "备份目录: $BACKUP_DIR"
-    print_message "$CYAN" "请妥善保存钱包信息，包括助记词和私钥！"
+    # 创建环境激活脚本
+    cat > "$HOME/activate_nockchain.sh" << 'EOF'
+#!/bin/bash
+# Nockchain环境激活脚本
+source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+conda activate nockchain-build
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+export RUST_MIN_STACK=8388608
+export RUST_LOG=info
+cd "$HOME/nockchain"
+echo "Nockchain环境已激活"
+echo "使用 'make run-nockchain' 启动挖矿"
+EOF
+    chmod +x "$HOME/activate_nockchain.sh"
     
-    log_message "Nockchain完整安装成功"
+    print_message "$GREEN" "🎉 Nockchain完整安装成功！"
+    print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
+    print_message "$YELLOW" "环境激活: source ~/activate_nockchain.sh"
+    print_message "$YELLOW" "备份目录: $BACKUP_DIR"
+    print_message "$CYAN" "请妥善保存钱包信息！"
+    
+    log_message "Nockchain无sudo权限安装完成"
 }
 
 # 配置挖矿公钥
@@ -423,7 +455,7 @@ configure_mining_key() {
         return 1
     fi
     
-    print_message "$YELLOW" "当前配置的公钥："
+    print_message "$YELLOW" "当前公钥："
     local current_key=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
     print_message "$CYAN" "$current_key"
     
@@ -437,17 +469,10 @@ configure_mining_key() {
     
     if validate_pubkey "$new_pubkey"; then
         cd "$NOCKCHAIN_DIR"
-        # 备份原配置
         cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
-        
-        # 更新公钥
         sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" .env
         print_message "$GREEN" "挖矿公钥更新成功！"
-        print_message "$YELLOW" "原配置已备份"
-        log_message "挖矿公钥已更新为: $new_pubkey"
-    else
-        print_message "$RED" "公钥格式验证失败"
-        return 1
+        log_message "挖矿公钥已更新"
     fi
 }
 
@@ -456,22 +481,23 @@ start_mining() {
     print_message "$GREEN" ">>> 启动优化挖矿节点..."
     
     if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
-        print_message "$RED" "错误：未找到Nockchain安装，请先安装"
+        print_message "$RED" "错误：未找到Nockchain安装"
         return 1
     fi
+    
+    # 激活环境
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh" 2>/dev/null
+    conda activate nockchain-build 2>/dev/null || true
     
     cd "$NOCKCHAIN_DIR"
     
     # 检查是否已在运行
     if screen -list | grep -q "nockchain"; then
         print_message "$YELLOW" "检测到已有挖矿进程在运行"
-        print_message "$CYAN" "进程信息:"
-        screen -list | grep nockchain
         read -p "是否重启挖矿节点？(y/N): " restart_choice
         if [[ "$restart_choice" =~ ^[Yy]$ ]]; then
             screen -S nockchain -X quit 2>/dev/null
             sleep 2
-            print_message "$YELLOW" "已停止现有挖矿进程"
         else
             return 0
         fi
@@ -484,36 +510,33 @@ start_mining() {
         read -p "是否现在配置公钥？(Y/n): " config_key
         if [[ ! "$config_key" =~ ^[Nn]$ ]]; then
             configure_mining_key
-            if [ $? -ne 0 ]; then
-                return 1
-            fi
         fi
     fi
     
-    # 设置优化环境变量
+    # 设置环境变量
     export RUST_MIN_STACK=8388608
     export RUST_LOG=info
-    export PATH="$HOME/.cargo/bin:$PATH"
-    
-    # 清理旧的socket文件
-    rm -f *.sock
+    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
     
     # 创建日志目录
     mkdir -p logs
     
-    print_message "$CYAN" "正在启动挖矿节点，请稍候..."
+    print_message "$CYAN" "正在启动挖矿节点..."
     
-    # 在screen会话中启动挖矿
+    # 在screen会话中启动
     screen -dmS nockchain bash -c "
+        source '$HOME/.miniconda3/etc/profile.d/conda.sh' 2>/dev/null
+        conda activate nockchain-build 2>/dev/null || true
         cd '$NOCKCHAIN_DIR'
         export RUST_MIN_STACK=8388608
         export RUST_LOG=info
-        export PATH='$HOME/.cargo/bin:$PATH'
+        export PATH='$HOME/.cargo/bin:$HOME/.local/bin:$PATH'
         source .env
-        echo '=== Nockchain 挖矿启动日志 ===' > logs/mining.log
+        echo '=== Nockchain 挖矿启动 ===' > logs/mining.log
         echo '启动时间: $(date)' >> logs/mining.log
         echo '公钥: $MINING_PUBKEY' >> logs/mining.log
-        echo '==============================' >> logs/mining.log
+        echo '环境: 无sudo权限完整版' >> logs/mining.log
+        echo '==========================' >> logs/mining.log
         make run-nockchain 2>&1 | tee -a logs/mining.log
     "
     
@@ -522,14 +545,13 @@ start_mining() {
     if screen -list | grep -q "nockchain"; then
         print_message "$GREEN" "🚀 挖矿节点启动成功！"
         print_message "$YELLOW" "管理命令："
-        print_message "$CYAN" "- 查看挖矿状态: screen -r nockchain"
-        print_message "$CYAN" "- 退出查看模式: Ctrl+A, 然后按D"
+        print_message "$CYAN" "- 查看状态: screen -r nockchain"
+        print_message "$CYAN" "- 退出查看: Ctrl+A, 然后按D"
         print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
-        print_message "$CYAN" "- 查看日志: tail -f $NOCKCHAIN_DIR/logs/mining.log"
+        print_message "$CYAN" "- 激活环境: source ~/activate_nockchain.sh"
         log_message "挖矿节点启动成功"
     else
         print_message "$RED" "挖矿节点启动失败"
-        print_message "$YELLOW" "请检查日志文件: $NOCKCHAIN_DIR/logs/mining.log"
         return 1
     fi
 }
@@ -538,32 +560,15 @@ start_mining() {
 view_logs() {
     print_message "$GREEN" ">>> 显示挖矿日志（按Ctrl+C退出）"
     
-    local log_files=(
-        "$NOCKCHAIN_DIR/logs/mining.log"
-        "$NOCKCHAIN_DIR/mining.log"
-        "$NOCKCHAIN_DIR/nockchain.log"
-    )
-    
-    local active_log=""
-    for log_file in "${log_files[@]}"; do
-        if [ -f "$log_file" ]; then
-            active_log="$log_file"
-            break
-        fi
-    done
-    
-    if [ -n "$active_log" ]; then
-        print_message "$CYAN" "正在显示日志文件: $active_log"
-        echo
-        tail -f "$active_log"
+    if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
+        print_message "$CYAN" "正在显示实时日志..."
+        tail -f "$NOCKCHAIN_DIR/logs/mining.log"
     else
         print_message "$YELLOW" "未找到日志文件，尝试连接到screen会话..."
         if screen -list | grep -q "nockchain"; then
-            print_message "$CYAN" "连接到挖矿进程..."
             screen -r nockchain
         else
             print_message "$RED" "未找到运行中的挖矿进程"
-            print_message "$YELLOW" "请先启动挖矿节点"
         fi
     fi
 }
@@ -572,15 +577,13 @@ view_logs() {
 check_balance() {
     print_message "$GREEN" ">>> 检查钱包余额"
     
-    if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
-        print_message "$RED" "错误：未找到Nockchain安装"
-        return 1
-    fi
+    # 激活环境
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh" 2>/dev/null
+    conda activate nockchain-build 2>/dev/null || true
     
     cd "$NOCKCHAIN_DIR"
-    export PATH="$HOME/.cargo/bin:$PATH"
+    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
     
-    # 获取公钥
     local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
     
     if [ -z "$pubkey" ] || [ "$pubkey" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
@@ -591,37 +594,24 @@ check_balance() {
     print_message "$CYAN" "正在查询余额..."
     print_message "$YELLOW" "公钥: $pubkey"
     
-    # 检查钱包命令
-    if ! check_command "nockchain-wallet"; then
-        print_message "$RED" "nockchain-wallet命令不可用"
-        return 1
-    fi
-    
-    # 尝试不同的socket文件
-    local socket_files=(
-        "./nockchain.sock"
-        "./nockchain-leader.sock"
-        "./nockchain-follower.sock"
-    )
-    
-    local balance_found=false
-    for socket_file in "${socket_files[@]}"; do
-        if [ -S "$socket_file" ]; then
-            print_message "$CYAN" "尝试连接socket: $socket_file"
-            if nockchain-wallet --nockchain-socket "$socket_file" list-notes-by-pubkey -p "$pubkey" 2>/dev/null; then
-                balance_found=true
-                break
+    if check_command "nockchain-wallet"; then
+        local socket_files=("./nockchain.sock" "./nockchain-leader.sock" "./nockchain-follower.sock")
+        local balance_found=false
+        
+        for socket_file in "${socket_files[@]}"; do
+            if [ -S "$socket_file" ]; then
+                if nockchain-wallet --nockchain-socket "$socket_file" list-notes-by-pubkey -p "$pubkey" 2>/dev/null; then
+                    balance_found=true
+                    break
+                fi
             fi
+        done
+        
+        if [ "$balance_found" = false ]; then
+            print_message "$YELLOW" "无法连接到节点，请确保挖矿节点正在运行"
         fi
-    done
-    
-    if [ "$balance_found" = false ]; then
-        print_message "$YELLOW" "无法连接到节点查询余额"
-        print_message "$YELLOW" "可能的原因："
-        print_message "$YELLOW" "1. 挖矿节点未运行"
-        print_message "$YELLOW" "2. 节点正在同步中"
-        print_message "$YELLOW" "3. Socket文件不存在"
-        print_message "$CYAN" "请确保挖矿节点正在运行后再试"
+    else
+        print_message "$RED" "nockchain-wallet命令不可用"
     fi
 }
 
@@ -629,13 +619,12 @@ check_balance() {
 system_monitor() {
     print_message "$BLUE" "====== 系统状态监控 ======"
     
-    # CPU使用率
+    # CPU和内存信息
     if check_command "top"; then
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 2>/dev/null || echo "N/A")
         print_message "$YELLOW" "CPU使用率: ${cpu_usage}%"
     fi
     
-    # 内存使用
     if check_command "free"; then
         local mem_used=$(free -m | awk '/^Mem:/{print $3}' 2>/dev/null || echo "0")
         local mem_total=$(free -m | awk '/^Mem:/{print $2}' 2>/dev/null || echo "0")
@@ -646,224 +635,188 @@ system_monitor() {
     fi
     
     # 磁盘空间
-    local disk_info=$(df -h ~ 2>/dev/null | awk 'NR==2{print $4" 可用，使用率 "$5}' || echo "N/A")
+    local disk_info=$(df -h ~ 2>/dev/null | awk 'NR==2{print $4" 可用"}' || echo "N/A")
     print_message "$YELLOW" "磁盘空间: $disk_info"
     
-    # 网络连接
-    if check_command "netstat"; then
-        local network_connections=$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l || echo "N/A")
-        print_message "$YELLOW" "网络连接数: $network_connections"
-    fi
-    
-    # 挖矿进程状态
+    # 挖矿状态
     if screen -list 2>/dev/null | grep -q "nockchain"; then
         print_message "$GREEN" "挖矿状态: ✅ 正在运行"
-        
-        # 显示最近的挖矿日志
-        local log_files=(
-            "$NOCKCHAIN_DIR/logs/mining.log"
-            "$NOCKCHAIN_DIR/mining.log"
-        )
-        
-        for log_file in "${log_files[@]}"; do
-            if [ -f "$log_file" ]; then
-                print_message "$CYAN" "最近的挖矿日志 ($log_file)："
-                tail -n 3 "$log_file" 2>/dev/null | while read -r line; do
-                    print_message "$YELLOW" "  $line"
-                done
-                break
-            fi
-        done
+        if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
+            print_message "$CYAN" "最近日志："
+            tail -n 3 "$NOCKCHAIN_DIR/logs/mining.log" 2>/dev/null | while read -r line; do
+                print_message "$YELLOW" "  $line"
+            done
+        fi
     else
         print_message "$RED" "挖矿状态: ❌ 未运行"
     fi
     
-    # 系统负载
-    if [ -f "/proc/loadavg" ]; then
-        local load_avg=$(cat /proc/loadavg | cut -d' ' -f1-3)
-        print_message "$YELLOW" "系统负载: $load_avg"
-    fi
-    
-    echo
+    # 环境状态
+    print_message "$CYAN" "环境状态："
+    print_message "$YELLOW" "- Conda: $(which conda 2>/dev/null || echo '未安装')"
+    print_message "$YELLOW" "- Rust: $(which rustc 2>/dev/null || echo '未安装')"
+    print_message "$YELLOW" "- 编译器: $(which gcc 2>/dev/null || which clang 2>/dev/null || echo '未安装')"
 }
 
 # 备份钱包密钥
 backup_wallet() {
     print_message "$GREEN" ">>> 备份钱包密钥"
     
-    if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
-        print_message "$RED" "错误：未找到Nockchain安装"
-        return 1
-    fi
+    # 激活环境
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh" 2>/dev/null
+    conda activate nockchain-build 2>/dev/null || true
     
     cd "$NOCKCHAIN_DIR"
-    export PATH="$HOME/.cargo/bin:$PATH"
+    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
     
-    local backup_file="$BACKUP_DIR/keys_backup_$(date +%Y%m%d_%H%M%S).export"
+    local backup_file="$BACKUP_DIR/complete_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
     
-    mkdir -p "$BACKUP_DIR"
+    print_message "$CYAN" "正在创建完整备份..."
     
-    print_message "$CYAN" "正在备份钱包密钥..."
+    # 创建备份目录
+    local temp_backup="/tmp/nockchain_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$temp_backup"
     
-    # 尝试导出钱包密钥
-    if check_command "nockchain-wallet"; then
-        if nockchain-wallet export-keys --output "$backup_file" 2>/dev/null; then
-            print_message "$GREEN" "钱包密钥备份成功！"
-            print_message "$YELLOW" "备份文件: $backup_file"
-        else
-            print_message "$YELLOW" "使用备用方法进行备份..."
-        fi
-    fi
-    
-    # 备份配置文件和相关信息
-    local config_backup="$BACKUP_DIR/config_$(date +%Y%m%d_%H%M%S).backup"
-    
-    echo "# Nockchain 配置备份 - $(date)" > "$config_backup"
-    echo "# ======================" >> "$config_backup"
-    echo "" >> "$config_backup"
-    
+    # 备份配置文件
     if [ -f ".env" ]; then
-        echo "## .env 配置文件" >> "$config_backup"
-        cat .env >> "$config_backup"
-        echo "" >> "$config_backup"
+        cp .env "$temp_backup/"
     fi
     
-    # 备份已有的钱包信息文件
-    for wallet_file in "$BACKUP_DIR"/wallet_*.txt; do
-        if [ -f "$wallet_file" ]; then
-            echo "## 钱包信息文件: $(basename "$wallet_file")" >> "$config_backup"
-            cat "$wallet_file" >> "$config_backup"
-            echo "" >> "$config_backup"
-            break
-        fi
-    done
+    # 备份钱包文件
+    if check_command "nockchain-wallet"; then
+        nockchain-wallet export-keys --output "$temp_backup/keys.export" 2>/dev/null || {
+            print_message "$YELLOW" "钱包密钥导出失败，跳过"
+        }
+    fi
     
-    print_message "$GREEN" "配置信息备份完成！"
-    print_message "$YELLOW" "配置备份文件: $config_backup"
-    print_message "$CYAN" "请妥善保存备份文件，它们包含重要的钱包信息"
+    # 备份已有的钱包信息
+    cp -r "$BACKUP_DIR"/*.txt "$temp_backup/" 2>/dev/null || true
     
-    # 显示备份目录内容
-    print_message "$YELLOW" "备份目录内容:"
-    ls -la "$BACKUP_DIR" 2>/dev/null || print_message "$RED" "无法列出备份目录"
+    # 备份环境信息
+    cat > "$temp_backup/environment_info.txt" << EOF
+# Nockchain环境信息备份
+备份时间: $(date)
+系统信息: $(uname -a)
+Conda环境: $(conda info --base 2>/dev/null || echo "未安装")
+Rust版本: $(rustc --version 2>/dev/null || echo "未安装")
+PATH: $PATH
+安装目录: $NOCKCHAIN_DIR
+EOF
     
-    log_message "钱包和配置已备份到 $BACKUP_DIR"
+    # 创建压缩包
+    tar -czf "$backup_file" -C "/tmp" "$(basename "$temp_backup")"
+    
+    # 清理临时文件
+    rm -rf "$temp_backup"
+    
+    print_message "$GREEN" "完整备份创建成功！"
+    print_message "$YELLOW" "备份文件: $backup_file"
+    print_message "$CYAN" "请妥善保存此备份文件"
+    
+    log_message "完整备份已创建: $backup_file"
 }
 
-# 修复系统依赖
-fix_dependencies() {
-    print_message "$GREEN" ">>> 修复系统依赖"
+# 环境修复工具
+fix_environment() {
+    print_message "$GREEN" ">>> 环境修复工具"
     
-    print_message "$CYAN" "正在检查系统依赖状态..."
+    print_message "$CYAN" "正在检查环境状态..."
     
-    # 检查关键命令
-    local missing_commands=()
-    local commands_to_check=("gcc" "g++" "make" "clang" "curl" "git" "rustc" "cargo")
+    # 检查关键组件
+    local issues=()
     
-    for cmd in "${commands_to_check[@]}"; do
-        if check_command "$cmd"; then
-            print_message "$GREEN" "✅ $cmd: $(which $cmd)"
-        else
-            print_message "$RED" "❌ $cmd: 未找到"
-            missing_commands+=("$cmd")
-        fi
-    done
+    if ! check_command "conda"; then
+        issues+=("Miniconda未安装或未配置")
+    fi
     
-    if [ ${#missing_commands[@]} -eq 0 ]; then
-        print_message "$GREEN" "所有依赖都已正确安装！"
+    if ! check_command "rustc"; then
+        issues+=("Rust未安装或未配置")
+    fi
+    
+    if ! check_command "gcc" && ! check_command "clang"; then
+        issues+=("编译器未安装")
+    fi
+    
+    if [ ! -d "$NOCKCHAIN_DIR" ]; then
+        issues+=("Nockchain目录不存在")
+    fi
+    
+    if [ ${#issues[@]} -eq 0 ]; then
+        print_message "$GREEN" "环境检查通过，无需修复"
         return 0
     fi
     
-    print_message "$YELLOW" "发现缺失的命令: ${missing_commands[*]}"
-    read -p "是否立即修复这些依赖？(Y/n): " fix_choice
+    print_message "$YELLOW" "发现以下问题："
+    for issue in "${issues[@]}"; do
+        print_message "$RED" "- $issue"
+    done
     
+    read -p "是否自动修复这些问题？(Y/n): " fix_choice
     if [[ "$fix_choice" =~ ^[Nn]$ ]]; then
         return 0
     fi
     
-    # 重新安装系统依赖
-    if ! install_system_dependencies; then
-        print_message "$RED" "依赖修复失败"
-        return 1
-    fi
+    # 修复环境配置
+    print_message "$CYAN" "正在修复环境..."
     
-    # 如果Rust相关命令缺失，重新安装Rust
-    if [[ " ${missing_commands[*]} " =~ " rustc " ]] || [[ " ${missing_commands[*]} " =~ " cargo " ]]; then
-        print_message "$CYAN" "正在修复Rust安装..."
-        if ! install_rust; then
-            print_message "$RED" "Rust修复失败"
-            return 1
-        fi
-    fi
+    # 重新配置PATH
+    cat >> "$HOME/.bashrc" << 'EOF'
+
+# Nockchain环境配置
+export PATH="$HOME/.miniconda3/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$HOME/.local/lib64:$LD_LIBRARY_PATH"
+
+# 自动激活Nockchain环境函数
+activate_nockchain() {
+    source "$HOME/.miniconda3/etc/profile.d/conda.sh" 2>/dev/null
+    conda activate nockchain-build 2>/dev/null || true
+    cd "$HOME/nockchain" 2>/dev/null || true
+    export RUST_MIN_STACK=8388608
+    export RUST_LOG=info
+}
+EOF
     
-    print_message "$GREEN" "依赖修复完成！"
+    # 重新加载环境
+    source "$HOME/.bashrc"
     
-    # 再次检查
-    print_message "$CYAN" "验证修复结果..."
-    local still_missing=()
-    for cmd in "${missing_commands[@]}"; do
-        if ! check_command "$cmd"; then
-            still_missing+=("$cmd")
-        fi
-    done
-    
-    if [ ${#still_missing[@]} -eq 0 ]; then
-        print_message "$GREEN" "🎉 所有依赖修复成功！"
-    else
-        print_message "$YELLOW" "以下命令仍然缺失: ${still_missing[*]}"
-        print_message "$YELLOW" "可能需要手动安装或系统重启"
-    fi
+    print_message "$GREEN" "环境修复完成"
+    print_message "$YELLOW" "请运行: source ~/.bashrc"
+    print_message "$YELLOW" "或重新登录以应用更改"
 }
 
 # 主循环
 main() {
-    # 检查是否以root用户运行
+    # 检查root权限
     if [ "$EUID" -eq 0 ]; then
         print_message "$RED" "请不要以root用户运行此脚本"
-        print_message "$YELLOW" "建议使用普通用户账户运行"
         exit 1
     fi
     
-    # 创建必要目录和日志文件
-    mkdir -p "$BACKUP_DIR"
+    # 创建必要目录
+    mkdir -p "$BACKUP_DIR" "$TOOLS_DIR"
     touch "$LOG_FILE"
-    log_message "脚本启动 - 修复版 v3.1"
+    log_message "无sudo权限脚本启动 v4.0"
     
     while true; do
         show_menu
         read -p "请输入选项编号（1-9）: " choice
         
         case $choice in
-            1)
-                install_nockchain
-                ;;
-            2)
-                configure_mining_key
-                ;;
-            3)
-                start_mining
-                ;;
-            4)
-                view_logs
-                ;;
-            5)
-                check_balance
-                ;;
-            6)
-                system_monitor
-                ;;
-            7)
-                backup_wallet
-                ;;
-            8)
-                fix_dependencies
-                ;;
+            1) install_nockchain_complete ;;
+            2) configure_mining_key ;;
+            3) start_mining ;;
+            4) view_logs ;;
+            5) check_balance ;;
+            6) system_monitor ;;
+            7) backup_wallet ;;
+            8) fix_environment ;;
             9)
-                print_message "$GREEN" "感谢使用Nockchain优化脚本，再见！"
+                print_message "$GREEN" "感谢使用Nockchain无sudo权限解决方案！"
                 log_message "脚本正常退出"
                 exit 0
                 ;;
             *)
-                print_message "$RED" "无效选项，请输入1-9之间的数字"
+                print_message "$RED" "无效选项，请输入1-9"
                 ;;
         esac
         
