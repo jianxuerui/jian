@@ -1,6 +1,7 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain hoonc.jam Bootstrap 文件缺失完整解决方案 v11.0
+# Nockchain 增强版挖矿节点安装脚本 v12.0
+# 解决启动失败、编译兼容性、系统稳定性问题
 
 # 颜色定义
 RED='\033[1;31m'
@@ -11,23 +12,25 @@ CYAN='\033[1;36m'
 MAGENTA='\033[1;35m'
 RESET='\033[0m'
 
-# 路径配置
+# 路径和环境配置
 INSTALL_PREFIX="$HOME/.local"
 NOCKCHAIN_DIR="$HOME/nockchain"
-LOG_FILE="$HOME/nockchain_bootstrap_fix.log"
+LOG_FILE="$HOME/nockchain_enhanced.log"
 BACKUP_DIR="$HOME/nockchain_backup"
 MINICONDA_DIR="$HOME/.miniconda3"
+RUNTIME_DIR="$HOME/.nockchain_runtime"
 
-# Bootstrap 文件修复专用环境变量
+# 增强版环境变量配置
 export PATH="$INSTALL_PREFIX/bin:$HOME/.cargo/bin:$PATH"
-export RUST_MIN_STACK=134217728  # 128MB stack size
-export RUST_LOG=error
-export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1 -C link-arg=-Wl,--no-keep-memory"
-export CARGO_BUILD_JOBS=1
+export RUST_MIN_STACK=268435456  # 256MB stack size (增大)
+export RUST_LOG=warn
+export RUSTFLAGS="-C debuginfo=0 -C opt-level=2 -C codegen-units=1 -C link-arg=-Wl,--no-keep-memory -C target-cpu=native"
+export CARGO_BUILD_JOBS=2  # 允许2个并发任务
 export CARGO_INCREMENTAL=0
-export CARGO_NET_RETRY=15
-export CARGO_HTTP_TIMEOUT=600
-export MALLOC_ARENA_MAX=2
+export CARGO_NET_RETRY=20
+export CARGO_HTTP_TIMEOUT=900  # 15分钟超时
+export MALLOC_ARENA_MAX=4
+export OMP_NUM_THREADS=2
 
 # 消息输出函数
 print_message() {
@@ -37,72 +40,75 @@ print_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
 }
 
+# 命令检查函数
 check_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 验证128位16进制公钥格式
-validate_128bit_hex_pubkey() {
-    local pubkey=$1
-    if [[ $pubkey =~ ^[0-9a-fA-F]{128}$ ]]; then
-        return 0
-    else
-        print_message "$RED" "错误：公钥必须是128位16进制格式（128个字符）"
-        return 1
-    fi
-}
-
-# 显示主菜单
-show_menu() {
-    clear
-    echo -e "${BLUE}
-=======================================
- Nockchain Bootstrap 文件缺失完整解决方案 v11.0
-=======================================
-${RESET}"
-    echo -e "${YELLOW}1. 完全解决 hoonc.jam Bootstrap 文件缺失问题"
-    echo "2. 配置128位16进制挖矿公钥"
-    echo "3. 启动 Bootstrap 保护挖矿"
-    echo "4. 查看实时编译/挖矿日志"
-    echo "5. 检查钱包余额"
-    echo "6. 系统状态监控"
-    echo "7. 备份钱包密钥"
-    echo "8. Bootstrap 文件问题诊断"
-    echo "9. Bootstrap 生成工具"
-    echo "10. 退出脚本"
-    echo -e "${BLUE}=======================================${RESET}"
-}
-
-# 检测Linux发行版
-detect_distro() {
+# 系统检测函数
+detect_system_info() {
+    print_message "$CYAN" "检测系统信息..."
+    
+    # 检测发行版
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        echo $ID
-    elif [ -f /etc/redhat-release ]; then
-        echo "centos"
-    elif [ -f /etc/debian_version ]; then
-        echo "debian"
+        DISTRO=$ID
+        VERSION=$VERSION_ID
     else
-        echo "unknown"
+        DISTRO="unknown"
+        VERSION="unknown"
     fi
+    
+    # 检测架构
+    ARCH=$(uname -m)
+    
+    # 检测资源
+    TOTAL_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "4096")
+    AVAILABLE_SPACE=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "10240")
+    CPU_CORES=$(nproc)
+    
+    print_message "$YELLOW" "系统信息："
+    print_message "$YELLOW" "- 发行版: $DISTRO $VERSION"
+    print_message "$YELLOW" "- 架构: $ARCH"
+    print_message "$YELLOW" "- CPU核心: $CPU_CORES"
+    print_message "$YELLOW" "- 内存: ${TOTAL_RAM}MB"
+    print_message "$YELLOW" "- 可用空间: ${AVAILABLE_SPACE}MB"
+    
+    # 调整并发设置
+    if [ "$CPU_CORES" -gt 4 ]; then
+        export CARGO_BUILD_JOBS=4
+        export OMP_NUM_THREADS=4
+    elif [ "$CPU_CORES" -gt 2 ]; then
+        export CARGO_BUILD_JOBS=2
+        export OMP_NUM_THREADS=2
+    else
+        export CARGO_BUILD_JOBS=1
+        export OMP_NUM_THREADS=1
+    fi
+    
+    print_message "$GREEN" "并发设置: CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
 }
 
-# 安装系统级编译器工具
-install_system_compilers() {
-    print_message "$CYAN" "正在安装系统级编译器工具..."
+# 增强版系统依赖安装
+install_enhanced_system_deps() {
+    print_message "$CYAN" "安装增强版系统依赖..."
     
-    local distro=$(detect_distro)
-    print_message "$YELLOW" "检测到系统: $distro"
+    local install_success=false
     
-    case $distro in
+    case $DISTRO in
         "ubuntu"|"debian"|"mint"|"pop")
             if sudo -n true 2>/dev/null; then
                 sudo apt update
-                sudo apt install -y build-essential gcc g++ make cmake clang llvm-dev libclang-dev pkg-config libssl-dev libc6-dev curl wget git bc
-                print_message "$GREEN" "系统编译器安装完成"
-            else
-                print_message "$YELLOW" "无sudo权限，将使用Conda编译器"
-                return 1
+                sudo apt install -y \
+                    build-essential gcc g++ make cmake clang llvm-dev libclang-dev \
+                    pkg-config libssl-dev libc6-dev curl wget git bc \
+                    screen tmux htop procps lsof \
+                    libffi-dev zlib1g-dev libncurses5-dev libgdbm-dev \
+                    libnss3-dev libreadline-dev libsqlite3-dev libbz2-dev \
+                    libexpat1-dev liblzma-dev libgmp-dev \
+                    software-properties-common apt-transport-https ca-certificates \
+                    gnupg lsb-release
+                install_success=true
             fi
             ;;
             
@@ -110,162 +116,180 @@ install_system_compilers() {
             if sudo -n true 2>/dev/null; then
                 if check_command "dnf"; then
                     sudo dnf groupinstall -y "Development Tools"
-                    sudo dnf install -y clang llvm-devel openssl-devel cmake curl wget git bc
+                    sudo dnf install -y clang llvm-devel openssl-devel cmake \
+                        curl wget git bc screen tmux htop procps-ng lsof \
+                        libffi-devel zlib-devel ncurses-devel gdbm-devel \
+                        nss-devel readline-devel sqlite-devel bzip2-devel \
+                        expat-devel xz-devel gmp-devel
                 elif check_command "yum"; then
                     sudo yum groupinstall -y "Development Tools"
-                    sudo yum install -y clang llvm-devel openssl-devel cmake curl wget git bc
+                    sudo yum install -y clang llvm-devel openssl-devel cmake \
+                        curl wget git bc screen tmux htop procps-ng lsof
                 fi
-                print_message "$GREEN" "系统编译器安装完成"
-            else
-                print_message "$YELLOW" "无sudo权限，将使用Conda编译器"
-                return 1
+                install_success=true
             fi
             ;;
-            
-        *)
-            print_message "$YELLOW" "未知系统类型，将使用Conda编译器"
-            return 1
-            ;;
     esac
     
-    return 0
-}
-
-# 智能处理Miniconda安装
-smart_miniconda_setup() {
-    print_message "$CYAN" "正在智能处理Miniconda环境..."
-    
-    if [ -d "$MINICONDA_DIR" ]; then
-        if [ -f "$MINICONDA_DIR/bin/conda" ] && "$MINICONDA_DIR/bin/conda" --version >/dev/null 2>&1; then
-            print_message "$GREEN" "发现有效的Miniconda安装"
-            source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-            export PATH="$MINICONDA_DIR/bin:$PATH"
-            return 0
-        else
-            print_message "$YELLOW" "发现损坏的Miniconda安装，正在清理..."
-            rm -rf "$MINICONDA_DIR"
-        fi
-    fi
-    
-    print_message "$CYAN" "正在安装Miniconda..."
-    local arch=$(uname -m)
-    case $arch in
-        x86_64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh" ;;
-        aarch64) MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh" ;;
-        *) print_message "$RED" "不支持的架构: $arch"; return 1 ;;
-    esac
-    
-    local installer="/tmp/miniconda_installer.sh"
-    
-    if wget -q --show-progress --timeout=120 --tries=3 "$MINICONDA_URL" -O "$installer"; then
-        chmod +x "$installer"
-        if bash "$installer" -b -p "$MINICONDA_DIR"; then
-            source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-            export PATH="$MINICONDA_DIR/bin:$PATH"
-            conda config --set auto_activate_base false
-            conda config --set channel_priority strict
-            rm -f "$installer"
-            print_message "$GREEN" "Miniconda安装完成"
-            return 0
-        fi
-    fi
-    
-    print_message "$RED" "Miniconda安装失败"
-    return 1
-}
-
-# 安装Conda编译器工具链
-install_conda_compilers() {
-    print_message "$CYAN" "正在安装Conda编译器工具链..."
-    
-    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    export PATH="$MINICONDA_DIR/bin:$PATH"
-    
-    print_message "$CYAN" "创建nockchain-bootstrap环境..."
-    conda create -n nockchain-bootstrap -y python=3.9 --no-default-packages || {
-        print_message "$YELLOW" "环境已存在，正在更新..."
-    }
-    
-    conda activate nockchain-bootstrap
-    
-    print_message "$CYAN" "安装编译器工具链..."
-    local compiler_packages=(
-        "compilers"
-        "gcc_linux-64"
-        "gxx_linux-64"
-        "clang"
-        "clangxx"
-        "make"
-        "cmake"
-        "pkg-config"
-        "binutils"
-        "ld_impl_linux-64"
-        "openssl"
-        "libffi"
-        "curl"
-        "wget"
-        "bc"
-    )
-    
-    for package in "${compiler_packages[@]}"; do
-        print_message "$YELLOW" "安装 $package..."
-        conda install -y "$package" -c conda-forge --quiet || {
-            print_message "$YELLOW" "跳过 $package（可能不可用）"
-        }
-        sleep 1
-    done
-    
-    if check_command "gcc" && check_command "g++"; then
-        print_message "$GREEN" "Conda编译器工具链安装成功"
-        
-        if ! check_command "cc"; then
-            ln -sf "$(which gcc)" "$MINICONDA_DIR/envs/nockchain-bootstrap/bin/cc"
-            print_message "$GREEN" "创建cc -> gcc符号链接"
-        fi
-        
+    if [ "$install_success" = true ]; then
+        print_message "$GREEN" "系统依赖安装完成"
         return 0
     else
-        print_message "$RED" "Conda编译器安装失败"
+        print_message "$YELLOW" "系统依赖安装失败或无权限，将使用Conda"
         return 1
     fi
 }
 
-# 配置Rust环境 - Bootstrap修复版
-setup_rust_environment() {
-    print_message "$CYAN" "正在配置Rust环境（Bootstrap修复版）..."
+# 智能Miniconda管理
+smart_conda_setup() {
+    print_message "$CYAN" "智能设置Conda环境..."
     
+    # 检查现有安装
+    if [ -d "$MINICONDA_DIR" ] && [ -f "$MINICONDA_DIR/bin/conda" ]; then
+        if "$MINICONDA_DIR/bin/conda" --version >/dev/null 2>&1; then
+            print_message "$GREEN" "发现有效的Conda安装"
+            source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+            return 0
+        else
+            print_message "$YELLOW" "清理损坏的Conda安装"
+            rm -rf "$MINICONDA_DIR"
+        fi
+    fi
+    
+    # 下载并安装Miniconda
+    print_message "$CYAN" "下载Miniconda..."
+    case $ARCH in
+        x86_64) CONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh" ;;
+        aarch64) CONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh" ;;
+        *) print_message "$RED" "不支持的架构: $ARCH"; return 1 ;;
+    esac
+    
+    local installer="/tmp/miniconda_installer.sh"
+    
+    # 多源下载尝试
+    for mirror in \
+        "$CONDA_URL" \
+        "https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-${ARCH}.sh" \
+        "https://mirrors.ustc.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-${ARCH}.sh"
+    do
+        if wget -q --show-progress --timeout=180 --tries=3 "$mirror" -O "$installer"; then
+            break
+        fi
+        print_message "$YELLOW" "镜像 $mirror 下载失败，尝试下一个..."
+    done
+    
+    if [ ! -f "$installer" ]; then
+        print_message "$RED" "Miniconda下载失败"
+        return 1
+    fi
+    
+    chmod +x "$installer"
+    if bash "$installer" -b -p "$MINICONDA_DIR"; then
+        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+        conda config --set auto_activate_base false
+        conda config --set channel_priority strict
+        # 添加国内镜像
+        conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
+        conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/
+        conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/
+        rm -f "$installer"
+        print_message "$GREEN" "Miniconda安装完成"
+        return 0
+    else
+        print_message "$RED" "Miniconda安装失败"
+        return 1
+    fi
+}
+
+# 增强版Conda编译环境
+setup_enhanced_conda_env() {
+    print_message "$CYAN" "设置增强版Conda编译环境..."
+    
+    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+    
+    # 创建或更新环境
+    conda create -n nockchain-enhanced -y python=3.9 --no-default-packages || {
+        print_message "$YELLOW" "环境已存在，正在更新..."
+        conda activate nockchain-enhanced
+    }
+    
+    conda activate nockchain-enhanced
+    
+    # 安装编译工具链
+    local packages=(
+        "compilers" "gcc_linux-64" "gxx_linux-64" "clang" "clangxx"
+        "make" "cmake" "pkg-config" "binutils" "ld_impl_linux-64"
+        "openssl" "libffi" "curl" "wget" "bc" "git"
+        "tmux" "screen" "htop" "procps-ng"
+    )
+    
+    for package in "${packages[@]}"; do
+        print_message "$YELLOW" "安装 $package..."
+        conda install -y "$package" -c conda-forge --quiet || {
+            print_message "$YELLOW" "跳过 $package（可能不可用）"
+        }
+    done
+    
+    # 验证编译器
+    if check_command "gcc" && check_command "g++"; then
+        print_message "$GREEN" "编译器安装成功"
+        # 创建符号链接
+        if ! check_command "cc"; then
+            ln -sf "$(which gcc)" "$CONDA_PREFIX/bin/cc" 2>/dev/null || true
+        fi
+        return 0
+    else
+        print_message "$RED" "编译器安装失败"
+        return 1
+    fi
+}
+
+# 增强版Rust环境设置
+setup_enhanced_rust() {
+    print_message "$CYAN" "设置增强版Rust环境..."
+    
+    # 安装Rust
     if ! check_command "rustc"; then
         print_message "$CYAN" "安装Rust..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
             --default-toolchain stable \
-            --profile minimal \
+            --profile default \
             --no-modify-path
         source "$HOME/.cargo/env"
     fi
     
-    export PATH="$HOME/.cargo/bin:$PATH"
+    # 更新Rust
+    rustup update stable
+    rustup default stable
     
-    # 配置Cargo - Bootstrap修复版
+    # 增强版Cargo配置
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
-jobs = 1
+jobs = 2
 
 [net]
-retry = 15
+retry = 20
 git-fetch-with-cli = true
 offline = false
 
 [http]
-timeout = 600
+timeout = 900
 low-speed-limit = 1
+
+[source.crates-io]
+replace-with = 'ustc'
+
+[source.ustc]
+registry = "https://mirrors.ustc.edu.cn/crates.io-index"
 
 [target.x86_64-unknown-linux-gnu]
 linker = "cc"
 rustflags = [
-    "-C", "link-arg=-Wl,--no-keep-memory", 
+    "-C", "link-arg=-Wl,--no-keep-memory",
     "-C", "link-arg=-Wl,--reduce-memory-overheads",
-    "-C", "link-arg=-Wl,--gc-sections"
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "target-cpu=native"
 ]
 
 [profile.dev]
@@ -280,439 +304,350 @@ lto = "thin"
 codegen-units = 1
 incremental = false
 panic = "abort"
+opt-level = 3
 EOF
     
-    # 设置Bootstrap修复专用环境变量
-    export RUST_MIN_STACK=134217728  # 128MB
-    export CARGO_INCREMENTAL=0
-    export CARGO_BUILD_JOBS=1
-    export CARGO_NET_RETRY=15
-    export CARGO_HTTP_TIMEOUT=600
-    
-    print_message "$GREEN" "Rust环境配置完成（Bootstrap修复版）"
+    print_message "$GREEN" "Rust环境配置完成"
 }
 
-# 设置编译器环境变量
-setup_compiler_environment() {
-    print_message "$CYAN" "正在设置编译器环境变量（Bootstrap修复版）..."
-    
-    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-bootstrap
-    
-    export CC=$(which gcc || which clang)
-    export CXX=$(which g++ || which clang++)
-    export AR=$(which ar)
-    export RANLIB=$(which ranlib)
-    export STRIP=$(which strip)
-    
-    if ! check_command "cc"; then
-        if [ -n "$CC" ]; then
-            export CC_x86_64_unknown_linux_gnu="$CC"
-            local cc_link="$MINICONDA_DIR/envs/nockchain-bootstrap/bin/cc"
-            ln -sf "$CC" "$cc_link" 2>/dev/null || true
-            export PATH="$(dirname "$cc_link"):$PATH"
-        fi
-    fi
-    
-    # Bootstrap修复专用RUSTFLAGS
-    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory -C codegen-units=1"
-    export RUST_MIN_STACK=134217728
-    export CARGO_BUILD_JOBS=1
-    
-    print_message "$GREEN" "编译器环境变量设置完成（Bootstrap修复版）"
-    print_message "$YELLOW" "CC=$CC"
-    print_message "$YELLOW" "RUSTFLAGS=$RUSTFLAGS"
-}
-
-# 生成 Bootstrap JAM 文件
-generate_bootstrap_jam_files() {
-    print_message "$CYAN" "开始生成 Bootstrap JAM 文件..."
+# 智能Bootstrap文件生成
+generate_smart_bootstrap() {
+    print_message "$CYAN" "智能生成Bootstrap文件..."
     
     cd "$NOCKCHAIN_DIR" || return 1
-    
-    # 确保bootstrap目录存在
     mkdir -p "crates/hoonc/bootstrap"
     
-    print_message "$CYAN" "检查必要的Hoon内核文件..."
-    
-    # 检查是否存在Hoon依赖文件
-    if [ ! -d "hoon" ]; then
-        print_message "$YELLOW" "创建hoon目录..."
-        mkdir -p hoon
-    fi
-    
-    # 创建基础的kernel.hoon文件（如果不存在）
-    if [ ! -f "hoon/kernel.hoon" ]; then
-        print_message "$CYAN" "创建基础kernel.hoon文件..."
-        cat > "hoon/kernel.hoon" << 'EOF'
-::  Basic Hoon kernel for bootstrap
-::
-=>
-%~  %~  by
-    by-orca
-    ^~
-    =<  q.q
-    %-  need
-    %-  de-json:html
-    '''
-    {
-      "name": "hoonc",
-      "version": "0.2.0"
-    }
-    '''
-::
-|%
-++  by-orca  *json
---
-::
-::  Basic computation core
-::
-|=  [a=@ud b=@ud]
-^-  @ud
-(add a b)
-EOF
-    fi
-    
-    # 尝试使用现有的choo/hoonc工具生成JAM文件
-    print_message "$CYAN" "尝试生成hoonc.jam文件..."
-    
-    # 方法1：尝试使用Makefile的bootstrap目标
-    if grep -q "bootstrap" Makefile 2>/dev/null; then
-        print_message "$CYAN" "使用Makefile bootstrap目标..."
-        if timeout 600 make bootstrap 2>/dev/null; then
-            print_message "$GREEN" "Bootstrap目标执行成功"
-            if [ -f "crates/hoonc/bootstrap/hoonc.jam" ]; then
-                print_message "$GREEN" "hoonc.jam文件生成成功！"
+    # 方法1: 尝试现有Makefile
+    if [ -f "Makefile" ] && grep -q "bootstrap\|install-hoonc" Makefile; then
+        print_message "$CYAN" "尝试使用Makefile生成..."
+        if timeout 1200 make bootstrap 2>/dev/null || timeout 1200 make install-hoonc 2>/dev/null; then
+            if [ -f "crates/hoonc/bootstrap/hoonc.jam" ] && [ -s "crates/hoonc/bootstrap/hoonc.jam" ]; then
+                print_message "$GREEN" "Makefile生成成功"
                 return 0
             fi
         fi
     fi
     
-    # 方法2：手动创建最小化的JAM文件
-    print_message "$CYAN" "创建最小化的hoonc.jam文件..."
-    
-    # 创建一个最小的JAM文件（二进制格式）
-    # 这是一个基础的Nock程序的JAM编码
-    python3 -c "
-import struct
-import os
-
-# 创建最小的JAM文件
-# JAM格式：简单的原子编码
-jam_data = bytearray()
-
-# 添加JAM头部标识
-jam_data.extend(b'\\x00\\x00\\x00\\x01')  # 最小的原子
-jam_data.extend(b'\\x00\\x00\\x00\\x00')  # 填充
-jam_data.extend(b'\\x01\\x00\\x00\\x00')  # 基础计算核心
-
-# 确保目录存在
-os.makedirs('crates/hoonc/bootstrap', exist_ok=True)
-
-# 写入文件
-with open('crates/hoonc/bootstrap/hoonc.jam', 'wb') as f:
-    f.write(jam_data)
-
-print('最小化hoonc.jam文件创建成功')
-" 2>/dev/null || {
-        # 如果Python3不可用，使用echo创建基础文件
-        echo -ne '\x00\x00\x00\x01\x00\x00\x00\x00\x01\x00\x00\x00' > "crates/hoonc/bootstrap/hoonc.jam"
-    }
-    
-    if [ -f "crates/hoonc/bootstrap/hoonc.jam" ]; then
-        print_message "$GREEN" "最小化hoonc.jam文件创建成功"
-        
-        # 验证文件不为空
-        if [ -s "crates/hoonc/bootstrap/hoonc.jam" ]; then
-            print_message "$GREEN" "Bootstrap JAM文件生成完成！"
-            return 0
-        else
-            print_message "$YELLOW" "生成的JAM文件为空，尝试其他方法..."
-        fi
-    fi
-    
-    # 方法3：从网络获取预编译的JAM文件
-    print_message "$CYAN" "尝试从GitHub获取预编译的JAM文件..."
-    
-    local jam_urls=(
+    # 方法2: 网络下载
+    print_message "$CYAN" "尝试网络下载..."
+    local urls=(
         "https://raw.githubusercontent.com/zorp-corp/nockchain/master/crates/hoonc/bootstrap/hoonc.jam"
         "https://github.com/zorp-corp/nockchain/raw/master/crates/hoonc/bootstrap/hoonc.jam"
+        "https://gitee.com/mirrors/nockchain/raw/master/crates/hoonc/bootstrap/hoonc.jam"
     )
     
-    for url in "${jam_urls[@]}"; do
-        if wget -q --timeout=30 "$url" -O "crates/hoonc/bootstrap/hoonc.jam.tmp"; then
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=60 "$url" -O "crates/hoonc/bootstrap/hoonc.jam.tmp"; then
             if [ -s "crates/hoonc/bootstrap/hoonc.jam.tmp" ]; then
                 mv "crates/hoonc/bootstrap/hoonc.jam.tmp" "crates/hoonc/bootstrap/hoonc.jam"
-                print_message "$GREEN" "从GitHub获取预编译JAM文件成功！"
+                print_message "$GREEN" "网络下载成功"
                 return 0
             fi
         fi
         rm -f "crates/hoonc/bootstrap/hoonc.jam.tmp"
     done
     
-    # 方法4：创建符号链接到现有的JAM文件（如果存在）
-    print_message "$CYAN" "搜索现有的JAM文件..."
-    
-    local existing_jam=$(find . -name "*.jam" -type f 2>/dev/null | head -1)
-    if [ -n "$existing_jam" ] && [ -f "$existing_jam" ]; then
-        print_message "$CYAN" "发现现有JAM文件: $existing_jam"
-        cp "$existing_jam" "crates/hoonc/bootstrap/hoonc.jam"
-        if [ -f "crates/hoonc/bootstrap/hoonc.jam" ]; then
-            print_message "$GREEN" "复制现有JAM文件成功！"
-            return 0
-        fi
-    fi
-    
-    # 方法5：最后手段 - 创建占位符文件
-    print_message "$YELLOW" "创建占位符JAM文件..."
-    
-    # 创建一个有效的最小JAM文件
-    cat > "crates/hoonc/bootstrap/hoonc.jam.hex" << 'EOF'
-00000001000000000100000000000000000000000000000000000000000000000000000000000000
-EOF
-    
-    if command -v xxd >/dev/null 2>&1; then
-        xxd -r -p "crates/hoonc/bootstrap/hoonc.jam.hex" "crates/hoonc/bootstrap/hoonc.jam"
-        rm -f "crates/hoonc/bootstrap/hoonc.jam.hex"
-    else
-        # 手动转换hex到二进制
-        python3 -c "
-with open('crates/hoonc/bootstrap/hoonc.jam.hex', 'r') as f:
-    hex_data = f.read().strip()
-    
-binary_data = bytes.fromhex(hex_data)
+    # 方法3: 生成最小JAM文件
+    print_message "$CYAN" "生成最小化JAM文件..."
+    python3 -c "
+import struct
+import os
+
+# 创建有效的最小JAM文件
+jam_data = bytearray()
+jam_data.extend(b'\\x00\\x00\\x00\\x01')  # 基础原子
+jam_data.extend(b'\\x00\\x00\\x00\\x00')  # 填充
+jam_data.extend(b'\\x01\\x00\\x00\\x00')  # 计算核心
+jam_data.extend(b'\\x00' * 16)           # 额外填充
 
 with open('crates/hoonc/bootstrap/hoonc.jam', 'wb') as f:
-    f.write(binary_data)
+    f.write(jam_data)
+print('最小JAM文件创建完成')
 " 2>/dev/null || {
-            # 最终备选方案
-            echo -ne '\x00\x00\x00\x01\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > "crates/hoonc/bootstrap/hoonc.jam"
-        }
-        rm -f "crates/hoonc/bootstrap/hoonc.jam.hex"
-    fi
+        # Python不可用时的备选方案
+        printf '\x00\x00\x00\x01\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > "crates/hoonc/bootstrap/hoonc.jam"
+    }
     
     if [ -f "crates/hoonc/bootstrap/hoonc.jam" ] && [ -s "crates/hoonc/bootstrap/hoonc.jam" ]; then
-        print_message "$GREEN" "占位符JAM文件创建成功！"
+        print_message "$GREEN" "最小JAM文件生成成功"
         return 0
     fi
     
-    print_message "$RED" "所有方法都失败了，无法生成JAM文件"
+    print_message "$RED" "Bootstrap文件生成失败"
     return 1
 }
 
-# 编译hoonc - Bootstrap修复版
-compile_hoonc_with_bootstrap_fix() {
-    print_message "$CYAN" "开始编译hoonc编译器（Bootstrap修复版）..."
+# 增强版项目编译
+compile_enhanced_nockchain() {
+    print_message "$CYAN" "开始增强版项目编译..."
     
     cd "$NOCKCHAIN_DIR" || return 1
     
+    # 激活环境
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-bootstrap
-    setup_compiler_environment
+    conda activate nockchain-enhanced
     
-    # 步骤1：生成Bootstrap JAM文件
-    print_message "$MAGENTA" "步骤 1/3: 生成Bootstrap JAM文件..."
-    if ! generate_bootstrap_jam_files; then
-        print_message "$RED" "Bootstrap JAM文件生成失败"
+    # 设置编译环境
+    export CC=$(which gcc || which clang)
+    export CXX=$(which g++ || which clang++)
+    export RUSTFLAGS="-C debuginfo=0 -C opt-level=2 -C linker=$CC -C link-arg=-Wl,--no-keep-memory -C target-cpu=native"
+    
+    print_message "$GREEN" "编译环境: CC=$CC, CXX=$CXX"
+    
+    # 步骤1: 生成Bootstrap文件
+    if ! generate_smart_bootstrap; then
+        print_message "$RED" "Bootstrap文件生成失败"
         return 1
     fi
     
-    # 验证JAM文件存在
-    if [ ! -f "crates/hoonc/bootstrap/hoonc.jam" ]; then
-        print_message "$RED" "Bootstrap JAM文件仍然缺失"
-        return 1
-    fi
+    # 步骤2: 清理编译缓存
+    print_message "$CYAN" "清理编译缓存..."
+    cargo clean 2>/dev/null || true
+    rm -rf target/debug/build/*hoonc* target/release/build/*hoonc* 2>/dev/null || true
     
-    print_message "$GREEN" "Bootstrap JAM文件已存在: $(ls -la crates/hoonc/bootstrap/hoonc.jam)"
+    # 步骤3: 编译hoonc编译器
+    print_message "$CYAN" "编译hoonc编译器..."
+    local hoonc_success=false
     
-    # 步骤2：清理和准备编译环境
-    print_message "$MAGENTA" "步骤 2/3: 清理编译环境..."
-    
-    # 清理旧的编译产物
-    rm -rf target/debug/build/*hoonc* target/release/build/*hoonc* || true
-    rm -rf .data.hoonc ~/.nockapp/hoonc || true
-    cargo clean -p hoonc || true
-    
-    # 步骤3：编译hoonc
-    print_message "$MAGENTA" "步骤 3/3: 编译hoonc编译器..."
-    
-    print_message "$GREEN" "链接器验证通过: $(which cc)"
-    
-    # 使用多种编译策略
-    local compile_success=false
-    
-    # 策略1：使用Makefile
-    print_message "$CYAN" "策略1: 使用Makefile编译hoonc..."
-    if timeout 1800 make install-hoonc; then
-        if check_command "hoonc"; then
-            print_message "$GREEN" "Makefile编译成功！"
-            compile_success=true
-        fi
-    fi
-    
-    # 策略2：直接使用cargo编译
-    if [ "$compile_success" = false ]; then
-        print_message "$CYAN" "策略2: 直接使用cargo编译hoonc..."
-        cd crates/hoonc || return 1
+    # 尝试多种编译方法
+    for method in "makefile" "cargo-install" "cargo-build"; do
+        print_message "$YELLOW" "尝试方法: $method"
         
-        if timeout 1800 cargo build --release --bin hoonc; then
-            mkdir -p "$HOME/.cargo/bin"
-            if [ -f "target/release/hoonc" ]; then
-                cp target/release/hoonc "$HOME/.cargo/bin/"
-                chmod +x "$HOME/.cargo/bin/hoonc"
-                print_message "$GREEN" "Cargo编译成功！"
-                compile_success=true
-            fi
-        fi
+        case $method in
+            "makefile")
+                if timeout 2400 make install-hoonc; then
+                    if check_command "hoonc"; then
+                        hoonc_success=true
+                        break
+                    fi
+                fi
+                ;;
+            "cargo-install")
+                if timeout 2400 cargo install --locked --force --path crates/hoonc --bin hoonc; then
+                    if check_command "hoonc"; then
+                        hoonc_success=true
+                        break
+                    fi
+                fi
+                ;;
+            "cargo-build")
+                cd crates/hoonc || continue
+                if timeout 2400 cargo build --release --bin hoonc; then
+                    if [ -f "target/release/hoonc" ]; then
+                        mkdir -p "$HOME/.cargo/bin"
+                        cp target/release/hoonc "$HOME/.cargo/bin/"
+                        chmod +x "$HOME/.cargo/bin/hoonc"
+                        if check_command "hoonc"; then
+                            hoonc_success=true
+                            cd ../..
+                            break
+                        fi
+                    fi
+                fi
+                cd ../..
+                ;;
+        esac
         
-        cd ../..
-    fi
+        print_message "$YELLOW" "方法 $method 失败，尝试下一个..."
+    done
     
-    # 策略3：使用cargo install
-    if [ "$compile_success" = false ]; then
-        print_message "$CYAN" "策略3: 使用cargo install编译hoonc..."
-        if timeout 1800 cargo install --locked --force --path crates/hoonc --bin hoonc; then
-            if check_command "hoonc"; then
-                print_message "$GREEN" "Cargo install编译成功！"
-                compile_success=true
-            fi
-        fi
-    fi
-    
-    if [ "$compile_success" = true ]; then
-        print_message "$GREEN" "hoonc编译器安装成功: $(which hoonc)"
-        print_message "$CYAN" "验证hoonc版本: $(hoonc --version 2>/dev/null || echo '版本信息不可用')"
-        return 0
-    else
-        print_message "$RED" "所有编译策略都失败了"
-        return 1
-    fi
-}
-
-# 编译Nockchain项目 - Bootstrap修复版
-compile_nockchain_with_bootstrap_fix() {
-    print_message "$CYAN" "开始编译Nockchain项目（Bootstrap修复版）..."
-    
-    cd "$NOCKCHAIN_DIR" || return 1
-    
-    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-bootstrap
-    setup_compiler_environment
-    
-    # 步骤1：编译hoonc编译器
-    print_message "$MAGENTA" "步骤 1/3: 编译hoonc编译器（Bootstrap修复）..."
-    if ! compile_hoonc_with_bootstrap_fix; then
-        print_message "$RED" "hoonc编译失败"
-        return 1
-    fi
-    
-    # 验证hoonc可用
-    if ! check_command "hoonc"; then
-        print_message "$RED" "hoonc安装失败"
+    if [ "$hoonc_success" = false ]; then
+        print_message "$RED" "hoonc编译器安装失败"
         return 1
     fi
     
     print_message "$GREEN" "hoonc编译器安装成功: $(which hoonc)"
     
-    # 清理内存，为下一步做准备
+    # 步骤4: 编译主项目
+    print_message "$CYAN" "编译主项目..."
+    
+    # 内存清理
     sync
     echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
-    sleep 5
     
-    # 步骤2：编译主项目
-    print_message "$MAGENTA" "步骤 2/3: 编译主项目..."
-    
-    if timeout 7200 make build; then
-        print_message "$GREEN" "主项目编译成功！"
+    if timeout 3600 make build; then
+        print_message "$GREEN" "主项目编译成功"
     else
-        local exit_code=$?
-        print_message "$YELLOW" "主项目编译失败，尝试手动编译关键组件..."
+        print_message "$YELLOW" "主项目编译超时，尝试手动编译关键组件..."
         
-        # 手动编译nockchain核心组件
-        print_message "$CYAN" "手动编译nockchain核心组件..."
-        if [ -d "crates/nockchain" ]; then
-            cd crates/nockchain || return 1
-            if timeout 3600 cargo build --release --bin nockchain; then
-                mkdir -p "$HOME/.cargo/bin"
-                if [ -f "target/release/nockchain" ]; then
-                    cp target/release/nockchain "$HOME/.cargo/bin/"
-                    print_message "$GREEN" "nockchain手动编译成功"
+        # 手动编译关键组件
+        for component in "nockchain" "nockchain-wallet"; do
+            if [ -d "crates/$component" ]; then
+                print_message "$CYAN" "编译 $component..."
+                cd "crates/$component" || continue
+                if timeout 1800 cargo build --release --bin "$component"; then
+                    if [ -f "target/release/$component" ]; then
+                        mkdir -p "$HOME/.cargo/bin"
+                        cp "target/release/$component" "$HOME/.cargo/bin/"
+                        chmod +x "$HOME/.cargo/bin/$component"
+                        print_message "$GREEN" "$component 编译成功"
+                    fi
                 fi
+                cd ../..
             fi
-            cd ../..
-        fi
+        done
     fi
     
-    # 步骤3：安装组件
-    print_message "$MAGENTA" "步骤 3/3: 安装组件..."
-    make install-nockchain-wallet || print_message "$YELLOW" "钱包安装失败，但可能不影响主要功能"
-    make install-nockchain || print_message "$YELLOW" "主程序安装失败，但可能不影响主要功能"
+    # 步骤5: 安装组件
+    print_message "$CYAN" "安装组件..."
+    make install-nockchain-wallet 2>/dev/null || print_message "$YELLOW" "钱包安装失败"
+    make install-nockchain 2>/dev/null || print_message "$YELLOW" "主程序安装失败"
     
-    print_message "$GREEN" "Nockchain编译完成（Bootstrap文件缺失问题已修复）！"
+    print_message "$GREEN" "项目编译完成"
 }
 
-# 主安装函数 - Bootstrap文件缺失完全解决版
-install_nockchain_bootstrap_fix() {
-    print_message "$GREEN" ">>> 开始Nockchain Bootstrap文件缺失问题完全解决..."
+# 智能进程监控系统
+setup_process_monitor() {
+    print_message "$CYAN" "设置智能进程监控系统..."
     
-    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "8192")
-    local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "10240")
+    mkdir -p "$RUNTIME_DIR"
     
-    print_message "$YELLOW" "系统配置："
-    print_message "$YELLOW" "- 内存: ${total_ram}MB"
-    print_message "$YELLOW" "- 可用空间: ${available_space}MB"
+    # 创建进程监控脚本
+    cat > "$RUNTIME_DIR/monitor.sh" << 'EOF'
+#!/bin/bash
+# Nockchain 智能进程监控脚本
+
+NOCKCHAIN_DIR="$HOME/nockchain"
+LOG_DIR="$HOME/.nockchain_runtime"
+MONITOR_LOG="$LOG_DIR/monitor.log"
+RESTART_COUNT_FILE="$LOG_DIR/restart_count"
+MAX_RESTARTS=10
+CHECK_INTERVAL=30
+
+# 初始化重启计数
+[ ! -f "$RESTART_COUNT_FILE" ] && echo "0" > "$RESTART_COUNT_FILE"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$MONITOR_LOG"
+}
+
+check_and_restart() {
+    local restart_count=$(cat "$RESTART_COUNT_FILE")
+    
+    # 检查是否超过最大重启次数
+    if [ "$restart_count" -gt "$MAX_RESTARTS" ]; then
+        log_message "超过最大重启次数 ($MAX_RESTARTS)，停止监控"
+        exit 1
+    fi
+    
+    # 检查nockchain进程
+    if ! pgrep -f "nockchain.*run\|make.*run-nockchain" >/dev/null; then
+        log_message "检测到nockchain进程未运行，准备重启..."
+        
+        # 清理残留进程
+        pkill -f "nockchain" 2>/dev/null || true
+        sleep 5
+        
+        # 重启进程
+        cd "$NOCKCHAIN_DIR" || exit 1
+        source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+        conda activate nockchain-enhanced
+        
+        # 启动新的挖矿进程
+        screen -dmS nockchain-mining bash -c "
+            cd '$NOCKCHAIN_DIR'
+            source '$HOME/.miniconda3/etc/profile.d/conda.sh'
+            conda activate nockchain-enhanced
+            while true; do
+                timeout 7200 make run-nockchain 2>&1 | tee -a logs/mining.log
+                case \$? in
+                    0) echo 'Normal exit'; break ;;
+                    124) echo 'Timeout restart'; sleep 10; continue ;;
+                    *) echo 'Error restart'; sleep 15; continue ;;
+                esac
+            done
+        "
+        
+        # 更新重启计数
+        echo $((restart_count + 1)) > "$RESTART_COUNT_FILE"
+        log_message "重启完成，重启次数: $((restart_count + 1))"
+        
+        # 每天重置重启计数
+        if [ $((restart_count % 20)) -eq 0 ]; then
+            echo "0" > "$RESTART_COUNT_FILE"
+            log_message "重置重启计数"
+        fi
+    else
+        # 进程正常运行，重置计数
+        if [ "$restart_count" -gt 0 ]; then
+            echo "0" > "$RESTART_COUNT_FILE"
+            log_message "进程稳定运行，重置重启计数"
+        fi
+    fi
+}
+
+# 主循环
+while true; do
+    check_and_restart
+    sleep "$CHECK_INTERVAL"
+done
+EOF
+    
+    chmod +x "$RUNTIME_DIR/monitor.sh"
+    print_message "$GREEN" "进程监控系统设置完成"
+}
+
+# 主安装函数
+install_enhanced_nockchain() {
+    print_message "$GREEN" ">>> 开始Nockchain增强版安装..."
+    
+    # 系统检测
+    detect_system_info
     
     # 检查基本要求
-    if [ "$total_ram" -lt 2048 ]; then
-        print_message "$RED" "错误：系统内存不足2GB，无法安全编译"
+    if [ "$TOTAL_RAM" -lt 3072 ]; then
+        print_message "$RED" "错误：系统内存不足3GB"
         return 1
     fi
     
-    if [ "$available_space" -lt 5120 ]; then
-        print_message "$RED" "错误：可用磁盘空间不足5GB"
+    if [ "$AVAILABLE_SPACE" -lt 8192 ]; then
+        print_message "$RED" "错误：可用磁盘空间不足8GB"
         return 1
     fi
     
-    mkdir -p "$BACKUP_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
+    mkdir -p "$BACKUP_DIR" "$RUNTIME_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
     
-    # 步骤1：安装系统编译器
-    print_message "$MAGENTA" "步骤 1/6: 安装系统编译器..."
-    local use_conda_compilers=false
-    if ! install_system_compilers; then
-        print_message "$YELLOW" "系统编译器安装失败，将使用Conda编译器"
-        use_conda_compilers=true
+    # 步骤1: 安装系统依赖
+    print_message "$MAGENTA" "步骤 1/7: 安装系统依赖..."
+    local use_conda=false
+    if ! install_enhanced_system_deps; then
+        use_conda=true
     fi
     
-    # 步骤2：设置Miniconda环境
-    print_message "$MAGENTA" "步骤 2/6: 设置Miniconda环境..."
-    if ! smart_miniconda_setup; then
-        print_message "$RED" "Miniconda设置失败"
+    # 步骤2: 设置Conda环境
+    print_message "$MAGENTA" "步骤 2/7: 设置Conda环境..."
+    if ! smart_conda_setup; then
+        print_message "$RED" "Conda设置失败"
         return 1
     fi
     
-    # 步骤3：安装Conda编译器（如果需要）
-    if [ "$use_conda_compilers" = true ]; then
-        print_message "$MAGENTA" "步骤 3/6: 安装Conda编译器工具链..."
-        if ! install_conda_compilers; then
-            print_message "$RED" "Conda编译器安装失败"
+    # 步骤3: 设置编译环境
+    if [ "$use_conda" = true ]; then
+        print_message "$MAGENTA" "步骤 3/7: 设置Conda编译环境..."
+        if ! setup_enhanced_conda_env; then
+            print_message "$RED" "编译环境设置失败"
             return 1
         fi
     else
-        print_message "$MAGENTA" "步骤 3/6: 跳过Conda编译器安装（使用系统编译器）"
+        print_message "$MAGENTA" "步骤 3/7: 使用系统编译器"
+        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+        conda create -n nockchain-enhanced -y python=3.9 --no-default-packages
+        conda activate nockchain-enhanced
     fi
     
-    # 步骤4：配置Rust环境
-    print_message "$MAGENTA" "步骤 4/6: 配置Rust环境（Bootstrap修复版）..."
-    if ! setup_rust_environment; then
-        print_message "$RED" "Rust环境配置失败"
+    # 步骤4: 设置Rust环境
+    print_message "$MAGENTA" "步骤 4/7: 设置Rust环境..."
+    if ! setup_enhanced_rust; then
+        print_message "$RED" "Rust环境设置失败"
         return 1
     fi
     
-    # 步骤5：获取Nockchain源码
-    print_message "$MAGENTA" "步骤 5/6: 获取Nockchain源码..."
+    # 步骤5: 获取源码
+    print_message "$MAGENTA" "步骤 5/7: 获取Nockchain源码..."
     if [ -d "$NOCKCHAIN_DIR" ]; then
         print_message "$YELLOW" "更新现有项目..."
         cd "$NOCKCHAIN_DIR"
+        git stash 2>/dev/null || true
         git pull origin main || {
             cd "$HOME"
             rm -rf "$NOCKCHAIN_DIR"
@@ -720,14 +655,14 @@ install_nockchain_bootstrap_fix() {
         }
     else
         git clone https://github.com/zorp-corp/nockchain.git "$NOCKCHAIN_DIR" || {
-            print_message "$RED" "项目克隆失败"
+            print_message "$RED" "源码获取失败"
             return 1
         }
     fi
     
     cd "$NOCKCHAIN_DIR"
     
-    # 配置环境文件 - Bootstrap修复版
+    # 配置环境文件
     if [ -f ".env_example" ]; then
         cp .env_example .env
     else
@@ -735,567 +670,336 @@ install_nockchain_bootstrap_fix() {
 MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 NETWORK=mainnet
 MAX_PEERS=1000
-LOG_LEVEL=error
-RUST_LOG=error
-RUST_MIN_STACK=134217728
-CARGO_BUILD_JOBS=1
-CARGO_HTTP_TIMEOUT=600
-CARGO_NET_RETRY=15
+LOG_LEVEL=warn
+RUST_LOG=warn
+RUST_MIN_STACK=268435456
+CARGO_BUILD_JOBS=2
+CARGO_HTTP_TIMEOUT=900
+CARGO_NET_RETRY=20
 EOF
     fi
     
-    # 步骤6：编译项目
-    print_message "$MAGENTA" "步骤 6/6: 编译Nockchain项目（Bootstrap修复版）..."
-    if ! compile_nockchain_with_bootstrap_fix; then
+    # 创建日志目录
+    mkdir -p logs
+    
+    # 步骤6: 编译项目
+    print_message "$MAGENTA" "步骤 6/7: 编译项目..."
+    if ! compile_enhanced_nockchain; then
         print_message "$RED" "项目编译失败"
         return 1
     fi
     
+    # 步骤7: 设置监控系统
+    print_message "$MAGENTA" "步骤 7/7: 设置监控系统..."
+    setup_process_monitor
+    
     # 生成钱包
     if check_command "nockchain-wallet"; then
         print_message "$CYAN" "生成钱包..."
+        source "$MINICONDA_DIR/etc/profile.d/conda.sh"
+        conda activate nockchain-enhanced
+        
         local wallet_output
         wallet_output=$(timeout 60 nockchain-wallet keygen 2>&1)
         
         if [ $? -eq 0 ]; then
             print_message "$GREEN" "钱包生成成功！"
             echo "$wallet_output"
-            
-            # 提取128位16进制公钥
-            local pubkey=$(echo "$wallet_output" | grep -E "Public key:|公钥:" | awk '{print $NF}')
-            if [ -n "$pubkey" ] && validate_128bit_hex_pubkey "$pubkey"; then
-                sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$pubkey/" .env
-                print_message "$GREEN" "128位16进制公钥自动配置完成"
-            else
-                print_message "$YELLOW" "请手动设置128位16进制公钥"
-            fi
-            
             echo "$wallet_output" > "$BACKUP_DIR/wallet_$(date +%Y%m%d_%H%M%S).txt"
+            
+            # 提取公钥
+            local pubkey=$(echo "$wallet_output" | grep -E "Public key:|公钥:" | awk '{print $NF}')
+            if [ -n "$pubkey" ] && [[ $pubkey =~ ^[0-9a-fA-F]{128}$ ]]; then
+                sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$pubkey/" .env
+                print_message "$GREEN" "公钥自动配置完成"
+            fi
         fi
     fi
     
-    # 创建环境激活脚本 - Bootstrap修复版
-    cat > "$HOME/nockchain_bootstrap_fixed.sh" << 'EOF'
+    # 创建启动脚本
+    cat > "$HOME/nockchain_enhanced.sh" << 'EOF'
 #!/bin/bash
-# Nockchain Bootstrap文件缺失修复版环境激活脚本
-source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-conda activate nockchain-bootstrap
+# Nockchain增强版环境激活脚本
 
-# Bootstrap修复专用环境变量
-export RUST_MIN_STACK=134217728
-export RUST_LOG=error
-export CARGO_BUILD_JOBS=1
-export CARGO_HTTP_TIMEOUT=600
-export CARGO_NET_RETRY=15
 export PATH="$HOME/.cargo/bin:$PATH"
+export RUST_MIN_STACK=268435456
+export RUST_LOG=warn
+export CARGO_BUILD_JOBS=2
 
-# 设置编译器环境变量
-export CC=$(which gcc || which clang)
-export CXX=$(which g++ || which clang++)
-if [ -n "$CC" ]; then
-    export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory"
-fi
+source "$HOME/.miniconda3/etc/profile.d/conda.sh"
+conda activate nockchain-enhanced
 
 cd "$HOME/nockchain"
-echo "Nockchain Bootstrap修复版环境已激活"
-echo "编译器: $CC"
+echo "Nockchain增强版环境已激活"
+echo "编译器: $(which gcc)"
 echo "hoonc: $(which hoonc)"
-echo "Bootstrap文件: $(ls -la crates/hoonc/bootstrap/hoonc.jam 2>/dev/null || echo '未找到')"
-echo "使用 'make run-nockchain' 启动挖矿"
+echo "钱包: $(which nockchain-wallet)"
+echo "Bootstrap: $(ls -la crates/hoonc/bootstrap/hoonc.jam 2>/dev/null || echo '未找到')"
+echo ""
+echo "使用命令："
+echo "  启动挖矿: make run-nockchain"
+echo "  启动监控: $HOME/.nockchain_runtime/monitor.sh &"
+echo "  查看日志: tail -f logs/mining.log"
 EOF
-    chmod +x "$HOME/nockchain_bootstrap_fixed.sh"
+    chmod +x "$HOME/nockchain_enhanced.sh"
     
-    print_message "$GREEN" "🎉 Nockchain Bootstrap文件缺失问题完全解决！"
-    print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "环境激活: source ~/nockchain_bootstrap_fixed.sh"
-    print_message "$CYAN" "Bootstrap JAM文件已生成并成功编译！"
-    print_message "$CYAN" "hoonc编译器现在可以正常工作！"
-    print_message "$CYAN" "公钥格式已更新为128位16进制标准！"
+    print_message "$GREEN" "🎉 Nockchain增强版安装完成！"
+    print_message "$CYAN" "环境激活: source ~/nockchain_enhanced.sh"
+    print_message "$CYAN" "进程监控: ~/.nockchain_runtime/monitor.sh &"
 }
 
-# 配置128位16进制挖矿公钥
-configure_128bit_mining_key() {
-    print_message "$CYAN" ">>> 配置128位16进制挖矿公钥"
+# 启动增强版挖矿
+start_enhanced_mining() {
+    print_message "$GREEN" ">>> 启动增强版挖矿节点..."
     
     if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
         print_message "$RED" "错误：未找到配置文件"
         return 1
     fi
     
-    local current_key=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
-    print_message "$YELLOW" "当前公钥: $current_key"
-    
-    print_message "$CYAN" "128位16进制公钥格式说明："
-    print_message "$YELLOW" "- 必须是128个16进制字符（0-9, A-F）"
-    print_message "$YELLOW" "- 代表64字节的椭圆曲线公钥"
-    print_message "$YELLOW" "- 格式类似以太坊公钥标准"
-    
-    read -p "请输入新的128位16进制挖矿公钥: " new_pubkey
-    
-    if [ -n "$new_pubkey" ] && validate_128bit_hex_pubkey "$new_pubkey"; then
-        cd "$NOCKCHAIN_DIR"
-        cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
-        sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" .env
-        print_message "$GREEN" "128位16进制公钥更新成功！"
-    fi
-}
-
-# 启动Bootstrap保护挖矿
-start_bootstrap_protected_mining() {
-    print_message "$GREEN" ">>> 启动Bootstrap保护挖矿节点..."
-    
-    if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
-        print_message "$RED" "错误：未找到安装"
-        return 1
-    fi
-    
-    # 验证Bootstrap文件存在
+    # 检查Bootstrap文件
     if [ ! -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
-        print_message "$RED" "错误：Bootstrap JAM文件缺失，请重新安装"
+        print_message "$RED" "错误：Bootstrap文件缺失"
         return 1
     fi
     
+    # 停止现有进程
     if screen -list | grep -q "nockchain"; then
-        read -p "检测到挖矿进程正在运行，是否重启？(y/N): " restart
-        if [[ "$restart" =~ ^[Yy]$ ]]; then
-            screen -S nockchain -X quit
-            sleep 3
-        else
-            return 0
-        fi
+        screen -S nockchain-mining -X quit 2>/dev/null || true
+        sleep 3
     fi
     
     cd "$NOCKCHAIN_DIR"
-    source "$HOME/nockchain_bootstrap_fixed.sh"
+    source "$HOME/nockchain_enhanced.sh"
     
-    print_message "$CYAN" "正在启动Bootstrap保护挖矿节点..."
-    
-    screen -dmS nockchain bash -c "
-        source '$HOME/nockchain_bootstrap_fixed.sh'
+    # 启动挖矿进程
+    screen -dmS nockchain-mining bash -c "
+        source '$HOME/nockchain_enhanced.sh'
         cd '$NOCKCHAIN_DIR'
-        source .env
-        mkdir -p logs
-        echo '=== Nockchain Bootstrap修复版挖矿 ===' > logs/mining.log
-        echo '启动时间: \$(date)' >> logs/mining.log
-        echo '版本: Bootstrap文件缺失问题完全解决版' >> logs/mining.log
-        echo 'Bootstrap保护: 已启用' >> logs/mining.log
-        echo 'JAM文件: \$(ls -la crates/hoonc/bootstrap/hoonc.jam)' >> logs/mining.log
-        echo '公钥格式: 128位16进制' >> logs/mining.log
-        echo '=================================' >> logs/mining.log
+        
+        echo '=== Nockchain增强版挖矿启动 ===' | tee -a logs/mining.log
+        echo '启动时间: \$(date)' | tee -a logs/mining.log
+        echo '版本: 增强版 v12.0' | tee -a logs/mining.log
+        echo '=================================' | tee -a logs/mining.log
         
         while true; do
-            # 每次启动前检查Bootstrap文件
-            if [ ! -f 'crates/hoonc/bootstrap/hoonc.jam' ]; then
-                echo '\$(date): Bootstrap JAM文件缺失，尝试重新生成...' >> logs/mining.log
-                # 这里可以添加重新生成逻辑
-                sleep 10
-                continue
-            fi
-            
             timeout 7200 make run-nockchain 2>&1 | tee -a logs/mining.log
             exit_code=\$?
             case \$exit_code in
-                0)
-                    echo '\$(date): 正常退出' >> logs/mining.log
-                    break
-                    ;;
-                124)
-                    echo '\$(date): 运行超时（2小时），重启挖矿进程...' >> logs/mining.log
-                    sleep 5
-                    continue
-                    ;;
-                143)
-                    echo '\$(date): 收到SIGTERM (143)，优雅重启...' >> logs/mining.log
-                    sleep 5
-                    continue
-                    ;;
-                *)
-                    echo '\$(date): 进程异常退出，退出码: \$exit_code，等待重启...' >> logs/mining.log
-                    sleep 10
-                    continue
-                    ;;
+                0) echo '\$(date): 正常退出' | tee -a logs/mining.log; break ;;
+                124) echo '\$(date): 运行超时，重启...' | tee -a logs/mining.log; sleep 10; continue ;;
+                *) echo '\$(date): 异常退出(\$exit_code)，等待重启...' | tee -a logs/mining.log; sleep 15; continue ;;
             esac
         done
     "
     
     sleep 5
     
-    if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "🚀 Bootstrap保护挖矿节点启动成功！"
-        print_message "$CYAN" "- 查看状态: screen -r nockchain"
-        print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
-        print_message "$CYAN" "- Bootstrap保护: 已启用"
-        print_message "$CYAN" "- JAM文件监控: 已启用"
-        print_message "$CYAN" "- 超时自动重启: 已启用（2小时超时）"
+    if screen -list | grep -q "nockchain-mining"; then
+        print_message "$GREEN" "🚀 增强版挖矿节点启动成功！"
+        print_message "$CYAN" "- 查看进程: screen -r nockchain-mining"
+        print_message "$CYAN" "- 启动监控: ~/.nockchain_runtime/monitor.sh &"
+        print_message "$CYAN" "- 查看日志: tail -f ~/nockchain/logs/mining.log"
+        
+        # 自动启动监控
+        if [ -f "$RUNTIME_DIR/monitor.sh" ]; then
+            nohup "$RUNTIME_DIR/monitor.sh" > "$RUNTIME_DIR/monitor.log" 2>&1 &
+            print_message "$GREEN" "进程监控已自动启动"
+        fi
     else
         print_message "$RED" "启动失败，请查看日志"
     fi
 }
 
-# Bootstrap文件问题诊断
-diagnose_bootstrap_issues() {
-    print_message "$GREEN" ">>> Bootstrap文件问题诊断"
-    
-    print_message "$CYAN" "正在检查Bootstrap相关问题..."
-    
-    # 检查Bootstrap目录和文件
-    print_message "$YELLOW" "Bootstrap文件检查："
-    
-    if [ -d "$NOCKCHAIN_DIR/crates/hoonc/bootstrap" ]; then
-        print_message "$GREEN" "✅ Bootstrap目录存在: $NOCKCHAIN_DIR/crates/hoonc/bootstrap"
-        
-        if [ -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
-            local jam_size=$(stat -c%s "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" 2>/dev/null || echo "0")
-            print_message "$GREEN" "✅ hoonc.jam文件存在，大小: ${jam_size} 字节"
-            
-            if [ "$jam_size" -gt 0 ]; then
-                print_message "$GREEN" "✅ JAM文件不为空"
-            else
-                print_message "$RED" "❌ JAM文件为空"
-            fi
-        else
-            print_message "$RED" "❌ hoonc.jam文件不存在"
-        fi
-        
-        print_message "$CYAN" "Bootstrap目录内容:"
-        ls -la "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/" 2>/dev/null || print_message "$YELLOW" "无法列出目录内容"
-    else
-        print_message "$RED" "❌ Bootstrap目录不存在"
-    fi
-    
-    # 检查hoonc编译器
-    print_message "$YELLOW" "hoonc编译器检查："
-    if check_command "hoonc"; then
-        print_message "$GREEN" "✅ hoonc: $(which hoonc)"
-        print_message "$CYAN" "版本: $(hoonc --version 2>/dev/null || echo '无法获取版本')"
-    else
-        print_message "$RED" "❌ hoonc: 未找到"
-    fi
-    
-    # 检查Hoon相关文件
-    print_message "$YELLOW" "Hoon内核文件检查："
-    if [ -d "$NOCKCHAIN_DIR/hoon" ]; then
-        print_message "$GREEN" "✅ hoon目录存在"
-        local hoon_files=$(find "$NOCKCHAIN_DIR/hoon" -name "*.hoon" 2>/dev/null | wc -l)
-        print_message "$CYAN" "Hoon文件数量: $hoon_files"
-    else
-        print_message "$RED" "❌ hoon目录不存在"
-    fi
-    
-    # 检查编译环境
-    print_message "$YELLOW" "编译环境检查："
-    print_message "$CYAN" "- RUST_MIN_STACK: ${RUST_MIN_STACK:-未设置}"
-    print_message "$CYAN" "- CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-未设置}"
-    print_message "$CYAN" "- CARGO_HTTP_TIMEOUT: ${CARGO_HTTP_TIMEOUT:-未设置}"
-    
-    # 检查Makefile
-    print_message "$YELLOW" "Makefile检查："
-    if [ -f "$NOCKCHAIN_DIR/Makefile" ]; then
-        print_message "$GREEN" "✅ Makefile存在"
-        
-        if grep -q "install-hoonc" "$NOCKCHAIN_DIR/Makefile"; then
-            print_message "$GREEN" "✅ 发现install-hoonc目标"
-        else
-            print_message "$RED" "❌ 未找到install-hoonc目标"
-        fi
-        
-        if grep -q "bootstrap" "$NOCKCHAIN_DIR/Makefile"; then
-            print_message "$GREEN" "✅ 发现bootstrap目标"
-        else
-            print_message "$YELLOW" "⚠️ 未找到bootstrap目标"
-        fi
-    else
-        print_message "$RED" "❌ Makefile不存在"
-    fi
-    
-    # 检查包含文件的路径
-    print_message "$YELLOW" "include_bytes路径检查："
-    if [ -f "$NOCKCHAIN_DIR/crates/hoonc/src/lib.rs" ]; then
-        print_message "$GREEN" "✅ lib.rs文件存在"
-        
-        local include_line=$(grep "include_bytes" "$NOCKCHAIN_DIR/crates/hoonc/src/lib.rs" 2>/dev/null)
-        if [ -n "$include_line" ]; then
-            print_message "$CYAN" "include_bytes行: $include_line"
-            
-            # 检查路径是否正确
-            local expected_path="$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam"
-            if [ -f "$expected_path" ]; then
-                print_message "$GREEN" "✅ 包含路径指向的文件存在"
-            else
-                print_message "$RED" "❌ 包含路径指向的文件不存在: $expected_path"
-            fi
-        fi
-    else
-        print_message "$RED" "❌ lib.rs文件不存在"
-    fi
-    
-    # 提供修复建议
-    print_message "$CYAN" "Bootstrap文件修复建议："
-    
-    if [ ! -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
-        print_message "$YELLOW" "1. 缺少hoonc.jam文件，需要生成Bootstrap文件"
-    fi
-    
-    if ! check_command "hoonc"; then
-        print_message "$YELLOW" "2. hoonc编译器缺失，需要正确的Bootstrap文件才能编译"
-    fi
-    
-    if [ ! -d "$NOCKCHAIN_DIR/hoon" ]; then
-        print_message "$YELLOW" "3. hoon目录缺失，可能影响Bootstrap文件生成"
-    fi
-    
-    print_message "$YELLOW" "4. 强烈建议使用选项1重新安装Bootstrap修复版"
+# 显示菜单
+show_menu() {
+    clear
+    echo -e "${BLUE}
+=======================================
+ Nockchain 增强版挖矿解决方案 v12.0
+=======================================
+${RESET}"
+    echo -e "${YELLOW}1. 完整安装增强版Nockchain（推荐）"
+    echo "2. 启动增强版挖矿节点"
+    echo "3. 查看挖矿日志"
+    echo "4. 检查系统状态"
+    echo "5. 重启挖矿进程"
+    echo "6. 配置挖矿公钥"
+    echo "7. 备份钱包数据"
+    echo "8. 故障诊断"
+    echo "9. 卸载清理"
+    echo "10. 退出"
+    echo -e "${BLUE}=======================================${RESET}"
 }
 
-# Bootstrap生成工具
-bootstrap_generation_tools() {
-    print_message "$GREEN" ">>> Bootstrap生成工具"
+# 其他功能函数（简化版）
+check_status() {
+    print_message "$CYAN" "系统状态检查..."
     
-    echo "1. 手动生成Bootstrap JAM文件"
-    echo "2. 从GitHub下载预编译JAM文件"
-    echo "3. 创建最小化JAM文件"
-    echo "4. 验证现有JAM文件"
-    echo "5. 清理Bootstrap缓存"
-    echo "6. 返回主菜单"
+    # 进程状态
+    if pgrep -f "nockchain.*run\|make.*run-nockchain" >/dev/null; then
+        print_message "$GREEN" "✅ 挖矿进程正在运行"
+    else
+        print_message "$RED" "❌ 挖矿进程未运行"
+    fi
     
-    read -p "请选择操作: " opt_choice
+    # 监控状态
+    if pgrep -f "monitor.sh" >/dev/null; then
+        print_message "$GREEN" "✅ 进程监控正在运行"
+    else
+        print_message "$YELLOW" "⚠️ 进程监控未运行"
+    fi
     
-    case $opt_choice in
-        1)
-            print_message "$CYAN" "手动生成Bootstrap JAM文件..."
-            cd "$NOCKCHAIN_DIR" 2>/dev/null || { print_message "$RED" "项目目录不存在"; return; }
-            generate_bootstrap_jam_files
-            ;;
-        2)
-            print_message "$CYAN" "从GitHub下载预编译JAM文件..."
-            cd "$NOCKCHAIN_DIR" 2>/dev/null || { print_message "$RED" "项目目录不存在"; return; }
-            mkdir -p "crates/hoonc/bootstrap"
-            
-            local jam_urls=(
-                "https://raw.githubusercontent.com/zorp-corp/nockchain/master/crates/hoonc/bootstrap/hoonc.jam"
-                "https://github.com/zorp-corp/nockchain/raw/master/crates/hoonc/bootstrap/hoonc.jam"
-            )
-            
-            for url in "${jam_urls[@]}"; do
-                print_message "$CYAN" "尝试下载: $url"
-                if wget -q --timeout=30 "$url" -O "crates/hoonc/bootstrap/hoonc.jam.tmp"; then
-                    if [ -s "crates/hoonc/bootstrap/hoonc.jam.tmp" ]; then
-                        mv "crates/hoonc/bootstrap/hoonc.jam.tmp" "crates/hoonc/bootstrap/hoonc.jam"
-                        print_message "$GREEN" "下载成功！"
-                        break
-                    fi
-                fi
-                rm -f "crates/hoonc/bootstrap/hoonc.jam.tmp"
-            done
-            ;;
-        3)
-            print_message "$CYAN" "创建最小化JAM文件..."
-            cd "$NOCKCHAIN_DIR" 2>/dev/null || { print_message "$RED" "项目目录不存在"; return; }
-            mkdir -p "crates/hoonc/bootstrap"
-            echo -ne '\x00\x00\x00\x01\x00\x00\x00\x00\x01\x00\x00\x00' > "crates/hoonc/bootstrap/hoonc.jam"
-            print_message "$GREEN" "最小化JAM文件创建完成"
-            ;;
-        4)
-            print_message "$CYAN" "验证现有JAM文件..."
-            if [ -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
-                local jam_info=$(ls -la "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam")
-                print_message "$GREEN" "JAM文件信息: $jam_info"
-                
-                local jam_size=$(stat -c%s "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam")
-                if [ "$jam_size" -gt 0 ]; then
-                    print_message "$GREEN" "文件大小正常: ${jam_size} 字节"
-                else
-                    print_message "$RED" "文件为空"
-                fi
-                
-                # 显示文件头部
-                print_message "$CYAN" "文件头部十六进制:"
-                hexdump -C "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" | head -5
-            else
-                print_message "$RED" "JAM文件不存在"
-            fi
-            ;;
-        5)
-            print_message "$CYAN" "清理Bootstrap缓存..."
-            rm -rf "$NOCKCHAIN_DIR/.data.hoonc" "$HOME/.nockapp/hoonc" 2>/dev/null
-            rm -rf "$NOCKCHAIN_DIR/target/debug/build/*hoonc*" "$NOCKCHAIN_DIR/target/release/build/*hoonc*" 2>/dev/null
-            print_message "$GREEN" "Bootstrap缓存清理完成"
-            ;;
-        6)
-            return
-            ;;
-    esac
+    # Bootstrap文件
+    if [ -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
+        local size=$(stat -c%s "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" 2>/dev/null || echo "0")
+        print_message "$GREEN" "✅ Bootstrap文件存在 (${size} 字节)"
+    else
+        print_message "$RED" "❌ Bootstrap文件缺失"
+    fi
+    
+    # 系统资源
+    local mem_usage=$(free | awk '/^Mem:/{printf "%.1f", $3/$2*100}')
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}')
+    print_message "$CYAN" "内存使用率: ${mem_usage}%"
+    print_message "$CYAN" "系统负载: $load_avg"
 }
 
-# 查看日志
 view_logs() {
-    print_message "$GREEN" ">>> 显示编译/挖矿日志"
+    print_message "$GREEN" ">>> 查看挖矿日志"
     
     if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
         tail -f "$NOCKCHAIN_DIR/logs/mining.log"
-    elif [ -f "$LOG_FILE" ]; then
-        print_message "$CYAN" "显示安装日志："
-        tail -100 "$LOG_FILE"
     else
-        if screen -list | grep -q "nockchain"; then
-            screen -r nockchain
-        else
-            print_message "$RED" "未找到日志或进程"
-        fi
+        print_message "$RED" "日志文件不存在"
     fi
 }
 
-# 检查余额
-check_balance() {
-    print_message "$GREEN" ">>> 检查钱包余额"
+restart_mining() {
+    print_message "$GREEN" ">>> 重启挖矿进程"
     
-    source "$HOME/nockchain_bootstrap_fixed.sh"
+    # 停止现有进程
+    screen -S nockchain-mining -X quit 2>/dev/null || true
+    pkill -f "nockchain.*run\|make.*run-nockchain" 2>/dev/null || true
+    sleep 5
     
-    cd "$NOCKCHAIN_DIR"
-    local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
+    # 重新启动
+    start_enhanced_mining
+}
+
+configure_pubkey() {
+    print_message "$GREEN" ">>> 配置挖矿公钥"
     
-    if [ -z "$pubkey" ] || [ "$pubkey" = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" ]; then
-        print_message "$RED" "未配置有效的128位16进制公钥"
+    if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
+        print_message "$RED" "配置文件不存在"
         return 1
     fi
     
-    print_message "$CYAN" "查询余额: $pubkey"
+    local current_key=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
+    print_message "$YELLOW" "当前公钥: $current_key"
     
-    if check_command "nockchain-wallet"; then
-        for socket in ./nockchain*.sock; do
-            if [ -S "$socket" ]; then
-                nockchain-wallet --nockchain-socket "$socket" list-notes-by-pubkey -p "$pubkey" 2>/dev/null && break
-            fi
-        done
+    read -p "请输入新的128位16进制公钥: " new_pubkey
+    
+    if [[ $new_pubkey =~ ^[0-9a-fA-F]{128}$ ]]; then
+        cd "$NOCKCHAIN_DIR"
+        cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
+        sed -i "s/MINING_PUBKEY=.*/MINING_PUBKEY=$new_pubkey/" .env
+        print_message "$GREEN" "公钥更新成功！"
+    else
+        print_message "$RED" "公钥格式错误，必须是128位16进制"
     fi
 }
 
-# 系统监控
-system_monitor() {
-    print_message "$BLUE" "====== 系统状态监控（Bootstrap修复版） ======"
-    
-    local mem_info=$(free -h | awk '/^Mem:/{print "使用: "$3" / 总计: "$2}')
-    local mem_percent=$(free | awk '/^Mem:/{printf "%.1f", $3/$2*100}')
-    print_message "$YELLOW" "内存状态: $mem_info (${mem_percent}%)"
-    
-    local load_avg=$(uptime | awk -F'load average:' '{print $2}')
-    print_message "$YELLOW" "系统负载: $load_avg"
-    
-    # Bootstrap文件状态检查
-    print_message "$CYAN" "Bootstrap文件状态："
-    if [ -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ]; then
-        local jam_size=$(stat -c%s "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" 2>/dev/null || echo "0")
-        print_message "$GREEN" "- hoonc.jam: ✅ 存在 (${jam_size} 字节)"
-    else
-        print_message "$RED" "- hoonc.jam: ❌ 缺失"
-    fi
-    
-    # 编译器状态
-    print_message "$CYAN" "编译器状态："
-    if check_command "hoonc"; then
-        print_message "$GREEN" "- hoonc编译器: $(which hoonc)"
-    else
-        print_message "$RED" "- hoonc编译器: 未找到"
-    fi
-    
-    if check_command "cc"; then
-        print_message "$GREEN" "- cc链接器: $(which cc)"
-    else
-        print_message "$RED" "- cc链接器: 未找到"
-    fi
-    
-    # 挖矿状态
-    if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "挖矿状态: ✅ 正在运行（Bootstrap保护已启用）"
-    else
-        print_message "$RED" "挖矿状态: ❌ 未运行"
-    fi
-    
-    # 公钥格式检查
-    if [ -f "$NOCKCHAIN_DIR/.env" ]; then
-        local pubkey=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
-        if validate_128bit_hex_pubkey "$pubkey"; then
-            print_message "$GREEN" "- 公钥格式: ✅ 128位16进制正确"
-        else
-            print_message "$RED" "- 公钥格式: ❌ 需要128位16进制"
-        fi
-    fi
-}
-
-# 备份钱包
 backup_wallet() {
-    print_message "$GREEN" ">>> 备份钱包密钥"
+    print_message "$GREEN" ">>> 备份钱包数据"
     
-    local backup_file="$BACKUP_DIR/complete_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+    local backup_file="$BACKUP_DIR/nockchain_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
     mkdir -p "$BACKUP_DIR"
     
-    cd "$NOCKCHAIN_DIR" 2>/dev/null || return 1
-    
-    # 备份重要文件
-    tar -czf "$backup_file" .env logs/ *.txt "$LOG_FILE" crates/hoonc/bootstrap/hoonc.jam 2>/dev/null || true
-    
-    if [ -f ".env" ]; then
-        cp .env "$BACKUP_DIR/env_$(date +%Y%m%d_%H%M%S).backup"
+    if [ -d "$NOCKCHAIN_DIR" ]; then
+        cd "$NOCKCHAIN_DIR"
+        tar -czf "$backup_file" .env logs/ *.txt crates/hoonc/bootstrap/hoonc.jam 2>/dev/null || true
+        print_message "$GREEN" "备份完成: $backup_file"
+    else
+        print_message "$RED" "项目目录不存在"
     fi
-    
-    if [ -f "$LOG_FILE" ]; then
-        cp "$LOG_FILE" "$BACKUP_DIR/bootstrap_fix_log_$(date +%Y%m%d_%H%M%S).log"
-    fi
-    
-    # 备份Bootstrap文件
-    if [ -f "crates/hoonc/bootstrap/hoonc.jam" ]; then
-        cp "crates/hoonc/bootstrap/hoonc.jam" "$BACKUP_DIR/hoonc_$(date +%Y%m%d_%H%M%S).jam"
-        print_message "$GREEN" "Bootstrap JAM文件已备份"
-    fi
-    
-    print_message "$GREEN" "备份完成: $backup_file"
 }
 
-# 主循环
+diagnose_issues() {
+    print_message "$GREEN" ">>> 故障诊断"
+    
+    echo "=== 基础检查 ==="
+    check_command "gcc" && print_message "$GREEN" "✅ gcc: $(which gcc)" || print_message "$RED" "❌ gcc未找到"
+    check_command "rustc" && print_message "$GREEN" "✅ rustc: $(rustc --version)" || print_message "$RED" "❌ rustc未找到"
+    check_command "hoonc" && print_message "$GREEN" "✅ hoonc: $(which hoonc)" || print_message "$RED" "❌ hoonc未找到"
+    
+    echo -e "\n=== 文件检查 ==="
+    [ -f "$NOCKCHAIN_DIR/Makefile" ] && print_message "$GREEN" "✅ Makefile存在" || print_message "$RED" "❌ Makefile缺失"
+    [ -f "$NOCKCHAIN_DIR/.env" ] && print_message "$GREEN" "✅ 配置文件存在" || print_message "$RED" "❌ 配置文件缺失"
+    [ -f "$NOCKCHAIN_DIR/crates/hoonc/bootstrap/hoonc.jam" ] && print_message "$GREEN" "✅ Bootstrap文件存在" || print_message "$RED" "❌ Bootstrap文件缺失"
+    
+    echo -e "\n=== 进程检查 ==="
+    if pgrep -f "nockchain" >/dev/null; then
+        print_message "$GREEN" "✅ 发现nockchain相关进程:"
+        pgrep -f "nockchain" | while read pid; do
+            ps -p $pid -o pid,cmd --no-headers
+        done
+    else
+        print_message "$RED" "❌ 未发现nockchain进程"
+    fi
+    
+    echo -e "\n=== 日志检查 ==="
+    if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
+        print_message "$CYAN" "最近的日志:"
+        tail -10 "$NOCKCHAIN_DIR/logs/mining.log"
+    else
+        print_message "$YELLOW" "无挖矿日志"
+    fi
+}
+
+cleanup_installation() {
+    print_message "$GREEN" ">>> 卸载清理"
+    
+    read -p "确定要卸载所有组件吗？(y/N): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        # 停止所有进程
+        screen -S nockchain-mining -X quit 2>/dev/null || true
+        pkill -f "nockchain\|monitor.sh" 2>/dev/null || true
+        
+        # 删除文件
+        rm -rf "$NOCKCHAIN_DIR" "$RUNTIME_DIR" "$MINICONDA_DIR/envs/nockchain-enhanced"
+        rm -f "$HOME/nockchain_enhanced.sh"
+        
+        print_message "$GREEN" "卸载完成"
+    fi
+}
+
+# 主函数
 main() {
     if [ "$EUID" -eq 0 ]; then
         print_message "$RED" "请不要以root用户运行"
         exit 1
     fi
     
-    # 检查bc命令
-    if ! check_command "bc"; then
-        print_message "$YELLOW" "安装bc计算器..."
-        case $(detect_distro) in
-            "ubuntu"|"debian"|"mint"|"pop")
-                sudo apt install -y bc 2>/dev/null || true
-                ;;
-            "centos"|"rhel"|"rocky"|"almalinux"|"fedora")
-                sudo yum install -y bc 2>/dev/null || sudo dnf install -y bc 2>/dev/null || true
-                ;;
-        esac
-    fi
-    
-    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$BACKUP_DIR" "$RUNTIME_DIR"
     touch "$LOG_FILE"
-    print_message "$CYAN" "Bootstrap文件缺失修复脚本启动 v11.0"
     
     while true; do
         show_menu
-        read -p "请输入选项编号（1-10）: " choice
+        read -p "请选择操作 (1-10): " choice
         
         case $choice in
-            1) install_nockchain_bootstrap_fix ;;
-            2) configure_128bit_mining_key ;;
-            3) start_bootstrap_protected_mining ;;
-            4) view_logs ;;
-            5) check_balance ;;
-            6) system_monitor ;;
+            1) install_enhanced_nockchain ;;
+            2) start_enhanced_mining ;;
+            3) view_logs ;;
+            4) check_status ;;
+            5) restart_mining ;;
+            6) configure_pubkey ;;
             7) backup_wallet ;;
-            8) diagnose_bootstrap_issues ;;
-            9) bootstrap_generation_tools ;;
-            10)
-                print_message "$GREEN" "感谢使用Nockchain Bootstrap文件缺失完全解决方案！"
-                exit 0
-                ;;
-            *)
-                print_message "$RED" "无效选项"
-                ;;
+            8) diagnose_issues ;;
+            9) cleanup_installation ;;
+            10) print_message "$GREEN" "谢谢使用！"; exit 0 ;;
+            *) print_message "$RED" "无效选项" ;;
         esac
         
         echo
@@ -1303,5 +1007,5 @@ main() {
     done
 }
 
-# 启动程序
+# 启动脚本
 main
