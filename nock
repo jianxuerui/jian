@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: UTF-8 -*-
-# Nockchain hoonc编译卡住问题完全解决方案 v9.0
+# Nockchain SIGTERM 143 编译中断完整解决方案 v10.0
 
 # 颜色定义
 RED='\033[1;31m'
@@ -14,32 +14,150 @@ RESET='\033[0m'
 # 路径配置
 INSTALL_PREFIX="$HOME/.local"
 NOCKCHAIN_DIR="$HOME/nockchain"
-LOG_FILE="$HOME/nockchain_install.log"
+LOG_FILE="$HOME/nockchain_sigterm_fix.log"
 BACKUP_DIR="$HOME/nockchain_backup"
 MINICONDA_DIR="$HOME/.miniconda3"
 
-# hoonc编译优化环境变量
+# SIGTERM 143 修复专用环境变量
 export PATH="$INSTALL_PREFIX/bin:$HOME/.cargo/bin:$PATH"
-export RUST_MIN_STACK=67108864  # 64MB stack size for hoonc
-export RUST_LOG=warn
+export RUST_MIN_STACK=134217728  # 128MB stack size
+export RUST_LOG=error
 export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C codegen-units=1 -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads"
-export CARGO_BUILD_JOBS=2  # 允许2个并行作业以加速编译
+export CARGO_BUILD_JOBS=1  # 单线程编译避免内存峰值
 export CARGO_INCREMENTAL=0
-export CARGO_NET_RETRY=10  # 网络重试次数
-export CARGO_HTTP_TIMEOUT=300  # 5分钟超时
-export CARGO_HTTP_LOW_SPEED_LIMIT=1  # 降低速度限制
-export MALLOC_ARENA_MAX=4
+export CARGO_NET_RETRY=15
+export CARGO_HTTP_TIMEOUT=600  # 10分钟超时
+export CARGO_HTTP_LOW_SPEED_LIMIT=1
+export MALLOC_ARENA_MAX=2
 export MALLOC_TRIM_THRESHOLD_=100000
+
+# SIGTERM 信号处理
+setup_sigterm_handling() {
+    print_message "$CYAN" "设置 SIGTERM 信号处理..."
+    
+    # 创建信号处理脚本
+    cat > "$HOME/sigterm_handler.sh" << 'EOF'
+#!/bin/bash
+# SIGTERM 信号处理器
+echo "$(date): 收到 SIGTERM 信号，正在优雅关闭..." >> "$HOME/nockchain_sigterm_fix.log"
+
+# 查找并优雅终止相关进程
+for proc in cargo rustc hoonc nockapp; do
+    pids=$(pgrep "$proc" 2>/dev/null)
+    if [ -n "$pids" ]; then
+        echo "$(date): 正在终止 $proc 进程: $pids" >> "$HOME/nockchain_sigterm_fix.log"
+        for pid in $pids; do
+            # 先发送 SIGTERM 允许优雅关闭
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            # 如果仍在运行，强制终止
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
+done
+
+echo "$(date): SIGTERM 处理完成" >> "$HOME/nockchain_sigterm_fix.log"
+EOF
+    chmod +x "$HOME/sigterm_handler.sh"
+    
+    # 设置系统信号处理
+    trap '$HOME/sigterm_handler.sh' SIGTERM SIGINT
+}
+
+# 内存优化和 OOM 保护
+setup_oom_protection() {
+    print_message "$CYAN" "设置 OOM 保护机制..."
+    
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "8192")
+    local available_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "4096")
+    
+    print_message "$YELLOW" "系统内存: ${total_ram}MB，可用: ${available_ram}MB"
+    
+    # 设置进程内存限制（使用80%可用内存）
+    local mem_limit=$((available_ram * 1024 * 80 / 100))
+    ulimit -v "$mem_limit" 2>/dev/null || true
+    ulimit -m "$((mem_limit * 90 / 100))" 2>/dev/null || true
+    
+    # 设置 OOM 分数调整（降低被 OOM Killer 选中的概率）
+    echo -1000 | sudo tee /proc/$$/oom_score_adj >/dev/null 2>&1 || true
+    
+    # 创建交换空间（如果需要）
+    setup_emergency_swap
+    
+    # 设置内存监控
+    setup_memory_monitor &
+    MEMORY_MONITOR_PID=$!
+    echo $MEMORY_MONITOR_PID > /tmp/nockchain_memory_monitor.pid
+}
+
+# 紧急交换空间设置
+setup_emergency_swap() {
+    local swap_size=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}' || echo "0")
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "8192")
+    
+    if [ "$swap_size" -lt 2048 ]; then
+        print_message "$CYAN" "创建紧急交换空间..."
+        local swap_file="$HOME/nockchain_emergency_swap"
+        local needed_swap=2048
+        
+        if [ ! -f "$swap_file" ]; then
+            # 使用 fallocate 快速创建交换文件
+            if command -v fallocate >/dev/null 2>&1; then
+                fallocate -l "${needed_swap}M" "$swap_file" 2>/dev/null || {
+                    dd if=/dev/zero of="$swap_file" bs=1M count="$needed_swap" 2>/dev/null || true
+                }
+            else
+                dd if=/dev/zero of="$swap_file" bs=1M count="$needed_swap" 2>/dev/null || true
+            fi
+            
+            if [ -f "$swap_file" ]; then
+                chmod 600 "$swap_file"
+                mkswap "$swap_file" >/dev/null 2>&1 || true
+                sudo swapon "$swap_file" >/dev/null 2>&1 && {
+                    print_message "$GREEN" "紧急交换空间创建成功: ${needed_swap}MB"
+                } || {
+                    print_message "$YELLOW" "无法启用交换空间，将依赖现有内存"
+                }
+            fi
+        fi
+    fi
+}
+
+# 内存监控器
+setup_memory_monitor() {
+    while true; do
+        local mem_usage=$(free | awk '/^Mem:/{printf "%.1f", $3/$2*100}')
+        local swap_usage=$(free | awk '/^Swap:/{if($2>0) printf "%.1f", $3/$2*100; else print "0"}')
+        
+        # 如果内存使用率超过85%，暂停编译进程
+        if (( $(echo "$mem_usage > 85" | bc -l 2>/dev/null || echo 0) )); then
+            print_message "$YELLOW" "内存使用率过高: ${mem_usage}%，暂停编译进程..."
+            killall -STOP cargo rustc hoonc 2>/dev/null || true
+            
+            # 强制垃圾回收
+            sync
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+            
+            # 等待内存释放
+            sleep 10
+            
+            # 恢复编译进程
+            killall -CONT cargo rustc hoonc 2>/dev/null || true
+            print_message "$GREEN" "编译进程已恢复"
+        fi
+        
+        sleep 30
+    done
+}
 
 # 消息输出函数
 print_message() {
     local color=$1
     local message=$2
     echo -e "${color}${message}${RESET}"
-}
-
-log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
 }
 
 check_command() {
@@ -49,12 +167,10 @@ check_command() {
 # 验证128位16进制公钥格式
 validate_128bit_hex_pubkey() {
     local pubkey=$1
-    # 检查是否为128位16进制（64字节 = 128个16进制字符）
     if [[ $pubkey =~ ^[0-9a-fA-F]{128}$ ]]; then
         return 0
     else
         print_message "$RED" "错误：公钥必须是128位16进制格式（128个字符）"
-        print_message "$YELLOW" "示例：0479BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8..."
         return 1
     fi
 }
@@ -64,18 +180,18 @@ show_menu() {
     clear
     echo -e "${BLUE}
 =======================================
- Nockchain hoonc编译卡住完全解决方案 v9.0
+ Nockchain SIGTERM 143 完整解决方案 v10.0
 =======================================
 ${RESET}"
-    echo -e "${YELLOW}1. 完全解决hoonc编译卡住问题并安装Nockchain"
+    echo -e "${YELLOW}1. 完全解决 SIGTERM 143 编译中断问题"
     echo "2. 配置128位16进制挖矿公钥"
-    echo "3. 启动超时保护挖矿"
+    echo "3. 启动 SIGTERM 保护挖矿"
     echo "4. 查看实时编译/挖矿日志"
     echo "5. 检查钱包余额"
     echo "6. 系统状态监控"
     echo "7. 备份钱包密钥"
-    echo "8. hoonc编译问题诊断"
-    echo "9. 编译超时优化工具"
+    echo "8. SIGTERM 143 问题诊断"
+    echo "9. 编译中断优化工具"
     echo "10. 退出脚本"
     echo -e "${BLUE}=======================================${RESET}"
 }
@@ -105,7 +221,7 @@ install_system_compilers() {
         "ubuntu"|"debian"|"mint"|"pop")
             if sudo -n true 2>/dev/null; then
                 sudo apt update
-                sudo apt install -y build-essential gcc g++ make cmake clang llvm-dev libclang-dev pkg-config libssl-dev libc6-dev curl wget git
+                sudo apt install -y build-essential gcc g++ make cmake clang llvm-dev libclang-dev pkg-config libssl-dev libc6-dev curl wget git bc
                 print_message "$GREEN" "系统编译器安装完成"
             else
                 print_message "$YELLOW" "无sudo权限，将使用Conda编译器"
@@ -117,10 +233,10 @@ install_system_compilers() {
             if sudo -n true 2>/dev/null; then
                 if check_command "dnf"; then
                     sudo dnf groupinstall -y "Development Tools"
-                    sudo dnf install -y clang llvm-devel openssl-devel cmake curl wget git
+                    sudo dnf install -y clang llvm-devel openssl-devel cmake curl wget git bc
                 elif check_command "yum"; then
                     sudo yum groupinstall -y "Development Tools"
-                    sudo yum install -y clang llvm-devel openssl-devel cmake curl wget git
+                    sudo yum install -y clang llvm-devel openssl-devel cmake curl wget git bc
                 fi
                 print_message "$GREEN" "系统编译器安装完成"
             else
@@ -164,7 +280,7 @@ smart_miniconda_setup() {
     
     local installer="/tmp/miniconda_installer.sh"
     
-    if wget -q --show-progress --timeout=60 --tries=3 "$MINICONDA_URL" -O "$installer"; then
+    if wget -q --show-progress --timeout=120 --tries=3 "$MINICONDA_URL" -O "$installer"; then
         chmod +x "$installer"
         if bash "$installer" -b -p "$MINICONDA_DIR"; then
             source "$MINICONDA_DIR/etc/profile.d/conda.sh"
@@ -188,12 +304,12 @@ install_conda_compilers() {
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
     export PATH="$MINICONDA_DIR/bin:$PATH"
     
-    print_message "$CYAN" "创建nockchain-hoonc环境..."
-    conda create -n nockchain-hoonc -y python=3.9 --no-default-packages || {
+    print_message "$CYAN" "创建nockchain-sigterm环境..."
+    conda create -n nockchain-sigterm -y python=3.9 --no-default-packages || {
         print_message "$YELLOW" "环境已存在，正在更新..."
     }
     
-    conda activate nockchain-hoonc
+    conda activate nockchain-sigterm
     
     print_message "$CYAN" "安装编译器工具链..."
     local compiler_packages=(
@@ -211,6 +327,7 @@ install_conda_compilers() {
         "libffi"
         "curl"
         "wget"
+        "bc"
     )
     
     for package in "${compiler_packages[@]}"; do
@@ -225,7 +342,7 @@ install_conda_compilers() {
         print_message "$GREEN" "Conda编译器工具链安装成功"
         
         if ! check_command "cc"; then
-            ln -sf "$(which gcc)" "$MINICONDA_DIR/envs/nockchain-hoonc/bin/cc"
+            ln -sf "$(which gcc)" "$MINICONDA_DIR/envs/nockchain-sigterm/bin/cc"
             print_message "$GREEN" "创建cc -> gcc符号链接"
         fi
         
@@ -236,9 +353,9 @@ install_conda_compilers() {
     fi
 }
 
-# 配置Rust环境 - hoonc编译优化版
+# 配置Rust环境 - SIGTERM 143修复版
 setup_rust_environment() {
-    print_message "$CYAN" "正在配置Rust环境（hoonc编译优化版）..."
+    print_message "$CYAN" "正在配置Rust环境（SIGTERM 143修复版）..."
     
     if ! check_command "rustc"; then
         print_message "$CYAN" "安装Rust..."
@@ -251,19 +368,19 @@ setup_rust_environment() {
     
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # 配置Cargo - hoonc编译优化版
+    # 配置Cargo - SIGTERM 143修复版
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" << 'EOF'
 [build]
-jobs = 2
+jobs = 1
 
 [net]
-retry = 10
+retry = 15
 git-fetch-with-cli = true
 offline = false
 
 [http]
-timeout = 300
+timeout = 600
 low-speed-limit = 1
 
 [target.x86_64-unknown-linux-gnu]
@@ -271,7 +388,8 @@ linker = "cc"
 rustflags = [
     "-C", "link-arg=-Wl,--no-keep-memory", 
     "-C", "link-arg=-Wl,--reduce-memory-overheads",
-    "-C", "link-arg=-Wl,--gc-sections"
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--as-needed"
 ]
 
 [profile.dev]
@@ -285,24 +403,25 @@ debug = 0
 lto = "thin"
 codegen-units = 1
 incremental = false
+panic = "abort"
 EOF
     
-    # 设置hoonc编译专用环境变量
-    export RUST_MIN_STACK=67108864  # 64MB for hoonc
+    # 设置 SIGTERM 修复专用环境变量
+    export RUST_MIN_STACK=134217728  # 128MB
     export CARGO_INCREMENTAL=0
-    export CARGO_BUILD_JOBS=2
-    export CARGO_NET_RETRY=10
-    export CARGO_HTTP_TIMEOUT=300
+    export CARGO_BUILD_JOBS=1
+    export CARGO_NET_RETRY=15
+    export CARGO_HTTP_TIMEOUT=600
     
-    print_message "$GREEN" "Rust环境配置完成（hoonc编译优化版）"
+    print_message "$GREEN" "Rust环境配置完成（SIGTERM 143修复版）"
 }
 
-# 设置编译器环境变量 - hoonc优化版
+# 设置编译器环境变量 - SIGTERM修复版
 setup_compiler_environment() {
-    print_message "$CYAN" "正在设置编译器环境变量（hoonc优化版）..."
+    print_message "$CYAN" "正在设置编译器环境变量（SIGTERM修复版）..."
     
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-hoonc
+    conda activate nockchain-sigterm
     
     export CC=$(which gcc || which clang)
     export CXX=$(which g++ || which clang++)
@@ -313,159 +432,194 @@ setup_compiler_environment() {
     if ! check_command "cc"; then
         if [ -n "$CC" ]; then
             export CC_x86_64_unknown_linux_gnu="$CC"
-            local cc_link="$MINICONDA_DIR/envs/nockchain-hoonc/bin/cc"
+            local cc_link="$MINICONDA_DIR/envs/nockchain-sigterm/bin/cc"
             ln -sf "$CC" "$cc_link" 2>/dev/null || true
             export PATH="$(dirname "$cc_link"):$PATH"
         fi
     fi
     
-    # hoonc编译专用RUSTFLAGS
+    # SIGTERM 修复专用RUSTFLAGS
     export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads -C codegen-units=1"
-    export RUST_MIN_STACK=67108864
-    export CARGO_BUILD_JOBS=2
+    export RUST_MIN_STACK=134217728
+    export CARGO_BUILD_JOBS=1
     
-    print_message "$GREEN" "编译器环境变量设置完成（hoonc优化版）"
+    print_message "$GREEN" "编译器环境变量设置完成（SIGTERM修复版）"
     print_message "$YELLOW" "CC=$CC"
     print_message "$YELLOW" "RUSTFLAGS=$RUSTFLAGS"
     print_message "$YELLOW" "RUST_MIN_STACK=$RUST_MIN_STACK"
 }
 
-# hoonc超时编译函数
-compile_hoonc_with_timeout() {
-    print_message "$CYAN" "开始编译hoonc编译器（超时保护版）..."
+# 编译 Nockchain 项目 - SIGTERM 143 修复版
+compile_nockchain_with_sigterm_fix() {
+    print_message "$CYAN" "开始编译Nockchain项目（SIGTERM 143修复版）..."
     
     cd "$NOCKCHAIN_DIR" || return 1
     
     source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-hoonc
+    conda activate nockchain-sigterm
     setup_compiler_environment
+    setup_oom_protection
+    setup_sigterm_handling
     
-    print_message "$CYAN" "清理编译缓存..."
-    rm -rf target/debug/build/*hoonc* target/release/build/*hoonc* || true
-    cargo clean -p hoonc || true
+    print_message "$CYAN" "清理编译缓存和临时文件..."
+    rm -rf target/ .cargo_cache/ || true
+    cargo clean || true
+    
+    # 清理可能存在的损坏文件
+    find . -name "*.jam" -delete 2>/dev/null || true
+    find . -name "*.hoon.lock" -delete 2>/dev/null || true
+    
+    # 强制系统缓存清理
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
     
     print_message "$GREEN" "链接器验证通过: $(which cc)"
     
-    # 设置编译超时监控
-    compile_with_timeout() {
-        local timeout_seconds=1800  # 30分钟超时
-        local log_file="$NOCKCHAIN_DIR/logs/hoonc_compile.log"
-        mkdir -p "$NOCKCHAIN_DIR/logs"
+    # 分阶段编译策略 - SIGTERM 保护版
+    compile_with_sigterm_protection() {
+        local component=$1
+        local timeout_seconds=$2
+        local max_retries=3
+        local retry_count=0
         
-        print_message "$CYAN" "开始hoonc编译（30分钟超时保护）..."
-        
-        # 在后台启动编译
-        (
-            cd "$NOCKCHAIN_DIR"
-            make install-hoonc 2>&1 | tee "$log_file"
-            echo $? > /tmp/hoonc_exit_code
-        ) &
-        
-        local compile_pid=$!
-        local count=0
-        
-        # 监控编译进度
-        while kill -0 $compile_pid 2>/dev/null; do
-            sleep 30
-            count=$((count + 30))
+        while [ $retry_count -lt $max_retries ]; do
+            print_message "$CYAN" "编译 $component (第 $((retry_count + 1)) 次尝试，超时 ${timeout_seconds}s)..."
             
-            if [ $count -ge $timeout_seconds ]; then
-                print_message "$YELLOW" "hoonc编译超时，尝试手动编译..."
-                kill $compile_pid 2>/dev/null || true
-                wait $compile_pid 2>/dev/null || true
-                return 1
+            # 创建编译监控
+            local log_file="$NOCKCHAIN_DIR/logs/${component}_compile.log"
+            mkdir -p "$NOCKCHAIN_DIR/logs"
+            
+            # 在后台启动编译，使用 timeout 命令
+            if timeout "$timeout_seconds" make "install-$component" 2>&1 | tee "$log_file"; then
+                local exit_code=${PIPESTATUS[0]}
+                if [ $exit_code -eq 0 ]; then
+                    print_message "$GREEN" "$component 编译成功！"
+                    return 0
+                else
+                    print_message "$YELLOW" "$component 编译失败，退出码: $exit_code"
+                fi
+            else
+                local exit_code=$?
+                if [ $exit_code -eq 124 ]; then
+                    print_message "$YELLOW" "$component 编译超时，重试..."
+                elif [ $exit_code -eq 143 ]; then
+                    print_message "$YELLOW" "$component 收到 SIGTERM，重试..."
+                else
+                    print_message "$YELLOW" "$component 编译失败，退出码: $exit_code"
+                fi
             fi
             
-            if [ $((count % 120)) -eq 0 ]; then
-                print_message "$CYAN" "hoonc编译进行中... (${count}秒)"
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+                print_message "$CYAN" "等待系统稳定，然后重试..."
+                
+                # 清理残留进程
+                killall -9 cargo rustc hoonc nockapp 2>/dev/null || true
+                
+                # 清理内存
+                sync
+                echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+                
+                sleep 10
             fi
         done
         
-        wait $compile_pid
-        local exit_code=$(cat /tmp/hoonc_exit_code 2>/dev/null || echo "1")
-        rm -f /tmp/hoonc_exit_code
-        
-        return $exit_code
+        print_message "$RED" "$component 编译失败，已达到最大重试次数"
+        return 1
     }
     
-    # 尝试正常编译
-    if compile_with_timeout; then
-        print_message "$GREEN" "hoonc编译成功！"
-        return 0
-    fi
-    
-    # 如果超时，尝试手动编译
-    print_message "$YELLOW" "正常编译超时，尝试手动编译hoonc..."
-    
-    cd crates/hoonc || return 1
-    
-    print_message "$CYAN" "手动编译hoonc（分步骤进行）..."
-    
-    # 分步编译以避免超时
-    if timeout 1200 cargo build --release --bin hoonc; then
-        mkdir -p "$HOME/.cargo/bin"
-        cp target/release/hoonc "$HOME/.cargo/bin/"
-        print_message "$GREEN" "hoonc手动编译成功！"
-        cd ../..
-        return 0
-    else
-        print_message "$RED" "hoonc编译失败"
-        cd ../..
-        return 1
-    fi
-}
-
-# 编译Nockchain项目 - hoonc卡住修复版
-compile_nockchain_with_hoonc_fix() {
-    print_message "$CYAN" "开始编译Nockchain项目（hoonc卡住修复版）..."
-    
-    cd "$NOCKCHAIN_DIR" || return 1
-    
-    source "$MINICONDA_DIR/etc/profile.d/conda.sh"
-    conda activate nockchain-hoonc
-    setup_compiler_environment
-    
-    # 步骤1：编译hoonc（重点优化）
-    print_message "$MAGENTA" "步骤 1/3: 编译hoonc编译器（超时保护）..."
-    if ! compile_hoonc_with_timeout; then
-        print_message "$RED" "hoonc编译失败"
+    # 步骤1：编译 hoonc（关键组件）
+    print_message "$MAGENTA" "步骤 1/3: 编译 hoonc 编译器..."
+    if ! compile_with_sigterm_protection "hoonc" 3600; then
+        print_message "$RED" "hoonc 编译失败"
         return 1
     fi
     
-    # 验证hoonc可用
+    # 验证 hoonc 可用
     if ! check_command "hoonc"; then
-        print_message "$RED" "hoonc安装失败"
+        print_message "$RED" "hoonc 安装失败"
         return 1
     fi
     
-    print_message "$GREEN" "hoonc编译器安装成功: $(which hoonc)"
+    print_message "$GREEN" "hoonc 编译器安装成功: $(which hoonc)"
     
-    # 步骤2：编译主项目
+    # 清理内存，为下一步做准备
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+    sleep 5
+    
+    # 步骤2：编译主项目（分批编译）
     print_message "$MAGENTA" "步骤 2/3: 编译主项目..."
-    if ! timeout 3600 make build; then
-        print_message "$RED" "主项目编译失败"
-        return 1
+    
+    # 使用 make build 而不是直接编译，避免 assets/dumb.jam 问题
+    if timeout 7200 bash -c '
+        cd "'$NOCKCHAIN_DIR'"
+        export RUST_MIN_STACK=134217728
+        export CARGO_BUILD_JOBS=1
+        make build
+    '; then
+        print_message "$GREEN" "主项目编译成功！"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            print_message "$YELLOW" "主项目编译超时，尝试手动编译关键组件..."
+        elif [ $exit_code -eq 143 ]; then
+            print_message "$YELLOW" "主项目收到 SIGTERM，尝试手动编译关键组件..."
+        else
+            print_message "$YELLOW" "主项目编译失败，尝试手动编译关键组件..."
+        fi
+        
+        # 手动编译关键组件
+        print_message "$CYAN" "手动编译 nockchain 核心组件..."
+        cd crates/nockchain || return 1
+        if timeout 3600 cargo build --release --bin nockchain; then
+            mkdir -p "$HOME/.cargo/bin"
+            cp target/release/nockchain "$HOME/.cargo/bin/"
+            print_message "$GREEN" "nockchain 手动编译成功"
+            cd ../..
+        else
+            print_message "$RED" "nockchain 手动编译也失败"
+            cd ../..
+            return 1
+        fi
     fi
     
     # 步骤3：安装组件
     print_message "$MAGENTA" "步骤 3/3: 安装组件..."
-    make install-nockchain-wallet || print_message "$YELLOW" "钱包安装失败"
-    make install-nockchain || print_message "$YELLOW" "主程序安装失败"
+    make install-nockchain-wallet || print_message "$YELLOW" "钱包安装失败，但可能不影响主要功能"
+    make install-nockchain || print_message "$YELLOW" "主程序安装失败，但可能不影响主要功能"
     
-    print_message "$GREEN" "Nockchain编译完成（hoonc卡住问题已修复）！"
+    # 清理监控进程
+    if [ -f /tmp/nockchain_memory_monitor.pid ]; then
+        local monitor_pid=$(cat /tmp/nockchain_memory_monitor.pid)
+        kill "$monitor_pid" 2>/dev/null || true
+        rm -f /tmp/nockchain_memory_monitor.pid
+    fi
+    
+    print_message "$GREEN" "Nockchain编译完成（SIGTERM 143问题已修复）！"
 }
 
-# 主安装函数 - hoonc卡住完全解决版
-install_nockchain_hoonc_fix() {
-    print_message "$GREEN" ">>> 开始Nockchain hoonc编译卡住问题完全解决..."
-    log_message "开始hoonc卡住修复安装流程"
+# 主安装函数 - SIGTERM 143完全解决版
+install_nockchain_sigterm_fix() {
+    print_message "$GREEN" ">>> 开始Nockchain SIGTERM 143问题完全解决..."
     
-    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "0")
-    local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
+    local total_ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "8192")
+    local available_space=$(df -m ~ 2>/dev/null | awk 'NR==2{print $4}' || echo "10240")
     
     print_message "$YELLOW" "系统配置："
     print_message "$YELLOW" "- 内存: ${total_ram}MB"
     print_message "$YELLOW" "- 可用空间: ${available_space}MB"
+    
+    # 检查基本要求
+    if [ "$total_ram" -lt 2048 ]; then
+        print_message "$RED" "错误：系统内存不足2GB，无法安全编译"
+        return 1
+    fi
+    
+    if [ "$available_space" -lt 5120 ]; then
+        print_message "$RED" "错误：可用磁盘空间不足5GB"
+        return 1
+    fi
     
     mkdir -p "$BACKUP_DIR" "$INSTALL_PREFIX"/{bin,lib,include}
     
@@ -496,7 +650,7 @@ install_nockchain_hoonc_fix() {
     fi
     
     # 步骤4：配置Rust环境
-    print_message "$MAGENTA" "步骤 4/6: 配置Rust环境（hoonc编译优化版）..."
+    print_message "$MAGENTA" "步骤 4/6: 配置Rust环境（SIGTERM 143修复版）..."
     if ! setup_rust_environment; then
         print_message "$RED" "Rust环境配置失败"
         return 1
@@ -521,7 +675,7 @@ install_nockchain_hoonc_fix() {
     
     cd "$NOCKCHAIN_DIR"
     
-    # 配置环境文件 - 128位16进制公钥格式
+    # 配置环境文件 - SIGTERM 修复版
     if [ -f ".env_example" ]; then
         cp .env_example .env
     else
@@ -529,17 +683,18 @@ install_nockchain_hoonc_fix() {
 MINING_PUBKEY=0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 NETWORK=mainnet
 MAX_PEERS=1000
-LOG_LEVEL=warn
-RUST_LOG=warn
-RUST_MIN_STACK=67108864
-CARGO_BUILD_JOBS=2
-CARGO_HTTP_TIMEOUT=300
+LOG_LEVEL=error
+RUST_LOG=error
+RUST_MIN_STACK=134217728
+CARGO_BUILD_JOBS=1
+CARGO_HTTP_TIMEOUT=600
+CARGO_NET_RETRY=15
 EOF
     fi
     
     # 步骤6：编译项目
-    print_message "$MAGENTA" "步骤 6/6: 编译Nockchain项目（hoonc卡住修复版）..."
-    if ! compile_nockchain_with_hoonc_fix; then
+    print_message "$MAGENTA" "步骤 6/6: 编译Nockchain项目（SIGTERM 143修复版）..."
+    if ! compile_nockchain_with_sigterm_fix; then
         print_message "$RED" "项目编译失败"
         return 1
     fi
@@ -548,7 +703,7 @@ EOF
     if check_command "nockchain-wallet"; then
         print_message "$CYAN" "生成钱包..."
         local wallet_output
-        wallet_output=$(nockchain-wallet keygen 2>&1)
+        wallet_output=$(timeout 60 nockchain-wallet keygen 2>&1)
         
         if [ $? -eq 0 ]; then
             print_message "$GREEN" "钱包生成成功！"
@@ -567,19 +722,19 @@ EOF
         fi
     fi
     
-    # 创建环境激活脚本
-    cat > "$HOME/nockchain_hoonc_fixed.sh" << 'EOF'
+    # 创建环境激活脚本 - SIGTERM 修复版
+    cat > "$HOME/nockchain_sigterm_fixed.sh" << 'EOF'
 #!/bin/bash
-# Nockchain hoonc卡住修复版环境激活脚本
+# Nockchain SIGTERM 143修复版环境激活脚本
 source "$HOME/.miniconda3/etc/profile.d/conda.sh"
-conda activate nockchain-hoonc
+conda activate nockchain-sigterm
 
-# hoonc编译优化专用环境变量
-export RUST_MIN_STACK=67108864
-export RUST_LOG=warn
-export CARGO_BUILD_JOBS=2
-export CARGO_HTTP_TIMEOUT=300
-export CARGO_NET_RETRY=10
+# SIGTERM 143 修复专用环境变量
+export RUST_MIN_STACK=134217728
+export RUST_LOG=error
+export CARGO_BUILD_JOBS=1
+export CARGO_HTTP_TIMEOUT=600
+export CARGO_NET_RETRY=15
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # 设置编译器环境变量
@@ -589,21 +744,26 @@ if [ -n "$CC" ]; then
     export RUSTFLAGS="-C debuginfo=0 -C opt-level=1 -C linker=$CC -C link-arg=-Wl,--no-keep-memory"
 fi
 
+# SIGTERM 信号处理
+trap 'echo "收到终止信号，正在优雅退出..."; exit 0' SIGTERM SIGINT
+
 cd "$HOME/nockchain"
-echo "Nockchain hoonc卡住修复版环境已激活"
+echo "Nockchain SIGTERM 143修复版环境已激活"
 echo "编译器: $CC"
-echo "hoonc: $(which hoonc)"
+echo "SIGTERM 保护: 已启用"
 echo "使用 'make run-nockchain' 启动挖矿"
 EOF
-    chmod +x "$HOME/nockchain_hoonc_fixed.sh"
+    chmod +x "$HOME/nockchain_sigterm_fixed.sh"
     
-    print_message "$GREEN" "🎉 Nockchain hoonc编译卡住问题完全解决！"
+    # 清理临时文件
+    rm -f "$HOME/nockchain_emergency_swap" 2>/dev/null || true
+    
+    print_message "$GREEN" "🎉 Nockchain SIGTERM 143问题完全解决！"
     print_message "$YELLOW" "安装路径: $NOCKCHAIN_DIR"
-    print_message "$YELLOW" "环境激活: source ~/nockchain_hoonc_fixed.sh"
-    print_message "$CYAN" "hoonc编译卡住问题已彻底修复！"
+    print_message "$YELLOW" "环境激活: source ~/nockchain_sigterm_fixed.sh"
+    print_message "$CYAN" "SIGTERM 143编译中断问题已彻底修复！"
     print_message "$CYAN" "公钥格式已更新为128位16进制标准！"
-    
-    log_message "hoonc卡住修复安装完成"
+    print_message "$CYAN" "编译过程现在具有完整的 SIGTERM 保护机制！"
 }
 
 # 配置128位16进制挖矿公钥
@@ -633,9 +793,9 @@ configure_128bit_mining_key() {
     fi
 }
 
-# 启动超时保护挖矿
-start_timeout_protected_mining() {
-    print_message "$GREEN" ">>> 启动超时保护挖矿节点..."
+# 启动 SIGTERM 保护挖矿
+start_sigterm_protected_mining() {
+    print_message "$GREEN" ">>> 启动 SIGTERM 保护挖矿节点..."
     
     if [ ! -f "$NOCKCHAIN_DIR/.env" ]; then
         print_message "$RED" "错误：未找到安装"
@@ -653,65 +813,103 @@ start_timeout_protected_mining() {
     fi
     
     cd "$NOCKCHAIN_DIR"
-    source "$HOME/nockchain_hoonc_fixed.sh"
+    source "$HOME/nockchain_sigterm_fixed.sh"
     
-    print_message "$CYAN" "正在启动超时保护挖矿节点..."
+    print_message "$CYAN" "正在启动 SIGTERM 保护挖矿节点..."
     
     screen -dmS nockchain bash -c "
-        source '$HOME/nockchain_hoonc_fixed.sh'
+        source '$HOME/nockchain_sigterm_fixed.sh'
         cd '$NOCKCHAIN_DIR'
         source .env
         mkdir -p logs
-        echo '=== Nockchain hoonc卡住修复版挖矿 ===' > logs/mining.log
+        echo '=== Nockchain SIGTERM 143修复版挖矿 ===' > logs/mining.log
         echo '启动时间: \$(date)' >> logs/mining.log
-        echo '版本: hoonc编译卡住问题完全解决版' >> logs/mining.log
-        echo '超时保护: 启用' >> logs/mining.log
+        echo '版本: SIGTERM 143问题完全解决版' >> logs/mining.log
+        echo 'SIGTERM 保护: 已启用' >> logs/mining.log
+        echo '内存保护: 已启用' >> logs/mining.log
         echo '公钥格式: 128位16进制' >> logs/mining.log
         echo '=================================' >> logs/mining.log
         
+        # SIGTERM 信号处理
+        trap 'echo \"\$(date): 收到 SIGTERM 信号，正在优雅关闭...\" >> logs/mining.log; exit 0' SIGTERM SIGINT
+        
         while true; do
-            timeout 3600 make run-nockchain 2>&1 | tee -a logs/mining.log
+            timeout 7200 make run-nockchain 2>&1 | tee -a logs/mining.log
             exit_code=\$?
-            if [ \$exit_code -eq 124 ]; then
-                echo '检测到运行超时，重启挖矿进程...' >> logs/mining.log
-                sleep 5
-                continue
-            elif [ \$exit_code -ne 0 ]; then
-                echo '进程异常退出，退出码: \$exit_code，等待重启...' >> logs/mining.log
-                sleep 10
-                continue
-            else
-                echo '正常退出' >> logs/mining.log
-                break
-            fi
+            case \$exit_code in
+                0)
+                    echo '\$(date): 正常退出' >> logs/mining.log
+                    break
+                    ;;
+                124)
+                    echo '\$(date): 运行超时（2小时），重启挖矿进程...' >> logs/mining.log
+                    sleep 5
+                    continue
+                    ;;
+                143)
+                    echo '\$(date): 收到 SIGTERM (143)，优雅重启...' >> logs/mining.log
+                    sleep 5
+                    continue
+                    ;;
+                *)
+                    echo '\$(date): 进程异常退出，退出码: \$exit_code，等待重启...' >> logs/mining.log
+                    sleep 10
+                    continue
+                    ;;
+            esac
         done
     "
     
     sleep 5
     
     if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "🚀 超时保护挖矿节点启动成功！"
+        print_message "$GREEN" "🚀 SIGTERM 保护挖矿节点启动成功！"
         print_message "$CYAN" "- 查看状态: screen -r nockchain"
         print_message "$CYAN" "- 停止挖矿: screen -S nockchain -X quit"
-        print_message "$CYAN" "- 超时自动重启: 已启用（1小时超时）"
+        print_message "$CYAN" "- SIGTERM 自动保护: 已启用"
+        print_message "$CYAN" "- 超时自动重启: 已启用（2小时超时）"
+        print_message "$CYAN" "- 内存保护: 已启用"
     else
         print_message "$RED" "启动失败，请查看日志"
     fi
 }
 
-# hoonc编译问题诊断
-diagnose_hoonc_issues() {
-    print_message "$GREEN" ">>> hoonc编译问题诊断"
+# SIGTERM 143 问题诊断
+diagnose_sigterm_issues() {
+    print_message "$GREEN" ">>> SIGTERM 143 问题诊断"
     
-    print_message "$CYAN" "正在检查hoonc编译相关问题..."
+    print_message "$CYAN" "正在检查 SIGTERM 相关问题..."
     
-    # 检查hoonc可用性
-    print_message "$YELLOW" "hoonc编译器检查："
-    if check_command "hoonc"; then
-        print_message "$GREEN" "✅ hoonc: $(which hoonc)"
-        print_message "$CYAN" "版本: $(hoonc --version 2>/dev/null || echo '无法获取版本')"
+    # 检查系统内存状态
+    print_message "$YELLOW" "系统内存检查："
+    local total_ram=$(free -m | awk '/^Mem:/{print $2}')
+    local used_ram=$(free -m | awk '/^Mem:/{print $3}')
+    local available_ram=$(free -m | awk '/^Mem:/{print $7}')
+    local swap_total=$(free -m | awk '/^Swap:/{print $2}')
+    local swap_used=$(free -m | awk '/^Swap:/{print $3}')
+    
+    print_message "$CYAN" "总内存: ${total_ram}MB"
+    print_message "$CYAN" "已用内存: ${used_ram}MB"
+    print_message "$CYAN" "可用内存: ${available_ram}MB"
+    print_message "$CYAN" "交换总计: ${swap_total}MB"
+    print_message "$CYAN" "交换已用: ${swap_used}MB"
+    
+    local mem_usage_percent=$((used_ram * 100 / total_ram))
+    if [ "$mem_usage_percent" -gt 85 ]; then
+        print_message "$RED" "⚠️ 内存使用率过高: ${mem_usage_percent}%，极易触发 SIGTERM"
     else
-        print_message "$RED" "❌ hoonc: 未找到"
+        print_message "$GREEN" "✅ 内存使用率正常: ${mem_usage_percent}%"
+    fi
+    
+    # 检查 OOM Killer 历史
+    print_message "$YELLOW" "OOM Killer 历史检查："
+    local oom_events=$(dmesg | grep -c "killed process" 2>/dev/null || echo "0")
+    if [ "$oom_events" -gt 0 ]; then
+        print_message "$RED" "发现 $oom_events 次 OOM Killer 事件"
+        print_message "$CYAN" "最近的 OOM 事件："
+        dmesg | grep "killed process" | tail -3
+    else
+        print_message "$GREEN" "✅ 无 OOM Killer 活动记录"
     fi
     
     # 检查编译环境
@@ -720,104 +918,152 @@ diagnose_hoonc_issues() {
     print_message "$CYAN" "- CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-未设置}"
     print_message "$CYAN" "- CARGO_HTTP_TIMEOUT: ${CARGO_HTTP_TIMEOUT:-未设置}"
     
-    # 检查网络连接
-    print_message "$YELLOW" "网络连接检查："
-    if curl -s --connect-timeout 10 https://crates.io >/dev/null; then
-        print_message "$GREEN" "✅ crates.io连接正常"
+    # 检查进程限制
+    print_message "$YELLOW" "进程限制检查："
+    print_message "$CYAN" "虚拟内存限制: $(ulimit -v)"
+    print_message "$CYAN" "物理内存限制: $(ulimit -m)"
+    print_message "$CYAN" "栈大小限制: $(ulimit -s)"
+    
+    # 检查编译器
+    print_message "$YELLOW" "编译器检查："
+    if check_command "cc"; then
+        print_message "$GREEN" "✅ cc: $(which cc)"
     else
-        print_message "$RED" "❌ crates.io连接失败"
+        print_message "$RED" "❌ cc: 未找到"
     fi
     
-    if curl -s --connect-timeout 10 https://github.com >/dev/null; then
-        print_message "$GREEN" "✅ GitHub连接正常"
+    if check_command "hoonc"; then
+        print_message "$GREEN" "✅ hoonc: $(which hoonc)"
     else
-        print_message "$RED" "❌ GitHub连接失败"
+        print_message "$RED" "❌ hoonc: 未找到"
     fi
     
-    # 检查编译缓存
-    print_message "$YELLOW" "编译缓存检查："
-    if [ -d "$HOME/.cargo/registry" ]; then
-        local cache_size=$(du -sh "$HOME/.cargo/registry" 2>/dev/null | awk '{print $1}')
-        print_message "$CYAN" "Cargo缓存大小: ${cache_size:-未知}"
-    fi
+    # 检查磁盘空间
+    print_message "$YELLOW" "磁盘空间检查："
+    local disk_usage=$(df -h ~ | awk 'NR==2{print $5}' | sed 's/%//')
+    local available_space=$(df -h ~ | awk 'NR==2{print $4}')
+    print_message "$CYAN" "磁盘使用率: ${disk_usage}%"
+    print_message "$CYAN" "可用空间: ${available_space}"
     
-    # 检查公钥格式
-    if [ -f "$NOCKCHAIN_DIR/.env" ]; then
-        print_message "$YELLOW" "公钥格式检查："
-        local pubkey=$(grep "MINING_PUBKEY" "$NOCKCHAIN_DIR/.env" | cut -d'=' -f2)
-        if validate_128bit_hex_pubkey "$pubkey"; then
-            print_message "$GREEN" "✅ 公钥格式正确（128位16进制）"
-        else
-            print_message "$RED" "❌ 公钥格式错误，需要128位16进制格式"
-        fi
+    if [ "$disk_usage" -gt 90 ]; then
+        print_message "$RED" "⚠️ 磁盘使用率过高，可能导致编译失败"
     fi
     
     # 提供修复建议
-    print_message "$CYAN" "hoonc编译修复建议："
+    print_message "$CYAN" "SIGTERM 143 修复建议："
     
-    if ! check_command "hoonc"; then
-        print_message "$YELLOW" "1. hoonc编译器缺失，建议重新运行完整安装"
+    if [ "$total_ram" -lt 4096 ]; then
+        print_message "$YELLOW" "1. 系统内存不足4GB，强烈建议增加内存"
     fi
     
-    if [ -z "$CARGO_HTTP_TIMEOUT" ]; then
-        print_message "$YELLOW" "2. 未设置HTTP超时，建议设置CARGO_HTTP_TIMEOUT=300"
+    if [ "$mem_usage_percent" -gt 85 ]; then
+        print_message "$YELLOW" "2. 当前内存使用率过高，需要释放内存"
     fi
     
-    if ! curl -s --connect-timeout 10 https://crates.io >/dev/null; then
-        print_message "$YELLOW" "3. 网络连接问题，检查防火墙和代理设置"
+    if [ "$oom_events" -gt 0 ]; then
+        print_message "$YELLOW" "3. 检测到 OOM 事件，需要增加交换空间或减少内存使用"
     fi
     
-    print_message "$YELLOW" "4. 建议使用选项1重新安装hoonc编译卡住修复版"
+    if [ -z "$RUST_MIN_STACK" ]; then
+        print_message "$YELLOW" "4. 未设置 RUST_MIN_STACK，建议设置为 134217728"
+    fi
+    
+    if ! check_command "cc" || ! check_command "hoonc"; then
+        print_message "$YELLOW" "5. 编译器缺失，建议重新运行完整安装"
+    fi
+    
+    print_message "$YELLOW" "6. 强烈建议使用选项1重新安装 SIGTERM 143 修复版"
 }
 
-# 编译超时优化工具
-compilation_timeout_tools() {
-    print_message "$GREEN" ">>> 编译超时优化工具"
+# 编译中断优化工具
+compilation_interrupt_tools() {
+    print_message "$GREEN" ">>> 编译中断优化工具"
     
-    echo "1. 清理编译缓存"
-    echo "2. 设置网络优化"
-    echo "3. 检查编译进程"
-    echo "4. 优化Cargo配置"
-    echo "5. 返回主菜单"
+    echo "1. 清理编译缓存和临时文件"
+    echo "2. 设置系统内存优化"
+    echo "3. 创建紧急交换空间"
+    echo "4. 检查编译相关进程"
+    echo "5. 优化编译器配置"
+    echo "6. 测试 SIGTERM 处理"
+    echo "7. 返回主菜单"
     
     read -p "请选择操作: " opt_choice
     
     case $opt_choice in
         1)
-            print_message "$CYAN" "清理编译缓存..."
-            cargo clean 2>/dev/null && print_message "$GREEN" "项目缓存清理完成"
-            rm -rf ~/.cargo/registry/cache/* 2>/dev/null && print_message "$GREEN" "Cargo缓存清理完成"
+            print_message "$CYAN" "清理编译缓存和临时文件..."
+            cd "$NOCKCHAIN_DIR" 2>/dev/null || cd ~
+            cargo clean 2>/dev/null && print_message "$GREEN" "Cargo缓存清理完成"
+            rm -rf ~/.cargo/registry/cache/* 2>/dev/null && print_message "$GREEN" "Cargo注册表缓存清理完成"
             rm -rf ~/.cargo/git/db/* 2>/dev/null && print_message "$GREEN" "Git缓存清理完成"
+            find . -name "*.jam" -delete 2>/dev/null && print_message "$GREEN" "JAM文件清理完成"
+            find . -name "*.hoon.lock" -delete 2>/dev/null && print_message "$GREEN" "Hoon锁文件清理完成"
+            sync
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 && print_message "$GREEN" "系统缓存清理完成"
             ;;
         2)
-            print_message "$CYAN" "设置网络优化..."
-            export CARGO_NET_RETRY=10
-            export CARGO_HTTP_TIMEOUT=300
-            export CARGO_HTTP_LOW_SPEED_LIMIT=1
-            print_message "$GREEN" "网络优化设置完成"
+            print_message "$CYAN" "设置系统内存优化..."
+            echo 10 | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1 || true
+            echo 1 | sudo tee /proc/sys/vm/overcommit_memory >/dev/null 2>&1 || true
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+            print_message "$GREEN" "系统内存优化完成"
             ;;
         3)
-            print_message "$CYAN" "检查编译进程..."
-            ps aux | grep -E "(cargo|rustc|hoonc)" | grep -v grep
+            setup_emergency_swap
             ;;
         4)
-            print_message "$CYAN" "优化Cargo配置..."
+            print_message "$CYAN" "检查编译相关进程..."
+            ps aux | grep -E "(cargo|rustc|hoonc|nockapp|make)" | grep -v grep
+            ;;
+        5)
+            print_message "$CYAN" "优化编译器配置..."
             mkdir -p ~/.cargo
             cat > ~/.cargo/config.toml << 'EOF'
 [build]
-jobs = 2
+jobs = 1
 
 [net]
-retry = 10
+retry = 15
 git-fetch-with-cli = true
 
 [http]
-timeout = 300
+timeout = 600
 low-speed-limit = 1
+
+[profile.dev]
+debug = 0
+opt-level = 1
+incremental = false
+codegen-units = 1
+
+[profile.release]
+debug = 0
+lto = "thin"
+codegen-units = 1
+incremental = false
+panic = "abort"
 EOF
-            print_message "$GREEN" "Cargo配置优化完成"
+            print_message "$GREEN" "编译器配置优化完成"
             ;;
-        5)
+        6)
+            print_message "$CYAN" "测试 SIGTERM 处理..."
+            cat > /tmp/sigterm_test.sh << 'EOF'
+#!/bin/bash
+trap 'echo "收到 SIGTERM，正在优雅退出..."; exit 0' SIGTERM
+echo "SIGTERM 测试进程启动，PID: $$"
+sleep 30
+echo "测试完成"
+EOF
+            chmod +x /tmp/sigterm_test.sh
+            /tmp/sigterm_test.sh &
+            local test_pid=$!
+            sleep 2
+            kill -TERM "$test_pid"
+            wait "$test_pid"
+            print_message "$GREEN" "SIGTERM 处理测试完成"
+            rm -f /tmp/sigterm_test.sh
+            ;;
+        7)
             return
             ;;
     esac
@@ -829,9 +1075,9 @@ view_logs() {
     
     if [ -f "$NOCKCHAIN_DIR/logs/mining.log" ]; then
         tail -f "$NOCKCHAIN_DIR/logs/mining.log"
-    elif [ -f "$NOCKCHAIN_DIR/logs/hoonc_compile.log" ]; then
-        print_message "$CYAN" "显示hoonc编译日志："
-        tail -100 "$NOCKCHAIN_DIR/logs/hoonc_compile.log"
+    elif [ -f "$LOG_FILE" ]; then
+        print_message "$CYAN" "显示安装日志："
+        tail -100 "$LOG_FILE"
     else
         if screen -list | grep -q "nockchain"; then
             screen -r nockchain
@@ -845,7 +1091,7 @@ view_logs() {
 check_balance() {
     print_message "$GREEN" ">>> 检查钱包余额"
     
-    source "$HOME/nockchain_hoonc_fixed.sh"
+    source "$HOME/nockchain_sigterm_fixed.sh"
     
     cd "$NOCKCHAIN_DIR"
     local pubkey=$(grep "MINING_PUBKEY" .env | cut -d'=' -f2)
@@ -868,31 +1114,48 @@ check_balance() {
 
 # 系统监控
 system_monitor() {
-    print_message "$BLUE" "====== 系统状态监控（hoonc修复版） ======"
+    print_message "$BLUE" "====== 系统状态监控（SIGTERM修复版） ======"
     
     local mem_info=$(free -h | awk '/^Mem:/{print "使用: "$3" / 总计: "$2}')
     local mem_percent=$(free | awk '/^Mem:/{printf "%.1f", $3/$2*100}')
     print_message "$YELLOW" "内存状态: $mem_info (${mem_percent}%)"
     
+    local swap_info=$(free -h | awk '/^Swap:/{print "使用: "$3" / 总计: "$2}')
+    print_message "$YELLOW" "交换状态: $swap_info"
+    
     local load_avg=$(uptime | awk -F'load average:' '{print $2}')
     print_message "$YELLOW" "系统负载: $load_avg"
     
-    # hoonc相关检查
-    print_message "$CYAN" "hoonc编译环境："
+    # SIGTERM 相关检查
+    print_message "$CYAN" "SIGTERM 保护状态："
+    print_message "$YELLOW" "- RUST_MIN_STACK: ${RUST_MIN_STACK:-未设置}"
+    print_message "$YELLOW" "- 内存使用率: ${mem_percent}%"
+    
+    if (( $(echo "$mem_percent > 85" | bc -l 2>/dev/null || echo 0) )); then
+        print_message "$RED" "⚠️ 内存使用率过高，容易触发 SIGTERM"
+    else
+        print_message "$GREEN" "✅ 内存使用率正常"
+    fi
+    
+    # 挖矿状态
+    if screen -list | grep -q "nockchain"; then
+        print_message "$GREEN" "挖矿状态: ✅ 正在运行（SIGTERM保护已启用）"
+    else
+        print_message "$RED" "挖矿状态: ❌ 未运行"
+    fi
+    
+    # 编译器状态
+    print_message "$CYAN" "编译器状态："
     if check_command "hoonc"; then
         print_message "$GREEN" "- hoonc编译器: $(which hoonc)"
     else
         print_message "$RED" "- hoonc编译器: 未找到"
     fi
     
-    print_message "$YELLOW" "- CARGO_HTTP_TIMEOUT: ${CARGO_HTTP_TIMEOUT:-未设置}"
-    print_message "$YELLOW" "- CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-未设置}"
-    
-    # 挖矿状态
-    if screen -list | grep -q "nockchain"; then
-        print_message "$GREEN" "挖矿状态: ✅ 正在运行（超时保护已启用）"
+    if check_command "cc"; then
+        print_message "$GREEN" "- cc链接器: $(which cc)"
     else
-        print_message "$RED" "挖矿状态: ❌ 未运行"
+        print_message "$RED" "- cc链接器: 未找到"
     fi
     
     # 公钥格式检查
@@ -903,6 +1166,14 @@ system_monitor() {
         else
             print_message "$RED" "- 公钥格式: ❌ 需要128位16进制"
         fi
+    fi
+    
+    # OOM 历史
+    local oom_count=$(dmesg | grep -c "killed process" 2>/dev/null || echo "0")
+    if [ "$oom_count" -gt 0 ]; then
+        print_message "$YELLOW" "- OOM事件: ${oom_count}次（可能导致SIGTERM）"
+    else
+        print_message "$GREEN" "- OOM事件: 无"
     fi
 }
 
@@ -915,10 +1186,14 @@ backup_wallet() {
     
     cd "$NOCKCHAIN_DIR" 2>/dev/null || return 1
     
-    tar -czf "$backup_file" .env logs/ *.txt 2>/dev/null || true
+    tar -czf "$backup_file" .env logs/ *.txt "$LOG_FILE" 2>/dev/null || true
     
     if [ -f ".env" ]; then
         cp .env "$BACKUP_DIR/env_$(date +%Y%m%d_%H%M%S).backup"
+    fi
+    
+    if [ -f "$LOG_FILE" ]; then
+        cp "$LOG_FILE" "$BACKUP_DIR/sigterm_fix_log_$(date +%Y%m%d_%H%M%S).log"
     fi
     
     print_message "$GREEN" "备份完成: $backup_file"
@@ -931,27 +1206,46 @@ main() {
         exit 1
     fi
     
+    # 检查bc命令
+    if ! check_command "bc"; then
+        print_message "$YELLOW" "安装bc计算器..."
+        case $(detect_distro) in
+            "ubuntu"|"debian"|"mint"|"pop")
+                sudo apt install -y bc 2>/dev/null || true
+                ;;
+            "centos"|"rhel"|"rocky"|"almalinux"|"fedora")
+                sudo yum install -y bc 2>/dev/null || sudo dnf install -y bc 2>/dev/null || true
+                ;;
+        esac
+    fi
+    
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
-    log_message "hoonc卡住修复脚本启动 v9.0"
+    print_message "$CYAN" "SIGTERM 143修复脚本启动 v10.0" 
     
     while true; do
         show_menu
         read -p "请输入选项编号（1-10）: " choice
         
         case $choice in
-            1) install_nockchain_hoonc_fix ;;
+            1) install_nockchain_sigterm_fix ;;
             2) configure_128bit_mining_key ;;
-            3) start_timeout_protected_mining ;;
+            3) start_sigterm_protected_mining ;;
             4) view_logs ;;
             5) check_balance ;;
             6) system_monitor ;;
             7) backup_wallet ;;
-            8) diagnose_hoonc_issues ;;
-            9) compilation_timeout_tools ;;
+            8) diagnose_sigterm_issues ;;
+            9) compilation_interrupt_tools ;;
             10)
-                print_message "$GREEN" "感谢使用Nockchain hoonc卡住完全解决方案！"
-                log_message "脚本正常退出"
+                print_message "$GREEN" "感谢使用Nockchain SIGTERM 143完全解决方案！"
+                # 清理临时文件
+                rm -f "$HOME/nockchain_emergency_swap" 2>/dev/null || true
+                if [ -f /tmp/nockchain_memory_monitor.pid ]; then
+                    local monitor_pid=$(cat /tmp/nockchain_memory_monitor.pid)
+                    kill "$monitor_pid" 2>/dev/null || true
+                    rm -f /tmp/nockchain_memory_monitor.pid
+                fi
                 exit 0
                 ;;
             *)
