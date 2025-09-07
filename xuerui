@@ -1,21 +1,52 @@
 #!/bin/bash
 # ==========================================================================================
 # Script Modificato: Gestore Multi-Nodo Nexus
-# Versione: 1.5
-# Correzione Definitiva: Aggiunto e corretto il repository EPEL per installare pacchetti
-#                        come 'screen', garantendo la stabilità della build su CentOS 8 EOL.
+# Versione: 1.6
+# Correzione Definitiva: Aggiunto fix per DNS e repository sulla macchina Host per CentOS 8 EOL.
+#                        Sincronizzata la correzione dei repository tra Host e Dockerfile.
 # Adattato per: CentOS 8
-# Versione Nexus: v0.10.10 (Aggiornato)
+# Versione Nexus: v0.10.10
 # Ottimizzazioni per Prestazioni: Rete Host, Politica di Riavvio, Rotazione dei Log
 # ==========================================================================================
 set -e
 
 BASE_CONTAINER_NAME="nexus-node"
-IMAGE_NAME="nexus-node-centos:v0.10.10-final" # --- AGGIORNATO ---
+IMAGE_NAME="nexus-node-centos:v0.10.10-final"
 LOG_DIR="/root/nexus_logs"
+HOST_FIX_APPLIED=false # Flag per assicurarsi che il fix venga eseguito una sola volta
+
+# --- NUOVA FUNZIONE ---
+# Risolve i problemi di DNS e repository su sistemi CentOS 8 EOL (Host)
+function fix_host_repos_and_dns() {
+    if [ "$HOST_FIX_APPLIED" = true ]; then
+        return
+    fi
+    echo "Applicando la patch per DNS e repository di CentOS 8 sull'host..."
+    
+    # 1. Correzione del DNS
+    echo "Configurazione dei server DNS pubblici (8.8.8.8, 1.1.1.1)..."
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+    # 2. Correzione dei repository di CentOS 8 EOL
+    echo "Reindirizzamento dei repository di CentOS 8 a vault.centos.org..."
+    cd /etc/yum.repos.d/
+    sed -i 's/mirrorlist/#mirrorlist/g' CentOS-*
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' CentOS-*
+    cd - > /dev/null
+    
+    # Pulizia della cache DNF per applicare le modifiche
+    dnf clean all > /dev/null
+
+    echo "Patch dell'host completata."
+    HOST_FIX_APPLIED=true
+}
 
 # 检查 Docker 是否安装 (适配 CentOS)
 function check_docker() {
+    # --- MODIFICA ---: Chiama la funzione di fix prima di usare DNF
+    fix_host_repos_and_dns
+    
     if ! command -v docker >/dev/null 2>&1; then
         echo "检测到未安装 Docker，正在为 CentOS 安装..."
         dnf install -y dnf-utils
@@ -29,6 +60,9 @@ function check_docker() {
 
 # 检查 Node.js/npm/pm2 是否安装 (适配 CentOS)
 function check_pm2() {
+    # --- MODIFICA ---: Chiama la funzione di fix prima di usare DNF
+    fix_host_repos_and_dns
+    
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "检测到未安装 Node.js/npm，正在为 CentOS 安装..."
         dnf module install -y nodejs:18
@@ -68,7 +102,7 @@ RUN dnf install -y epel-release && \
 # Now, install necessary tools from both base and EPEL repos
 RUN dnf install -y curl screen bash && dnf clean all
 
-# --- AGGIORNATO ---: Directly download and install specified version of nexus-network v0.10.10
+# Directly download and install specified version of nexus-network v0.10.10
 RUN curl -L -o /usr/local/bin/nexus-network https://github.com/nexus-xyz/nexus-cli/releases/download/v0.10.10/nexus-network-linux-x86_64 && \
     chmod +x /usr/local/bin/nexus-network
 
@@ -362,7 +396,7 @@ function uninstall_all_nodes() {
 function display_main_menu() {
     clear
     echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie，免费开源，请勿相信收费"
-    echo "经魔改适配CentOS 8，并优化单节点性能 (v1.5 - Final Fix, Nexus v0.10.10)" # --- AGGIORNATO ---
+    echo "经魔改适配CentOS 8，并优化单节点性能 (v1.6 - Host & Docker Fix, Nexus v0.10.10)"
     echo
     echo "======================= 当前节点概览 ======================="
     
