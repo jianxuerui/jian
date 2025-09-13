@@ -1,17 +1,18 @@
 #!/bin/bash
 # ==========================================================================================
 # Script Modificato: Gestore Multi-Nodo Nexus
-# Versione: 1.6
+# Versione: 1.7
 # Correzione Definitiva: Aggiunto fix per DNS e repository sulla macchina Host per CentOS 8 EOL.
 #                        Sincronizzata la correzione dei repository tra Host e Dockerfile.
+# Aggiornamento:         Cambiato l'eseguibile di Nexus alla versione v0.10.11.
 # Adattato per: CentOS 8
-# Versione Nexus: v0.10.10
+# Versione Nexus: v0.10.11
 # Ottimizzazioni per Prestazioni: Rete Host, Politica di Riavvio, Rotazione dei Log
 # ==========================================================================================
 set -e
 
 BASE_CONTAINER_NAME="nexus-node"
-IMAGE_NAME="nexus-node-centos:v0.10.10-final"
+IMAGE_NAME="nexus-node-centos:v0.10.11-final"
 LOG_DIR="/root/nexus_logs"
 HOST_FIX_APPLIED=false # Flag per assicurarsi che il fix venga eseguito una sola volta
 
@@ -102,8 +103,8 @@ RUN dnf install -y epel-release && \
 # Now, install necessary tools from both base and EPEL repos
 RUN dnf install -y curl screen bash && dnf clean all
 
-# Directly download and install specified version of nexus-network v0.10.10
-RUN curl -L -o /usr/local/bin/nexus-network https://github.com/nexus-xyz/nexus-cli/releases/download/v0.10.10/nexus-network-linux-x86_64 && \
+# --- AGGIORNATO ---: Directly download and install specified version of nexus-network v0.10.11
+RUN curl -L -o /usr/local/bin/nexus-network https://github.com/nexus-xyz/nexus-cli/releases/download/v0.10.11/nexus-network-linux-x86_64 && \
     chmod +x /usr/local/bin/nexus-network
 
 # Copy and authorize entrypoint script
@@ -396,7 +397,7 @@ function uninstall_all_nodes() {
 function display_main_menu() {
     clear
     echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie，免费开源，请勿相信收费"
-    echo "经魔改适配CentOS 8，并优化单节点性能 (v1.6 - Host & Docker Fix, Nexus v0.10.10)"
+    echo "经魔改适配CentOS 8，并优化单节点性能 (v1.7 - Nexus v0.10.11 Update)"
     echo
     echo "======================= 当前节点概览 ======================="
     
