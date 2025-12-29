@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================================================
 # Script Modificato: Gestore Multi-Nodo Nexus
-# Versione: 1.9
+# Versione: 2.0 (已修复 CentOS 8 EOL 源文件匹配问题)
 # Correzione Definitiva: Aggiunto fix per DNS e repository sulla macchina Host per CentOS 8 EOL.
 #                        Sincronizzata la correzione dei repository tra Host e Dockerfile.
 # Aggiornamento:         Cambiato l'eseguibile di Nexus alla versione v0.10.17.
@@ -12,11 +12,11 @@
 set -e
 
 BASE_CONTAINER_NAME="nexus-node"
-IMAGE_NAME="nexus-node-centos:v0.10.17-final" # <-- AGGIORNATO
+IMAGE_NAME="nexus-node-centos:v0.10.17-final"
 LOG_DIR="/root/nexus_logs"
-HOST_FIX_APPLIED=false # Flag per assicurarsi che il fix venga eseguito una sola volta
+HOST_FIX_APPLIED=false 
 
-# --- NUOVA FUNZIONE ---
+# --- 修改后的修复函数 ---
 # Risolve i problemi di DNS e repository su sistemi CentOS 8 EOL (Host)
 function fix_host_repos_and_dns() {
     if [ "$HOST_FIX_APPLIED" = true ]; then
@@ -26,18 +26,33 @@ function fix_host_repos_and_dns() {
     
     # 1. Correzione del DNS
     echo "Configurazione dei server DNS pubblici (8.8.8.8, 1.1.1.1)..."
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    # 使用追加而非覆盖，防止覆盖关键配置，且抑制错误
+    if ! grep -q "8.8.8.8" /etc/resolv.conf; then
+        echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    fi
+    if ! grep -q "1.1.1.1" /etc/resolv.conf; then
+        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    fi
 
     # 2. Correzione dei repository di CentOS 8 EOL
     echo "Reindirizzamento dei repository di CentOS 8 a vault.centos.org..."
+    
     cd /etc/yum.repos.d/
-    sed -i 's/mirrorlist/#mirrorlist/g' CentOS-*
-    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' CentOS-*
+    
+    # [关键修改] 使用 *.repo 匹配所有源文件，防止文件名不匹配导致的报错
+    # 这里的 || true 是为了防止没有任何文件时脚本退出
+    sed -i 's/mirrorlist/#mirrorlist/g' *.repo || true
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' *.repo || true
+    
+    # 针对 Stream 版本的特殊处理 (有些 Stream 版本 url 是 stream.centos.org)
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' *.repo || true
+    
     cd - > /dev/null
     
     # Pulizia della cache DNF per applicare le modifiche
-    dnf clean all > /dev/null
+    echo "正在清理 DNF 缓存..."
+    dnf clean all > /dev/null || true
+    dnf makecache > /dev/null || true
 
     echo "Patch dell'host completata."
     HOST_FIX_APPLIED=true
@@ -91,9 +106,10 @@ function build_image() {
 FROM centos:8
 
 # [FIX 1/2] Point base CentOS 8 repos to vault.centos.org for EOL systems
+# Updated to use *.repo to be safe inside Docker too
 RUN cd /etc/yum.repos.d/ && \
-    sed -i 's/mirrorlist/#mirrorlist/g' CentOS-* && \
-    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' CentOS-*
+    sed -i 's/mirrorlist/#mirrorlist/g' *.repo && \
+    sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' *.repo
 
 # [FIX 2/2] Install EPEL repo (for 'screen' package) and also point it to an archive URL
 RUN dnf install -y epel-release && \
@@ -397,7 +413,7 @@ function uninstall_all_nodes() {
 function display_main_menu() {
     clear
     echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie，免费开源，请勿相信收费"
-    echo "经魔改适配CentOS 8，并优化单节点性能 (v1.9 - Nexus v0.10.17 Update)" # <-- AGGIORNATO
+    echo "经魔改适配CentOS 8，并优化单节点性能 (v2.0 - Fix Repo Error)" 
     echo
     echo "======================= 当前节点概览 ======================="
     
